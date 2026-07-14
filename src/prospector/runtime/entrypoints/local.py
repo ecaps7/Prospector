@@ -5,12 +5,15 @@ from __future__ import annotations
 import sys
 import time
 from typing import Annotated
+from uuid import UUID
 
 import typer
 
 from prospector.agents.llm import LlmNotConfiguredError
 from prospector.agents.scope import run_scope, write_research_brief
 from prospector.config import clear_settings_cache, get_settings
+from prospector.flow.research_graph import build_research_graph, thread_config
+from prospector.flow.state import initial_research_state
 from prospector.obs.logging import get_logger, setup_logging
 from prospector.obs.tracing import setup_tracing
 from prospector.runtime.hitl.brief_confirm import (
@@ -19,10 +22,14 @@ from prospector.runtime.hitl.brief_confirm import (
     require_tty,
 )
 from prospector.schemas.brief import EffortLevel, ResearchBrief, ScopeOutcome
-from prospector.store.checkpoint import close_pool, setup_checkpointer
+from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
+from prospector.store.jobs import create_job
 from prospector.store.object_store import ObjectStore
+from prospector.store.repositories import ResearchRepository
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+job_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(job_app, name="job")
 log = get_logger("prospector.local")
 
 
@@ -95,7 +102,7 @@ def ask(
     ] = "standard",
     language: Annotated[str, typer.Option("--language", help="Report language")] = "zh",
 ) -> None:
-    """Run Scope, clarify once if needed, then require Brief confirmation."""
+    """Confirm a Brief, then run the checkpointed Planner-Worker research loop."""
     if effort not in ("quick", "standard", "deep"):
         raise typer.BadParameter("effort must be quick, standard, or deep")
     effort_level: EffortLevel = effort  # type: ignore[assignment]
@@ -147,6 +154,28 @@ def ask(
             revise_once_fn=revise_once,
             echo=lambda msg: typer.echo(msg, err=True),
         )
+        log.info("brief.confirm", result="confirmed", brief_len=len(confirmed.brief_text))
+        _output_separator()
+        typer.echo(format_confirmed_brief(confirmed))
+
+        job_id = create_job()
+        repository = ResearchRepository()
+        brief_id = repository.freeze_brief(job_id, confirmed)
+        typer.echo(f"\nJOB_CREATED: {job_id}", err=True)
+        typer.echo(
+            f"另一个终端可运行：prospector-local job events {job_id} --follow",
+            err=True,
+        )
+        with checkpointer_session() as checkpointer:
+            graph = build_research_graph(checkpointer)
+            result = graph.invoke(
+                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                thread_config(str(job_id)),
+            )
+        typer.echo(
+            f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
+            err=True,
+        )
     except BriefConfirmAborted as exc:
         log.info("brief.confirm", result="aborted", reason=str(exc))
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
@@ -164,9 +193,46 @@ def ask(
         close_pool()
 
     assert confirmed is not None
-    log.info("brief.confirm", result="confirmed", brief_len=len(confirmed.brief_text))
-    _output_separator()
-    typer.echo(format_confirmed_brief(confirmed))
+
+
+def _format_event(event: dict[str, object]) -> str:
+    event_type = str(event["event_type"])
+    payload = event["payload"]
+    prefix = "  " if event_type.startswith("task.") else ""
+    return f"{prefix}{event['id']} {event_type} {payload}"
+
+
+@job_app.command("events")
+def job_events(
+    job_id: Annotated[str, typer.Argument(help="Research job UUID")],
+    follow: Annotated[bool, typer.Option("--follow", help="Poll until research stops")] = False,
+) -> None:
+    """Render the append-only PostgreSQL research timeline."""
+    try:
+        parsed_job_id = UUID(job_id)
+    except ValueError as exc:
+        raise typer.BadParameter("job_id must be a UUID") from exc
+
+    try:
+        _bootstrap()
+        repository = ResearchRepository()
+        last_id = 0
+        while True:
+            rows = repository.list_events(parsed_job_id)
+            fresh = [row for row in rows if int(row["id"]) > last_id]
+            for row in fresh:
+                typer.echo(_format_event(row))
+                last_id = int(row["id"])
+            terminal = any(
+                row["event_type"] == "job.phase_changed"
+                and row["payload"].get("phase") in {"verifier_pending", "failed"}
+                for row in rows
+            )
+            if not follow or terminal:
+                break
+            time.sleep(0.5)
+    finally:
+        close_pool()
 
 
 def main() -> None:

@@ -1,30 +1,47 @@
-"""Serializable graph state for the M0 empty/probe flow."""
+"""Serializable state for the bounded Planner-Worker research graph."""
 
 from __future__ import annotations
 
 import json
-import operator
-from typing import Annotated, TypedDict
+from typing import Any, Literal, TypedDict
 
 
-class EmptyFlowState(TypedDict):
+class ResearchState(TypedDict):
     job_id: str
-    step: int
-    notes: Annotated[list[str], operator.add]
+    phase: str
+    brief_id: str
+    plan_version: int
+    decision_round: int
+    decision_round_limit: int
+    max_concurrency: int
+    max_tool_calls: int
+    active_task_ids: list[str]
+    last_verifier_run_id: str | None
+    outcome: str | None
+    error_code: str | None
+    planner_messages: list[dict[str, Any]]
+    route: Literal["planner", "workers", "end"]
 
 
-def empty_flow_state_roundtrip(state: EmptyFlowState) -> EmptyFlowState:
-    """Prove JSON round-trip (D7 serializability discipline)."""
-    raw = json.dumps(
-        {
-            "job_id": state["job_id"],
-            "step": state["step"],
-            "notes": list(state["notes"]),
-        }
-    )
-    loaded = json.loads(raw)
-    return EmptyFlowState(
-        job_id=loaded["job_id"],
-        step=loaded["step"],
-        notes=loaded["notes"],
-    )
+def research_state_roundtrip(state: ResearchState) -> ResearchState:
+    """Assert that checkpoint state contains only JSON-serializable values."""
+    return ResearchState(**json.loads(json.dumps(state, ensure_ascii=False)))
+
+
+def initial_research_state(*, job_id: str, brief_id: str) -> ResearchState:
+    return {
+        "job_id": job_id,
+        "phase": "initialize",
+        "brief_id": brief_id,
+        "plan_version": 0,
+        "decision_round": 0,
+        "decision_round_limit": 0,
+        "max_concurrency": 0,
+        "max_tool_calls": 0,
+        "active_task_ids": [],
+        "last_verifier_run_id": None,
+        "outcome": None,
+        "error_code": None,
+        "planner_messages": [],
+        "route": "planner",
+    }

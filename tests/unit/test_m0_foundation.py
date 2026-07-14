@@ -13,7 +13,7 @@ from prospector.config import (
     Settings,
     clear_settings_cache,
 )
-from prospector.flow.state import EmptyFlowState, empty_flow_state_roundtrip
+from prospector.flow.state import initial_research_state, research_state_roundtrip
 from prospector.obs.logging import bind_job_id, setup_logging
 from prospector.obs.tracing import current_trace_context, setup_tracing
 from prospector.store.object_store import workspace_key
@@ -44,13 +44,13 @@ def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.user_id == DEFAULT_USER_ID
 
 
-def test_empty_flow_state_json_roundtrip() -> None:
-    state: EmptyFlowState = {
-        "job_id": "11111111-1111-4111-8111-111111111111",
-        "step": 2,
-        "notes": ["step_a", "step_b"],
-    }
-    assert empty_flow_state_roundtrip(state) == state
+def test_research_state_json_roundtrip() -> None:
+    state = initial_research_state(
+        job_id="11111111-1111-4111-8111-111111111111",
+        brief_id="22222222-2222-4222-8222-222222222222",
+    )
+    state["planner_messages"] = [{"role": "system", "content": "研究"}]
+    assert research_state_roundtrip(state) == state
 
 
 def test_workspace_key_prefix() -> None:

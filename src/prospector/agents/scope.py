@@ -74,6 +74,7 @@ def _chat_json(
             temperature=0.0,
             messages=messages,
             response_format={"type": "json_object"},
+            extra_body={"enable_thinking": False},
         )
     except Exception:
         log.debug("llm.call.json_object_fallback", label=label, model=model)
@@ -81,6 +82,7 @@ def _chat_json(
             model=model,
             temperature=0.0,
             messages=messages,
+            extra_body={"enable_thinking": False},
         )
     content = response.choices[0].message.content
     if not content:

@@ -13,3 +13,4 @@ __all__ = [
     "ResearchBrief",
     "ScopeOutcome",
 ]
+"""Serializable business contracts."""

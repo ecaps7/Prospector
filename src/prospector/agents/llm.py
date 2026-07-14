@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from prospector.config import Settings, get_settings
 
@@ -29,6 +29,20 @@ def get_openai_client(settings: Settings | None = None) -> OpenAI:
     )
 
 
+def get_async_openai_client(settings: Settings | None = None) -> AsyncOpenAI:
+    cfg = require_llm_settings(settings)
+    return AsyncOpenAI(
+        base_url=cfg.prospector_llm_base_url.rstrip("/"),
+        api_key=cfg.prospector_llm_api_key,
+        timeout=120.0,
+    )
+
+
 def mid_model(settings: Settings | None = None) -> str:
     cfg = require_llm_settings(settings)
     return cfg.prospector_llm_model_mid
+
+
+def strong_model(settings: Settings | None = None) -> str:
+    cfg = require_llm_settings(settings)
+    return cfg.prospector_llm_model_strong

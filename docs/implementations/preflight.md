@@ -1,10 +1,10 @@
 # Prospector 开工确认清单（Preflight）
 
-- **版本**：1.1
+- **版本**：1.2
 - **日期**：2026-07-12
-- **状态**：已确认（实现前锁定；v1.1 修订搜索与抓取选型，见 §4.2 与确认记录第 11 轮）
+- **状态**：已确认
 - **依据**：[路线图](./roadmap.md)、[设计文档](../design.md)、[CLI 文档](../cli.md)、[评测文档](../eval.md)
-- **用途**：记录实现开始前已拍板的工程与供应商选择。设计 ADR（D1–D10）与里程碑顺序不在此重复；本文件只补「设计写了品类、实现必须钉死实例」的部分。
+- **用途**：记录实现开始前已拍板的工程与供应商选择。设计决策 D1–D12 与里程碑顺序不在此重复；本文件只补「设计写了品类、实现必须钉死实例」的部分。
 
 变更本文件中的锁定项时，应同步评估对 M0 基座与既有 schema 的影响。
 
@@ -40,7 +40,7 @@
 | CI | **GitHub Actions** |
 | CI 门禁 | 强制：`ruff check` + `ruff format --check` + basedpyright + **unit** + **compose integration** |
 | Integration 范围 | 真依赖：PostgreSQL、MinIO、LangGraph PG checkpointer。**M0**：无外部 LLM/搜索 API 调用点。**M1 起**：里程碑验收集成测试**允许**真实 LLM/搜索 API（`@pytest.mark.live`）；默认 CI 跑 `integration and not live`，缺密钥时 live **skip** 而非 fail（详见 [m1.md](./m1.md) §11） |
-| Unit vs Integration | Unit：纯逻辑（schema、哈希、预算水位、权威链检查等）；Integration：跨模块行为与里程碑验收（如 checkpoint 杀进程续跑；M1+ 含 live E2E） |
+| Unit vs Integration | Unit：纯逻辑（schema、哈希、三项预算硬闸、质量门、权威链检查等）；Integration：跨模块行为与里程碑验收（如 checkpoint 杀进程续跑；M1+ 含 live E2E） |
 
 ---
 
@@ -54,7 +54,7 @@
 | MinIO（S3 兼容） | ✅ | Document 快照等对象存储 |
 | OTel Collector | 可选 | 默认可只用进程内 **console exporter** |
 | Tempo / Loki / Grafana | ❌ | 生产目标架构（设计 §10）；非 M0 必需。Tempo↔Loki 跳转等在 **M4** 验收 |
-| Redis | ❌ | **M4** 再装（SSE Stream / 预算计数 / debug flag） |
+| Redis | ❌ | **M4** 再装（SSE Stream / debug flag） |
 | RabbitMQ | ❌ | **M4** 再装（三队列） |
 
 ### 3.2 观测硬约束（能力必须，后端可后接）
@@ -84,9 +84,9 @@
 
 | 项 | 确认 |
 |----|------|
-| 搜索与内容检索 | **Exa**（search 发现 URL；`/contents` 取整页 `text`）。原为 Tavily + 自建 HTTP + trafilatura，见 [m1.md](./m1.md) v1.2 |
+| 搜索与内容检索 | **Exa**（search 发现 URL；`/contents` 取整页 `text`），合同见 [m1.md](./m1.md) §7.1 |
 | 正文 | **必须**取整页文本并写入 Document 快照（权威链需要完整原文，不只靠搜索 snippet）；由 `/contents` 的 `text` 承担 |
-| 摘录 | Worker 对快照**按段号选取**（`find_segments` / `read_segments` / `select_excerpts`）；不再用 Exa highlights 字符串锚定（[m1.md](./m1.md) v1.3） |
+| 摘录 | Worker 通过 `save_findings` 提交段号与断言；工具内部调用确定性 `select_excerpts` 从快照取原文并原子写入 Excerpt + Assertion。`select_excerpts` 不注册为 Worker 工具 |
 | 快照形态 | 抽取后的 **纯文本 / Markdown**（便于切段、哈希与 `char_span`） |
 | 无头浏览器 | **不实现**；JS 动态页拉不到正文时按「工具受阻」停止条件处理 |
 | 配置 | 密钥仅环境变量 |
@@ -128,13 +128,12 @@
 | 端到端 RL | 不做（D6） |
 | 拆多包 workspace | 暂不；真需独立分发 CLI 时再拆 |
 | M1–M2 昂贵评测（题库跑批 / LLM-as-judge） | 不做；定量门槛自 M3 起 |
-| CLI `--web` 打开服务端渲染页 | 开放问题，待 M3 评估看板后定 |
 
 ---
 
 ## 7. 环境变量清单（首版）
 
-名称可在实现时微调，但语义锁定如下：
+环境变量名称与语义锁定如下：
 
 | 变量 | 用途 |
 |------|------|
@@ -144,7 +143,7 @@
 | `PROSPECTOR_LLM_API_KEY` | LLM 密钥 |
 | `PROSPECTOR_LLM_MODEL_STRONG` | 默认 `qwen3.7-max` |
 | `PROSPECTOR_LLM_MODEL_MID` | 默认 `qwen3.7-plus` |
-| `EXA_API_KEY` | 搜索与网页内容检索（v1.1 起；原 `TAVILY_API_KEY`） |
+| `EXA_API_KEY` | 搜索与网页内容检索 |
 | `DATABASE_URL` | PostgreSQL（含或另配 search_path / schema） |
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_BUCKET` | MinIO / S3 兼容存储 |
 | `PAGEINDEX_ROOT` | 自托管 PageIndex 根目录（M2 起强制） |
@@ -165,19 +164,18 @@
 
 ---
 
-## 9. 确认记录
+## 9. 已锁定事项汇总
 
-| 轮次 | 主题 | 结论 |
-|------|------|------|
-| 1 | 语言与布局 | 3.13 + uv + src + 同包 |
-| 2 | 质量工具链 | ruff + basedpyright + pytest；CI 强制 unit + compose integration（默认不含 live）；M1+ live 验收允许真实 LLM/Exa |
-| 3 | Compose / 观测 | PG + MinIO；观测 console（可选 Collector）；Redis/MQ → M4 |
-| 4 | LLM | OpenAI-compatible；max/plus；官方 SDK；环境变量 |
-| 5 | 搜索与抓取 | Tavily；必须正文快照（文本/MD）；无浏览器（已被第 11 轮取代） |
-| 6 | 鉴权 | 固定 token + 假租户至 M4 + `~/.prospector/` |
-| 7 | ID / schema | UUID + SHA-256 + Pydantic v2 + UTC；Alembic 分 `app` / `langgraph` |
-| 8 | PageIndex | 自托管本地仓 + MCP 三原语适配；`PAGEINDEX_ROOT`；M2 强制 |
-| 9 | CI | GitHub Actions；compose；默认 `not live`；M1+ live 可选/本地；`PAGEINDEX_ROOT` M2 起强制 |
-| 10 | 语言与快照 | 默认 `zh`；网页快照为抽取文本/Markdown |
-| 11 | 搜索与抓取修订 | Exa（search + `/contents`）取代第 5 轮的 Tavily + 自建 HTTP/trafilatura；`EXA_API_KEY` 取代 `TAVILY_API_KEY`。依据 [m1.md](./m1.md) v1.2 / 设计文档 v3.10 |
-| 12 | 摘录与预算 | 摘录改为快照分段按引用选取（废止 highlights 锚定）；Task 预算取 Brief；Worker 执行 `allowed_tools`。依据 [m1.md](./m1.md) v1.3–v1.4 |
+| 主题 | 当前结论 |
+|------|----------|
+| 语言与布局 | Python 3.13、uv、`src/`、单仓库单包 |
+| 质量工具链 | ruff、basedpyright、pytest、GitHub Actions；默认 CI 不运行 live 测试 |
+| 基础依赖 | M0–M3 使用 PostgreSQL + MinIO；Redis/RabbitMQ 到 M4 引入 |
+| LLM | OpenAI-compatible 协议、官方 SDK、strong/mid 两档环境变量 |
+| 搜索与抓取 | Exa search + `/contents`；正文快照必须落对象存储；不实现无头浏览器 |
+| 落证 | Worker 工具面为 `web_search`、`web_fetch`、`save_findings`；`select_excerpts` 是内部确定性原语 |
+| 预算 | Brief 只携带 `effort`；运行时映射并注入 Planner 决策轮、每轮并发和每 Worker `max_tool_calls` |
+| 鉴权 | M0–M3 固定 token + 假租户；真多租户到 M4 |
+| ID 与 schema | UUID、SHA-256、Pydantic v2、UTC；Alembic 分 `app` / `langgraph` |
+| PageIndex | 自托管外部依赖，M2 通过三原语适配，`PAGEINDEX_ROOT` 从 M2 起强制 |
+| 默认输出 | Brief `language=zh`；网页快照为纯文本或 Markdown |
