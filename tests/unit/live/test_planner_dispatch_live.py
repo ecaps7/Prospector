@@ -3,6 +3,8 @@
 Tests how the Planner decomposes a ResearchBrief into worker tasks.
 """
 
+# ruff: noqa: E501 -- the fixture preserves a natural-language Brief verbatim.
+
 from __future__ import annotations
 
 import json
@@ -96,11 +98,9 @@ def test_planner_dispatch_from_brief() -> None:
     print(f"Brief effort   : {BRIEF.effort}")
     print(f"Brief language : {BRIEF.language}")
     print(f"Brief 正文     :\n{BRIEF.brief_text}")
-    print(
-        f"\n运行时预算: 决策轮上限={limits.decision_round_limit}, "
-        f"并发上限={limits.max_concurrency}, "
-        f"每 Worker 工具调用上限={limits.max_tool_calls}"
-    )
+    print(f"\n运行时预算: 决策轮上限={limits.decision_round_limit}")
+    for stage, budget in limits.stages.items():
+        print(f"  {stage}: 并发={budget.max_concurrency}, 决策轮={budget.max_worker_rounds}")
 
     result = model.decide(messages)
     decision = result.decision
@@ -115,6 +115,7 @@ def test_planner_dispatch_from_brief() -> None:
         print(f"\n共派发 {len(dispatch.tasks)} 个 worker 任务:\n")
         for idx, task in enumerate(dispatch.tasks, start=1):
             print(f"--- Task {idx} ---")
+            print(f"  subjects            : {task.subjects}")
             print(f"  research_stage      : {task.research_stage}")
             print(f"  research_mode       : {task.research_mode}")
             print(f"  question            : {task.question}")

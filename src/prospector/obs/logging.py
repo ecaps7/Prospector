@@ -148,13 +148,9 @@ class _ProspectorRenderer:
         # Pick icon: map event name to a known stage, fallback to level-based icon.
         icon = _STAGE_ICONS.get(event, "")
         if not icon:
-            icon = {"debug": "·", "warning": "!", "error": "✗", "critical": "✗"}.get(
-                level, "·"
-            )
+            icon = {"debug": "·", "warning": "!", "error": "✗", "critical": "✗"}.get(level, "·")
 
-        kvs = "  ".join(
-            _format_kv(k, v, color=self._colors) for k, v in event_dict.items()
-        )
+        kvs = "  ".join(_format_kv(k, v, color=self._colors) for k, v in event_dict.items())
         prefix = f"[prospector] {icon} {event:<22s}"
         line = f"{prefix}| {kvs}" if kvs else prefix
 

@@ -6,44 +6,58 @@ import asyncio
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from prospector.deterministic.segment import select_excerpts
 from prospector.schemas.evidence import FindingInput
-from prospector.store.object_store import ObjectStore
 from prospector.store.repositories import ResearchRepository
 from prospector.tools.base import ToolContext
 
 
 class SaveFindingsArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     doc_id: UUID
+    view_id: UUID
     findings: list[FindingInput] = Field(..., min_length=1)
 
 
 class SaveFindingsTool:
     name = "save_findings"
 
-    def __init__(
-        self,
-        repository: ResearchRepository,
-        object_store: ObjectStore | None = None,
-    ) -> None:
+    def __init__(self, repository: ResearchRepository) -> None:
         self.repository = repository
-        self.object_store = object_store or ObjectStore(repository.settings)
 
     async def __call__(self, arguments: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         parsed = SaveFindingsArguments.model_validate(arguments)
         document = await asyncio.to_thread(self.repository.get_document, parsed.doc_id)
-        prefix = f"s3://{self.object_store.bucket}/"
-        if not document.storage_ref.startswith(prefix):
-            raise ValueError("document storage_ref does not belong to configured object store")
-        key = document.storage_ref[len(prefix) :]
-        raw = await asyncio.to_thread(self.object_store.get_bytes, key)
-        full_text = raw.decode("utf-8")
+        view = await asyncio.to_thread(self.repository.get_document_view, parsed.view_id)
+        if view.job_id != context.job_id or view.task_id != context.task_id:
+            raise ValueError("document view does not belong to the current task")
+        if view.doc_id != document.doc_id or view.doc_version != document.version:
+            raise ValueError("document view does not match the requested document version")
+
+        allowed_ids = {source_id for item in view.items for source_id in item.source_ids}
+        requested_ids = {
+            source_id for finding in parsed.findings for source_id in finding.source_ids
+        }
+        unknown_ids = sorted(requested_ids - allowed_ids)
+        if unknown_ids:
+            raise ValueError(f"source ids are not present in document view: {unknown_ids}")
+
+        selected: list[tuple[FindingInput, str, dict[str, object]]]
+        highlights = {source_id: item.text for item in view.items for source_id in item.source_ids}
         selected = [
-            (finding, excerpt, locator)
+            (
+                finding,
+                highlights[source_id],
+                {
+                    "kind": "exa_highlight",
+                    "view_id": str(view.view_id),
+                    "highlight_id": source_id,
+                },
+            )
             for finding in parsed.findings
-            for excerpt, locator in select_excerpts(full_text, finding.para_ids)
+            for source_id in finding.source_ids
         ]
         assertions, inserted = await asyncio.to_thread(
             self.repository.save_findings,
@@ -64,7 +78,10 @@ SAVE_FINDINGS_SCHEMA = {
     "type": "function",
     "function": {
         "name": "save_findings",
-        "description": "Persist exact source paragraphs and bind them to assertions atomically.",
+        "description": (
+            "Persist source items from one web_fetch view and bind them to assertions atomically."
+        ),
         "parameters": SaveFindingsArguments.model_json_schema(),
+        "strict": True,
     },
 }

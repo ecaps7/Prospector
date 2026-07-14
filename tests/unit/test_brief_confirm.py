@@ -53,11 +53,7 @@ def test_format_brief_card_wraps_long_lines_with_borders() -> None:
         _sample_brief(question=long_text, brief_text=long_text),
         width=60,
     )
-    box_rows = [
-        line
-        for line in card.splitlines()
-        if line.startswith(("┌", "│", "└"))
-    ]
+    box_rows = [line for line in card.splitlines() if line.startswith(("┌", "│", "└"))]
     assert box_rows
     widths = {_display_width(line) for line in box_rows}
     assert widths == {60}, f"inconsistent display widths: {widths}"

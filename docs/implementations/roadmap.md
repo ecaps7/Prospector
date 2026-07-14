@@ -39,7 +39,7 @@ M1 是一个整体里程碑。工程上可以按依赖顺序推进，但不存�
 1. **先锁定不可逆数据，再接控制流**：首次抓取起就保存 Document 快照和精确 Excerpt；checkpoint 从 M0 起常开。
 2. **研究主图一次成形**：M1 合并主干只接受 Planner 决策环、并行 Worker、Verifier/Replan、Claim 验证和成文审计组成的完整图。
 3. **执行承诺只来自 Plan**：Brief 负责展开研究空间；Planner 负责取舍并形成版本化 Plan；Verifier 对照 Plan 检查履约，并以 Brief 检查偏题。
-4. **预算与质量分离**：`effort` 只映射 Planner 决策轮、每轮并发数、每 Worker 工具次数；token 和累计工具调用只计量。停止研究不能绕过质量门。
+4. **预算与质量分离**：`effort` 映射 Planner 决策轮，以及各研究阶段的并发数与 Worker 决策轮；工具调用总数、token 和累计工具调用只计量。停止研究不能绕过质量门。
 5. **验收必须可度量**：M1–M2 使用机器检查和行为测试；M3 建成人工真值集后才启用定量质量门禁。
 6. **运行时后置**：先验证单机研究逻辑，再在 M4 引入多进程、队列和多用户调度。
 
@@ -102,21 +102,23 @@ runtime / cli
 
 实现设计：[m1.md](./m1.md)
 
-当前已完成 Scope、Research Brief schema 与 interactive HITL；当前实现边界是 Planner-Worker。M1 最终交付仍按完整主图统一验收。
+当前已完成 Brief 生成、interactive HITL 与 Planner-Worker，研究图可从冻结 Brief 运行到 `verifier_pending`。Verifier/Replan 与成文链是下一实现边界；M1 最终交付仍按完整主图统一验收。
 
 交付：
 
 1. interactive 与 brief-direct 产生同一 Research Brief 输入快照并进入同一主图。
 2. Planner 每轮强制输出 `dispatch`、`reflect` 或 `finish`，记录决策日志并生成版本化 Plan。
-3. 运行时按 `Brief.effort` 注入三项结构性限制：
+3. 运行时按 `Brief.effort + ResearchTask.research_stage` 注入结构性限制：
 
-   | effort | Planner 决策轮 | 每轮并发 | 每 Worker 工具次数 |
-   |--------|---------------:|---------:|--------------------:|
-   | quick | 3 | 1 | 8 |
-   | standard | 6 | 3 | 15 |
-   | deep | 12 | 4 | 25 |
+   | effort | Planner 决策轮 | scout（并发 / Worker 轮） | deep_dive（并发 / Worker 轮） | verify（并发 / Worker 轮） |
+   |--------|---------------:|----------------------------:|--------------------------------:|---------------------------:|
+   | quick | 8 | 6 / 13 | 3 / 25 | 3 / 13 |
+   | standard | 12 | 6 / 21 | 3 / 49 | 3 / 17 |
+   | deep | 24 | 8 / 25 | 5 / 73 | 5 / 21 |
 
-4. 并行通用 Research Worker 只使用 `web_search`、`web_fetch`、`save_findings`；`select_excerpts` 仅作为内部确定性原语。
+   Worker 工具调用总数不设上限；每个 Worker 决策轮最多并行 8 个独立调用。
+
+4. 并行通用 Research Worker 只使用 `web_search`、`web_fetch`、`save_findings`；所有联网来源统一使用持久化 Exa highlights。
 5. Document 快照、Excerpt、Assertion、Plan、Verifier run、Claim 与报告产物全链路落库。
 6. Verifier 检查 Plan 承诺、Brief 偏题、缺口与冲突；可补缺口在仍有决策预算时回到 Planner 形成新 Plan 版本。
 7. Claim 验证、冲突处置、no-new-facts 审计和确定性引用渲染共同构成质量门。
@@ -140,7 +142,7 @@ flowchart LR
 - 端到端产出带引用报告，Claim→ClaimEvidence→Excerpt→Document 权威链机器校验 100%。
 - 多 Worker 并行不串号；预埋缺口产生 Plan 新版本并补搜。
 - Planner 空手 `finish` 被拒绝；决策轮耗尽且零 Excerpt 直接失败。
-- Worker 按目标满足、连续两轮无新证据、工具次数耗尽或工具受阻停止。
+- Worker 按目标满足、连续两轮无新证据、主动声明证据不可得/受范围限制或决策轮耗尽停止；工具错误回到上下文，不单独触发提前收工。
 - 重大缺口进入失败出口并保存 partial report 与 gap artifact；可披露的信息局限进入报告。
 - 未通过 Claim 验证的事实不进入成文；预算耗尽不改变该规则。
 - CLI 可以提交、跟踪并查看或导出报告。
@@ -178,7 +180,7 @@ flowchart LR
 | checkpoint 常开，图状态只存可序列化数据 | M0 |
 | Document 快照与精确 Excerpt 从首次抓取起不可省略 | M1 |
 | Brief 不是覆盖合同，Plan 才是执行合同 | M1 |
-| Planner 决策轮、每轮并发、每 Worker 工具次数是唯一研究硬闸 | M1 |
+| Planner 决策轮、分阶段并发与分阶段 Worker 决策轮是研究硬闸 | M1 |
 | 停止研究不能绕过 Verifier、Claim 验证或成文审计 | M1 |
 | Computation 必须记录代码、输入血缘和输出 | M2 |
 | 定量忠实率门禁必须以人工真值为依据 | M3 |

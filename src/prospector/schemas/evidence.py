@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SourceRef(BaseModel):
@@ -24,6 +24,23 @@ class Document(BaseModel):
     storage_ref: str
     index_ref: str | None = None
     source_meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceViewItem(BaseModel):
+    item_id: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1)
+    source_ids: list[str] = Field(..., min_length=1)
+
+
+class DocumentView(BaseModel):
+    view_id: UUID
+    job_id: UUID
+    task_id: UUID
+    doc_id: UUID
+    doc_version: int = Field(..., ge=1)
+    view_kind: Literal["exa_highlights"]
+    items: list[SourceViewItem] = Field(..., min_length=1)
+    created_at: datetime
 
 
 class Excerpt(BaseModel):
@@ -45,16 +62,22 @@ class Assertion(BaseModel):
 
 
 class FindingInput(BaseModel):
-    para_ids: list[int] = Field(..., min_length=1)
-    statement: str = Field(..., min_length=1)
-    topic_tags: list[str] = Field(default_factory=list, max_length=12)
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("para_ids")
+    source_ids: list[str] = Field(..., min_length=1)
+    statement: str = Field(..., min_length=1)
+    topic_tags: list[str] = Field(..., max_length=12)
+
+    @field_validator("source_ids")
     @classmethod
-    def _valid_para_ids(cls, values: list[int]) -> list[int]:
-        if any(value < 1 for value in values):
-            raise ValueError("paragraph ids are one-based positive integers")
-        return sorted(set(values))
+    def _valid_source_ids(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(
+            len(value) < 2 or value[0] != "h" or not value[1:].isdigit() or int(value[1:]) < 1
+            for value in cleaned
+        ):
+            raise ValueError("source ids must use positive hN identifiers")
+        return list(dict.fromkeys(cleaned))
 
     @field_validator("statement")
     @classmethod

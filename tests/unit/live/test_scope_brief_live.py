@@ -20,17 +20,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # （医疗生物技术 / 工业生物技术 / 农业生物技术 / 生物安全），
 # Brief 无法同时覆盖各解读方向而不沦为泛泛概述，应触发 clarify 路径。
 # ─────────────────────────────────────────────────────────────────────────────
-SHORT_QUESTION = '帮我研究一下生物技术。'
+SHORT_QUESTION = "帮我研究一下生物技术。"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 长问题：研究对象、目的、输出要求均已明确给出，Scope 应直接产出 Brief，
 # 不应再追问用户。
 # ─────────────────────────────────────────────────────────────────────────────
 LONG_QUESTION = (
-    '随着超大城市（Megacities）的持续扩张，轨道交通等骨干网络已相对完善，'
-    '但连接居民区、商业区与轨道交通站点的\u201c最后一公里\u201d（First/Last Mile）'
-    '微循环交通依然存在严重的效率瓶颈。'
-    '请你研究一下不同的城市对这一问题是如何实践的，并给出你的建议。'
+    "随着超大城市（Megacities）的持续扩张，轨道交通等骨干网络已相对完善，"
+    "但连接居民区、商业区与轨道交通站点的\u201c最后一公里\u201d（First/Last Mile）"
+    "微循环交通依然存在严重的效率瓶颈。"
+    "请你研究一下不同的城市对这一问题是如何实践的，并给出你的建议。"
 )
 
 
@@ -80,9 +80,19 @@ def test_short_question_triggers_clarification() -> None:
     assert any(
         token in q
         for token in (
-            "生物技术", "基因", "合成生物", "农业", "工业",
-            "医疗", "制药", "安全", "方向", "领域",
-            "方面", "关注", "聚焦",
+            "生物技术",
+            "基因",
+            "合成生物",
+            "农业",
+            "工业",
+            "医疗",
+            "制药",
+            "安全",
+            "方向",
+            "领域",
+            "方面",
+            "关注",
+            "聚焦",
         )
     ), f"澄清问题未触及领域辨析：{q!r}"
 
@@ -109,8 +119,7 @@ def test_long_question_yields_brief_directly() -> None:
 
     # 基本字段完整性
     assert len(brief.brief_text) >= 80, (
-        f"brief_text 过短（{len(brief.brief_text)} 字符），"
-        "深度研究 Brief 应充分展开研究空间"
+        f"brief_text 过短（{len(brief.brief_text)} 字符），深度研究 Brief 应充分展开研究空间"
     )
     assert brief.language.startswith("zh"), f"language 应为中文，实际：{brief.language!r}"
     assert brief.effort == "standard", f"effort 应为 standard，实际：{brief.effort!r}"

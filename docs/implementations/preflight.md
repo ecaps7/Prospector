@@ -40,7 +40,7 @@
 | CI | **GitHub Actions** |
 | CI 门禁 | 强制：`ruff check` + `ruff format --check` + basedpyright + **unit** + **compose integration** |
 | Integration 范围 | 真依赖：PostgreSQL、MinIO、LangGraph PG checkpointer。**M0**：无外部 LLM/搜索 API 调用点。**M1 起**：里程碑验收集成测试**允许**真实 LLM/搜索 API（`@pytest.mark.live`）；默认 CI 跑 `integration and not live`，缺密钥时 live **skip** 而非 fail（详见 [m1.md](./m1.md) §11） |
-| Unit vs Integration | Unit：纯逻辑（schema、哈希、三项预算硬闸、质量门、权威链检查等）；Integration：跨模块行为与里程碑验收（如 checkpoint 杀进程续跑；M1+ 含 live E2E） |
+| Unit vs Integration | Unit：纯逻辑（schema、哈希、分阶段预算硬闸、质量门、权威链检查等）；Integration：跨模块行为与里程碑验收（如 checkpoint 杀进程续跑；M1+ 含 live E2E） |
 
 ---
 
@@ -86,8 +86,8 @@
 |----|------|
 | 搜索与内容检索 | **Exa**（search 发现 URL；`/contents` 取整页 `text`），合同见 [m1.md](./m1.md) §7.1 |
 | 正文 | **必须**取整页文本并写入 Document 快照（权威链需要完整原文，不只靠搜索 snippet）；由 `/contents` 的 `text` 承担 |
-| 摘录 | Worker 通过 `save_findings` 提交段号与断言；工具内部调用确定性 `select_excerpts` 从快照取原文并原子写入 Excerpt + Assertion。`select_excerpts` 不注册为 Worker 工具 |
-| 快照形态 | 抽取后的 **纯文本 / Markdown**（便于切段、哈希与 `char_span`） |
+| 摘录 | 普通网页和 PDF 都由 Exa `highlights.query=task.question` 返回任务相关原文片段；Worker 通过 `save_findings` 提交同一 DocumentView 中的 highlight id 与断言，并原子写入 Excerpt + Assertion |
+| 快照形态 | Exa 返回的 **纯文本 / Markdown** 全文（用于内容哈希与权威快照）；Worker 只读取单独持久化的 Exa highlights 视图 |
 | 无头浏览器 | **不实现**；JS 动态页拉不到正文时按「工具受阻」停止条件处理 |
 | 配置 | 密钥仅环境变量 |
 
@@ -173,8 +173,8 @@
 | 基础依赖 | M0–M3 使用 PostgreSQL + MinIO；Redis/RabbitMQ 到 M4 引入 |
 | LLM | OpenAI-compatible 协议、官方 SDK、strong/mid 两档环境变量 |
 | 搜索与抓取 | Exa search + `/contents`；正文快照必须落对象存储；不实现无头浏览器 |
-| 落证 | Worker 工具面为 `web_search`、`web_fetch`、`save_findings`；`select_excerpts` 是内部确定性原语 |
-| 预算 | Brief 只携带 `effort`；运行时映射并注入 Planner 决策轮、每轮并发和每 Worker `max_tool_calls` |
+| 落证 | Worker 工具面为 `web_search`、`web_fetch`、`save_findings`；所有联网来源统一使用持久化 Exa highlights |
+| 预算 | Brief 只携带 `effort`；运行时映射 Planner 决策轮，并按 `research_stage` 注入并发上限与每 Worker `max_worker_rounds`；工具调用总数不设上限 |
 | 鉴权 | M0–M3 固定 token + 假租户；真多租户到 M4 |
 | ID 与 schema | UUID、SHA-256、Pydantic v2、UTC；Alembic 分 `app` / `langgraph` |
 | PageIndex | 自托管外部依赖，M2 通过三原语适配，`PAGEINDEX_ROOT` 从 M2 起强制 |

@@ -6,17 +6,24 @@ import hashlib
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from prospector.config import Settings, get_settings
-from prospector.schemas.brief import ResearchBrief
+from prospector.schemas.brief import EffortLevel, ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.events import EventType
-from prospector.schemas.evidence import Assertion, Document, FindingInput, SourceRef
+from prospector.schemas.evidence import (
+    Assertion,
+    Document,
+    DocumentView,
+    FindingInput,
+    SourceRef,
+    SourceViewItem,
+)
 from prospector.schemas.plan import Plan, ResearchTask
 from prospector.store.database import get_engine
 
@@ -140,6 +147,16 @@ class ResearchRepository:
                 .one()
             )
         return ResearchBrief.model_validate(dict(row))
+
+    def get_job_effort(self, job_id: UUID) -> EffortLevel:
+        with self.engine.connect() as conn:
+            effort = conn.execute(
+                text("SELECT effort FROM app.jobs WHERE id=:job_id"),
+                {"job_id": job_id},
+            ).scalar_one()
+        if effort not in {"quick", "standard", "deep"}:
+            raise ValueError(f"job has invalid effort: {effort!r}")
+        return cast(EffortLevel, effort)
 
     def begin_decision(
         self,
@@ -349,11 +366,12 @@ class ResearchRepository:
                     text(
                         """
                         INSERT INTO app.tasks
-                          (id, job_id, question, research_stage, research_mode,
+                          (id, job_id, question, subjects, research_stage, research_mode,
                            source_policy, allowed_tools, expected_evidence, depends_on, budget,
                            status, created_at)
                         VALUES
-                          (:id, :job_id, :question, :research_stage, :research_mode,
+                          (:id, :job_id, :question, CAST(:subjects AS JSONB),
+                           :research_stage, :research_mode,
                            CAST(:source_policy AS JSONB), CAST(:allowed_tools AS JSONB),
                            :expected_evidence, CAST(:depends_on AS JSONB),
                            CAST(:budget AS JSONB), :status, :created_at)
@@ -363,6 +381,7 @@ class ResearchRepository:
                         "id": task.task_id,
                         "job_id": job_id,
                         "question": task.question,
+                        "subjects": _json(payload["subjects"]),
                         "research_stage": task.research_stage,
                         "research_mode": task.research_mode,
                         "source_policy": _json(payload["source_policy"]),
@@ -430,6 +449,7 @@ class ResearchRepository:
             {
                 "task_id": row["id"],
                 "question": row["question"],
+                "subjects": row["subjects"],
                 "research_stage": row["research_stage"],
                 "research_mode": row["research_mode"],
                 "source_policy": row["source_policy"],
@@ -469,10 +489,11 @@ class ResearchRepository:
         task_id: UUID,
         *,
         stop_reason: str,
-        gap_note: str,
+        finish_reason: str,
         summary: object,
         tool_calls_used: int,
-        tool_calls_limit: int,
+        worker_rounds_used: int,
+        worker_rounds_limit: int,
         error: str | None = None,
     ) -> None:
         status = "failed" if error else "done"
@@ -482,7 +503,8 @@ class ResearchRepository:
                 text(
                     """
                     UPDATE app.tasks
-                    SET status=:status, stop_reason=:stop_reason, gap_note=:gap_note,
+                    SET status=:status, stop_reason=:stop_reason,
+                        finish_reason=:finish_reason,
                         worker_summary=CAST(:summary AS JSONB), tool_calls_used=:tool_calls_used,
                         error=:error, finished_at=:now
                     WHERE id=:task_id
@@ -491,7 +513,7 @@ class ResearchRepository:
                 {
                     "status": status,
                     "stop_reason": stop_reason,
-                    "gap_note": gap_note,
+                    "finish_reason": finish_reason,
                     "summary": _json(summary),
                     "tool_calls_used": tool_calls_used,
                     "error": error,
@@ -507,9 +529,13 @@ class ResearchRepository:
                 payload={
                     "task_id": str(task_id),
                     "stop_reason": stop_reason,
-                    "used": tool_calls_used,
-                    "limit": tool_calls_limit,
+                    "tool_calls_used": tool_calls_used,
+                    "rounds_used": worker_rounds_used,
+                    "rounds_limit": worker_rounds_limit,
                     "assertion_count": assertion_count,
+                    "finish_reason": (
+                        finish_reason.splitlines()[0].strip() if finish_reason else ""
+                    ),
                 },
             )
 
@@ -519,7 +545,8 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                    SELECT status, stop_reason, gap_note, worker_summary, tool_calls_used, error
+                    SELECT status, stop_reason, finish_reason,
+                           worker_summary, tool_calls_used, error
                     FROM app.tasks WHERE id=:task_id
                     """
                     ),
@@ -551,7 +578,7 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                        SELECT COUNT(*) FROM app.events
+                        SELECT COUNT(DISTINCT payload->>'tool_call_id') FROM app.events
                         WHERE task_id=:task_id AND event_type=:event_type
                         """
                     ),
@@ -562,7 +589,7 @@ class ResearchRepository:
                 ).scalar_one()
             )
 
-    def has_task_tool_event(self, task_id: UUID, tool_call_id: str) -> bool:
+    def has_task_tool_error_event(self, task_id: UUID, tool_call_id: str) -> bool:
         with self.engine.connect() as conn:
             return bool(
                 conn.execute(
@@ -572,6 +599,7 @@ class ResearchRepository:
                           SELECT 1 FROM app.events
                           WHERE task_id=:task_id AND event_type=:event_type
                             AND payload->>'tool_call_id'=:tool_call_id
+                            AND payload ? 'error'
                         )
                         """
                     ),
@@ -710,6 +738,81 @@ class ResearchRepository:
                 .one()
             )
         return self._document_from_row(row)
+
+    def update_document_media_type(self, doc_id: UUID, media_type: str) -> Document:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE app.documents SET media_type=:media_type WHERE id=:id"),
+                {"id": doc_id, "media_type": media_type},
+            )
+        return self.get_document(doc_id)
+
+    def save_document_view(
+        self,
+        *,
+        job_id: UUID,
+        task_id: UUID,
+        document: Document,
+        view_kind: Literal["exa_highlights"],
+        items: list[SourceViewItem],
+    ) -> DocumentView:
+        view_id = uuid4()
+        created_at = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.document_views
+                      (id, job_id, task_id, doc_id, doc_version, view_kind, items, created_at)
+                    VALUES
+                      (:id, :job_id, :task_id, :doc_id, :doc_version, :view_kind,
+                       CAST(:items AS JSONB), :created_at)
+                    """
+                ),
+                {
+                    "id": view_id,
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "doc_id": document.doc_id,
+                    "doc_version": document.version,
+                    "view_kind": view_kind,
+                    "items": _json([item.model_dump() for item in items]),
+                    "created_at": created_at,
+                },
+            )
+        return DocumentView(
+            view_id=view_id,
+            job_id=job_id,
+            task_id=task_id,
+            doc_id=document.doc_id,
+            doc_version=document.version,
+            view_kind=view_kind,
+            items=items,
+            created_at=created_at,
+        )
+
+    def get_document_view(self, view_id: UUID) -> DocumentView:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text("SELECT * FROM app.document_views WHERE id=:id"),
+                    {"id": view_id},
+                )
+                .mappings()
+                .one()
+            )
+        return DocumentView.model_validate(
+            {
+                "view_id": row["id"],
+                "job_id": row["job_id"],
+                "task_id": row["task_id"],
+                "doc_id": row["doc_id"],
+                "doc_version": row["doc_version"],
+                "view_kind": row["view_kind"],
+                "items": row["items"],
+                "created_at": row["created_at"],
+            }
+        )
 
     def save_findings(
         self,
@@ -984,5 +1087,30 @@ class ResearchRepository:
                 for row in conn.execute(
                     text("SELECT * FROM app.events WHERE job_id=:job_id ORDER BY id"),
                     {"job_id": job_id},
+                ).mappings()
+            ]
+
+    def latest_event_id(self, job_id: UUID) -> int:
+        with self.engine.connect() as conn:
+            return int(
+                conn.execute(
+                    text("SELECT COALESCE(MAX(id), 0) FROM app.events WHERE job_id=:job_id"),
+                    {"job_id": job_id},
+                ).scalar_one()
+            )
+
+    def list_events_after(self, job_id: UUID, after_id: int) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT * FROM app.events
+                        WHERE job_id=:job_id AND id>:after_id
+                        ORDER BY id
+                        """
+                    ),
+                    {"job_id": job_id, "after_id": after_id},
                 ).mappings()
             ]

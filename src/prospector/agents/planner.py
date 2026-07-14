@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from openai import OpenAI
 from pydantic import ValidationError
 
-from prospector.agents.llm import get_openai_client, strong_model
+from prospector.agents.llm import get_openai_client, mid_model, strong_model
 from prospector.agents.prompts.planner import planner_brief_message, planner_system_prompt
 from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.brief import ResearchBrief
@@ -21,7 +21,7 @@ PlannerMessage = dict[str, Any]
 _FORBIDDEN_RUNTIME_KEYS = {
     "document_text",
     "full_text",
-    "compressed_view",
+    "document_view",
     "worker_messages",
     "worker_trace",
 }
@@ -74,11 +74,15 @@ def append_decision(
     decision_or_raw: object,
 ) -> list[PlannerMessage]:
     updated = copy.deepcopy(messages)
-    payload = (
-        decision_or_raw.model_dump(mode="json")
-        if isinstance(decision_or_raw, PlannerDecision)
-        else decision_or_raw
-    )
+    if isinstance(decision_or_raw, PlannerDecision):
+        selected = getattr(decision_or_raw, decision_or_raw.decision)
+        assert selected is not None
+        payload: object = {
+            "decision": decision_or_raw.decision,
+            decision_or_raw.decision: selected.model_dump(mode="json"),
+        }
+    else:
+        payload = decision_or_raw
     updated.append(
         {"role": "assistant", "content": json.dumps(payload, ensure_ascii=False, default=str)}
     )
@@ -96,7 +100,7 @@ def append_runtime_feedback(
         "rejection",
         "schema_error",
         "verifier_gap",
-        "budget",
+        "research_state",
         "reflection_recorded",
     }
     if feedback_type not in allowed:
@@ -118,62 +122,96 @@ def append_runtime_feedback(
     return updated
 
 
-def _coerce_stringified_fields(value: object) -> object:
-    """Recursively parse string values that look like JSON objects/arrays.
+def _strip_code_fences(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[: -len("```")]
+    return stripped.strip()
 
-    Some providers (e.g. QianwenAI with strict=True) return nested object fields
-    as JSON-encoded strings instead of inline objects. This helper normalises them.
-    """
-    if isinstance(value, dict):
-        return {k: _coerce_stringified_fields(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_coerce_stringified_fields(v) for v in value]
-    if isinstance(value, str) and len(value) > 1 and value[0] in "{[":
-        try:
-            return _coerce_stringified_fields(json.loads(value))
-        except json.JSONDecodeError:
-            return value
-    return value
+
+def _repair_prompt(broken_output: str) -> str:
+    schema = json.dumps(PlannerDecision.model_json_schema(), ensure_ascii=False)
+    return f"""下面是一段本应为合法 JSON 的模型输出，但解析或校验失败。
+请把它修复为符合 JSON Schema 的单个 JSON 对象后输出。
+只允许修复语法和结构（引号、逗号、字段名、包裹层级、去除多余文本），
+不得增删任务、改写研究内容或补充新事实。
+
+JSON Schema：
+{schema}
+
+待修复输出：
+{broken_output}
+
+只输出修复后的 JSON 对象，不要任何其他文本。"""
 
 
 class OpenAIPlannerModel:
-    tool_name = "submit_planner_decision"
+    """Deep-thinking Planner.
 
-    def __init__(self, client: OpenAI | None = None, model: str | None = None) -> None:
+    结构化输出与深度思考模式互斥（见供应商文档"深度思考模式下的替代方案"）：
+    深度思考必须以 stream=True 调用且不能设置 response_format / strict 工具，
+    因此这里流式收集正文并解析 JSON；解析失败时按文档建议用轻量模型
+    （response_format=json_object，关闭思考）修复一次，仍失败才抛 PlannerOutputError。
+    """
+
+    def __init__(
+        self,
+        client: OpenAI | None = None,
+        model: str | None = None,
+        repair_model: str | None = None,
+    ) -> None:
         self.client = client or get_openai_client()
         self.model = model or strong_model()
+        self.repair_model = repair_model or mid_model()
 
-    def decide(self, messages: list[PlannerMessage]) -> PlannerModelResult:
-        response = self.client.chat.completions.create(
+    def _stream_content(self, messages: list[PlannerMessage]) -> str:
+        stream = self.client.chat.completions.create(
             model=self.model,
             temperature=0.0,
             messages=messages,  # type: ignore[arg-type]
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": self.tool_name,
-                        "description": "Submit exactly one Planner decision.",
-                        "parameters": PlannerDecision.model_json_schema(),
-                        "strict": True,
-                    },
-                }
-            ],
-            tool_choice={"type": "function", "function": {"name": self.tool_name}},
-            parallel_tool_calls=False,
+            stream=True,
+            extra_body={"enable_thinking": True},
+        )
+        parts: list[str] = []
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            text = getattr(delta, "content", None)
+            if text:
+                parts.append(text)
+        return "".join(parts)
+
+    def _repair_content(self, broken_output: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.repair_model,
+            temperature=0.0,
+            messages=[{"role": "user", "content": _repair_prompt(broken_output)}],
+            response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
-        message = response.choices[0].message
-        tool_calls = message.tool_calls or []
-        raw: object = message.model_dump(mode="json")
-        call = tool_calls[0] if len(tool_calls) == 1 else None
-        function = getattr(call, "function", None)
-        if function is None or function.name != self.tool_name:
-            raise PlannerOutputError("Planner must make exactly one forced decision tool call", raw)
-        arguments = function.arguments
+        return response.choices[0].message.content or ""
+
+    @staticmethod
+    def _parse_decision(content: str) -> PlannerDecision:
+        return PlannerDecision.model_validate(json.loads(_strip_code_fences(content)))
+
+    def decide(self, messages: list[PlannerMessage]) -> PlannerModelResult:
+        content = self._stream_content(messages)
+        raw: object = {"role": "assistant", "content": content}
+        if not content.strip():
+            raise PlannerOutputError("Planner returned empty content", raw)
         try:
-            parsed = _coerce_stringified_fields(json.loads(arguments))
-            decision = PlannerDecision.model_validate(parsed)
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            raise PlannerOutputError(f"invalid Planner decision: {exc}", raw) from exc
+            decision = self._parse_decision(content)
+        except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as first_error:
+            repaired = self._repair_content(content)
+            raw = {"role": "assistant", "content": content, "repaired_content": repaired}
+            try:
+                decision = self._parse_decision(repaired)
+            except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise PlannerOutputError(
+                    f"invalid Planner decision: {first_error}; repair failed: {exc}", raw
+                ) from exc
         return PlannerModelResult(raw_output=raw, decision=decision)

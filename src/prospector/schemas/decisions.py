@@ -11,15 +11,36 @@ from prospector.schemas.plan import ResearchTaskDraft
 
 class DispatchDecision(BaseModel):
     tasks: list[ResearchTaskDraft] = Field(..., min_length=1)
-    reason: str = Field(..., min_length=1, max_length=1200)
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=1200,
+        description="一两句极短中文：本轮为何继续、为何派这些任务",
+    )
+
+    @model_validator(mode="after")
+    def _single_research_stage(self) -> DispatchDecision:
+        if len({task.research_stage for task in self.tasks}) != 1:
+            raise ValueError("all tasks in one dispatch must use the same research_stage")
+        return self
 
 
 class ReflectDecision(BaseModel):
-    note: str = Field(..., min_length=1, max_length=2000)
+    note: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="一两句极短中文：策略调整理由",
+    )
 
 
 class FinishDecision(BaseModel):
-    reason: str = Field(..., min_length=1, max_length=1200)
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=1200,
+        description="一两句极短中文：为何可以结束研究并交给 Verifier",
+    )
 
 
 class PlannerDecision(BaseModel):

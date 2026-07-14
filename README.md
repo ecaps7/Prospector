@@ -5,8 +5,8 @@ Prospector 是一个可控、可审计、可恢复的深度研究智能体。系
 ## 当前实现状态
 
 - M0 工程基座已完成：PostgreSQL checkpointer、Alembic、MinIO、日志、trace 与 CI。
-- M1 已完成 Scope、Research Brief schema 和 interactive HITL。
-- 当前实现边界是 Planner-Worker；完整研究主图仍在实施中。
+- M1 已完成 Brief 生成、interactive HITL 和 Planner-Worker 研究链。
+- 当前主图从冻结 Brief 运行到 `verifier_pending`；Verifier/Replan 与成文链仍在实施中。
 
 ## 本地运行
 
@@ -19,7 +19,13 @@ uv run --env-file .env prospector-local setup
 uv run --env-file .env prospector-local ask "研究一个需要多侧面检索的问题" --effort standard --language zh
 ```
 
-`ask` 当前执行：问题输入 → 最多一轮澄清 → Brief 生成 → `c/e/i/q` 确认。Planner-Worker 完成后，同一命令会从冻结 Brief 继续进入完整研究主图。
+`ask` 当前执行：问题输入 → 最多一轮澄清 → Brief 生成 → `c/e/i/q` 确认 → Planner-Worker 研究。确认后，同一终端会按 PostgreSQL 事件账本实时显示 Planner 派发、Worker 搜索/抓取/落证与收工状态；当前研究终点是 `verifier_pending`。
+
+已创建的 Job 可随时回放或继续跟随同一条人类可读时间线：
+
+```bash
+uv run --env-file .env prospector-local job events <job-id> --follow
+```
 
 ## 测试
 

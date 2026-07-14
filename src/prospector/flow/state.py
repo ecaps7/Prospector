@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, TypedDict
 
+from prospector.schemas.plan import ResearchStage
+
 
 class ResearchState(TypedDict):
     job_id: str
     phase: str
+    current_research_stage: ResearchStage
     brief_id: str
     plan_version: int
     decision_round: int
     decision_round_limit: int
-    max_concurrency: int
-    max_tool_calls: int
+    stage_budgets: dict[str, dict[str, int]]
     active_task_ids: list[str]
     last_verifier_run_id: str | None
     outcome: str | None
@@ -32,12 +34,12 @@ def initial_research_state(*, job_id: str, brief_id: str) -> ResearchState:
     return {
         "job_id": job_id,
         "phase": "initialize",
+        "current_research_stage": "scout",
         "brief_id": brief_id,
         "plan_version": 0,
         "decision_round": 0,
         "decision_round_limit": 0,
-        "max_concurrency": 0,
-        "max_tool_calls": 0,
+        "stage_budgets": {},
         "active_task_ids": [],
         "last_verifier_run_id": None,
         "outcome": None,

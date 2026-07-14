@@ -18,6 +18,8 @@ from prospector.store.object_store import ObjectStore, workspace_key
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _m0_env() -> Iterator[None]:
     clear_settings_cache()

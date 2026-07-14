@@ -2,7 +2,7 @@
 
 - **版本**：v1.2
 - **日期**：2026-07-14
-- **状态**：M1 目标合同；当前本地入口已实现 Scope、Brief 与 interactive HITL
+- **状态**：M1 目标合同；当前本地入口已实现 Brief 生成、interactive HITL、Planner-Worker 与 PG 事件时间线
 - **关联文档**：[系统设计](./design.md)、[M1 实现设计](./implementations/m1.md)
 
 ---
@@ -11,7 +11,7 @@
 
 M1 的产品 CLI 名为 `prospector`，是单进程 API 的瘦客户端：只负责提交、Brief 交互、SSE 展示和报告下载，不在客户端实现 Planner、Worker 或质量门。
 
-当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成与 `c/e/i/q` 确认。Planner-Worker 接入后，同一个 `ask` 流程从冻结 Brief 继续进入完整研究主图。
+当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成、`c/e/i/q` 确认与 Planner-Worker。冻结 Brief 后，同一个进程运行研究图并实时显示 PG 事件时间线，当前停在 `verifier_pending`。
 
 职责边界：
 
@@ -60,15 +60,15 @@ M1 不提供 `kb`、Data Worker、沙箱计算、`followup`、跨进程 pause/re
 
 ### 3.2 effort
 
-运行时根据冻结 Brief 的 `effort` 注入三项硬限制：
+运行时根据冻结 Brief 的 `effort` 与任务 `research_stage` 注入三类硬限制：Planner 决策轮、分阶段并发、分阶段 Worker 决策轮。
 
-| effort | Planner 决策轮 | 每轮并发 Worker | 每 Worker 工具次数 |
-|--------|---------------:|------------------:|--------------------:|
-| quick | 3 | 1 | 8 |
-| standard | 6 | 3 | 15 |
-| deep | 12 | 4 | 25 |
+| effort | Planner 决策轮 | scout（并发 / Worker 轮） | deep_dive（并发 / Worker 轮） | verify（并发 / Worker 轮） |
+|--------|---------------:|----------------------------:|--------------------------------:|---------------------------:|
+| quick | 8 | 6 / 13 | 3 / 25 | 3 / 13 |
+| standard | 12 | 6 / 21 | 3 / 49 | 3 / 17 |
+| deep | 24 | 8 / 25 | 5 / 73 | 5 / 21 |
 
-Replan 消耗 Planner 决策轮，不存在独立 replan 上限；Plan 不设独立最大任务数。token 和累计工具调用只展示与计量，不驱动停止。`deep` 卡片提示研究可能持续数小时，单次 LLM 与抓取仍受调用超时约束。
+Worker 工具调用总数不设上限；每个 Worker 决策轮最多并行 8 个独立工具调用。Replan 消耗 Planner 决策轮，不存在独立 replan 上限；Plan 不设独立最大任务数。token 和累计工具调用只展示与计量，不驱动停止。`deep` 卡片提示研究可能持续数小时，单次 LLM 与抓取仍受调用超时约束。
 
 ### 3.3 交互流程
 
@@ -130,7 +130,7 @@ Brief 冻结后不可修改。需求变化必须创建新任务。
  │t_02│ 技术路线与产品差异           │ comparison   │ ● 运行 │
  │t_03│ 商业化数据的反方证据         │ counterargu… │ ○ 等待 │
  └────┴──────────────────────────────┴──────────────┴────────┘
- 限额  planner 3/6 rounds · concurrency 2/3 · worker tools t_02 7/15
+ 限额  planner 3/12 rounds · deep_dive concurrency 2/3 · worker rounds t_02 7/49
  用量  tokens 0.41M · tool_calls 38（只计量）
  事件  11:42:03  t_01 保存 2 条 Excerpt、3 条 Assertion
        11:43:05  Verifier 检出重大缺口 → 请求 Planner 决策
@@ -139,7 +139,7 @@ Brief 冻结后不可修改。需求变化必须创建新任务。
  [q] 离开（任务继续）  [o] 完成后打开报告
 ```
 
-限额区只显示三项研究硬闸。Plan 版本和 Replan 原因必须可见；Replan 统一消耗 Planner 决策轮。
+限额区显示 Planner 决策轮、当前阶段并发与当前 Worker 决策轮。Plan 版本和 Replan 原因必须可见；Replan 统一消耗 Planner 决策轮。
 
 ### 4.2 Plain 模式
 
@@ -151,7 +151,7 @@ Brief 冻结后不可修改。需求变化必须创建新任务。
 12:02:31  job.completed       报告已生成
 ```
 
-`job events --follow` 输出服务端原始 NDJSON；plain 模式只保证人类可读。
+`ask` 在 Brief 确认后直接输出该逐行时间线；`job events --follow` 使用同一渲染器回放并继续跟随 PG 事件。
 
 ### 4.3 状态来源
 
@@ -160,7 +160,8 @@ Brief 冻结后不可修改。需求变化必须创建新任务。
 | 阶段 | job phase 事件 |
 | Plan 与任务 | `plans` / `tasks` 及对应事件 |
 | Planner 轮次 | `decision_round` 与上限 |
-| Worker 工具次数 | Task budget 与已执行工具调用 |
+| Worker 决策轮 | Task budget 与已执行的模型动作 |
+| 工具调用计数 | `task.finished` 事件与 PG usage；只观测，不驱动停止 |
 | 缺口与冲突 | verifier run / gap artifact / ConflictResolution |
 | 用量 | PG usage |
 
@@ -207,7 +208,7 @@ CLI 不根据事件文本重新计算状态。
 | `job list` | 列出任务状态、阶段、开始时间和用量 |
 | `job status <id>` | 查看阶段、Plan 版本、任务表、三项限制和最近事件 |
 | `job attach <id>` | 通过 SSE 跟踪；Last-Event-ID 从 PG events 回放 |
-| `job events <id>` | 输出原始业务事件；支持 `--since` 与 `--follow` |
+| `job events <id>` | 输出人类可读的业务事件时间线；支持 `--follow` |
 | `report show <id>` | 拉取并终端显示报告 |
 | `report export <id>` | 导出 Markdown、JSON 或 HTML |
 | `usage --job <id>` | 展示 token、工具调用和成本，不参与终止判断 |

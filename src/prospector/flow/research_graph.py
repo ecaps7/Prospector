@@ -52,7 +52,7 @@ def default_research_services() -> ResearchGraphServices:
     tools = [
         WebSearchTool(repository, exa),
         WebFetchTool(repository, object_store, exa),
-        SaveFindingsTool(repository, object_store),
+        SaveFindingsTool(repository),
     ]
     return ResearchGraphServices(
         repository=repository,
@@ -61,12 +61,30 @@ def default_research_services() -> ResearchGraphServices:
     )
 
 
-def _budget_message(state: Mapping[str, Any]) -> dict[str, int]:
+def _stage_budget_payload(limits: Any) -> dict[str, dict[str, int]]:
+    return {
+        stage: {
+            "max_concurrency": budget.max_concurrency,
+            "max_worker_rounds": budget.max_worker_rounds,
+        }
+        for stage, budget in limits.stages.items()
+    }
+
+
+def _stage_concurrency(state: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        stage: int(budget["max_concurrency"])
+        for stage, budget in dict(state["stage_budgets"]).items()
+    }
+
+
+def _research_state_message(state: Mapping[str, Any]) -> dict[str, Any]:
     used = int(state.get("decision_round", 0))
     limit = int(state["decision_round_limit"])
     return {
+        "current_research_stage": str(state["current_research_stage"]),
         "decision_rounds_remaining": max(0, limit - used),
-        "max_concurrency": int(state["max_concurrency"]),
+        "stage_concurrency": _stage_concurrency(state),
     }
 
 
@@ -77,22 +95,26 @@ def _initialize_node(services: ResearchGraphServices):
         brief = services.repository.get_brief(UUID(state["brief_id"]))
         services.repository.record_phase_changed(UUID(state["job_id"]), "research")
         limits = limits_for_effort(brief.effort)
+        stage_budgets = _stage_budget_payload(limits)
         messages = initial_planner_messages(brief, limits)
         messages = append_runtime_feedback(
             messages,
-            feedback_type="budget",
+            feedback_type="research_state",
             payload={
+                "current_research_stage": "scout",
                 "decision_rounds_remaining": limits.decision_round_limit,
-                "max_concurrency": limits.max_concurrency,
+                "stage_concurrency": {
+                    stage: budget["max_concurrency"] for stage, budget in stage_budgets.items()
+                },
             },
         )
         return {
             "phase": "research",
+            "current_research_stage": "scout",
             "plan_version": 0,
             "decision_round": 0,
             "decision_round_limit": limits.decision_round_limit,
-            "max_concurrency": limits.max_concurrency,
-            "max_tool_calls": limits.max_tool_calls,
+            "stage_budgets": stage_budgets,
             "active_task_ids": [],
             "outcome": None,
             "error_code": None,
@@ -202,8 +224,8 @@ def _planner_node(services: ResearchGraphServices):
             }
             messages = append_runtime_feedback(
                 messages,
-                feedback_type="budget",
-                payload=_budget_message({**state, **next_state}),
+                feedback_type="research_state",
+                payload=_research_state_message({**state, **next_state}),
             )
             next_state["planner_messages"] = messages
             return next_state
@@ -221,13 +243,13 @@ def _planner_node(services: ResearchGraphServices):
 
         if decision.decision == "dispatch":
             assert decision.dispatch is not None
-            rejection = dispatch_rejection(
-                len(decision.dispatch.tasks), int(state["max_concurrency"])
-            )
+            batch_stage = decision.dispatch.tasks[0].research_stage
+            stage_concurrency = int(state["stage_budgets"][batch_stage]["max_concurrency"])
+            rejection = dispatch_rejection(len(decision.dispatch.tasks), stage_concurrency)
             if rejection is not None:
                 feedback = (
                     f"整批派发被拒绝：本轮提交 {len(decision.dispatch.tasks)} 个任务，"
-                    f"并发上限为 {state['max_concurrency']}。请缩小本轮任务批次。"
+                    f"{batch_stage} 阶段的并发上限为 {stage_concurrency}。请缩小本轮任务批次。"
                 )
                 services.repository.complete_decision(
                     job_id,
@@ -264,6 +286,7 @@ def _planner_node(services: ResearchGraphServices):
                     ),
                 )
                 result = {
+                    "current_research_stage": decision.dispatch.tasks[0].research_stage,
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
                     "route": "workers",
@@ -331,8 +354,8 @@ def _planner_node(services: ResearchGraphServices):
         updated_state = {**state, "decision_round": decision_round, **result}
         messages = append_runtime_feedback(
             messages,
-            feedback_type="budget",
-            payload=_budget_message(updated_state),
+            feedback_type="research_state",
+            payload=_research_state_message(updated_state),
         )
         return {"decision_round": decision_round, "planner_messages": messages, **result}
 
@@ -359,7 +382,7 @@ async def _run_one_worker_body(
                 for item in assertions
             ],
             "stop_reason": stored.get("stop_reason"),
-            "gap_note": stored.get("gap_note") or "",
+            "finish_reason": stored.get("finish_reason") or "",
             "error": stored.get("error"),
         }
 
@@ -375,10 +398,11 @@ async def _run_one_worker_body(
             job_id,
             task_id,
             stop_reason=feedback.stop_reason,
-            gap_note=feedback.gap_note,
+            finish_reason=feedback.finish_reason,
             summary=feedback.summary.model_dump(mode="json"),
             tool_calls_used=feedback.tool_calls_used,
-            tool_calls_limit=task.budget.max_tool_calls,
+            worker_rounds_used=feedback.worker_rounds_used,
+            worker_rounds_limit=task.budget.max_worker_rounds,
         )
         return {
             "task_id": str(task_id),
@@ -388,7 +412,7 @@ async def _run_one_worker_body(
             "assertions": [item.model_dump(mode="json") for item in feedback.summary.items],
             "stop_reason": feedback.stop_reason,
             "goal_met": feedback.goal_met,
-            "gap_note": feedback.gap_note,
+            "finish_reason": feedback.finish_reason,
         }
     except Exception as exc:
         assertions = await asyncio.to_thread(services.repository.list_assertions, task_id)
@@ -400,10 +424,11 @@ async def _run_one_worker_body(
             job_id,
             task_id,
             stop_reason="tool_error",
-            gap_note=str(exc),
+            finish_reason=str(exc),
             summary={"items": []},
             tool_calls_used=tool_calls_used,
-            tool_calls_limit=task.budget.max_tool_calls,
+            worker_rounds_used=0,
+            worker_rounds_limit=task.budget.max_worker_rounds,
             error=str(exc),
         )
         return {
@@ -417,7 +442,7 @@ async def _run_one_worker_body(
             ],
             "stop_reason": "tool_error",
             "goal_met": False,
-            "gap_note": str(exc),
+            "finish_reason": str(exc),
             "error": str(exc),
         }
 
@@ -465,8 +490,8 @@ def _workers_node(services: ResearchGraphServices):
         )
         messages = append_runtime_feedback(
             messages,
-            feedback_type="budget",
-            payload=_budget_message(state),
+            feedback_type="research_state",
+            payload=_research_state_message(state),
         )
         return {
             "active_task_ids": [],

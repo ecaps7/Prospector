@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ResearchMode = Literal["factual", "comparison", "counterargument", "risk_scan", "timeline"]
 ResearchStage = Literal["scout", "deep_dive", "verify"]
@@ -27,7 +27,10 @@ class SourcePolicy(BaseModel):
 
 
 class TaskBudget(BaseModel):
-    max_tool_calls: int = Field(..., ge=1)
+    """Worker rounds are the single authoritative budget; tool calls are uncapped in
+    total and bounded only per-round by the runtime's parallel-call limit."""
+
+    max_worker_rounds: int = Field(..., ge=1)
 
 
 class ResearchTaskDraft(BaseModel):
@@ -37,6 +40,15 @@ class ResearchTaskDraft(BaseModel):
         ...,
         min_length=20,
         description="A self-contained paragraph describing the research subproblem",
+    )
+    subjects: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=6,
+        description=(
+            "Declared research subjects; scout may list one bounded candidate set, "
+            "deep_dive/verify must declare exactly one subject"
+        ),
     )
     research_stage: ResearchStage
     research_mode: ResearchMode
@@ -50,6 +62,23 @@ class ResearchTaskDraft(BaseModel):
         if not text:
             raise ValueError("must not be blank")
         return text
+
+    @field_validator("subjects")
+    @classmethod
+    def _clean_subjects(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values if value.strip()]
+        if not cleaned:
+            raise ValueError("subjects must contain at least one non-blank subject")
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def _stage_bounds_subjects(self) -> ResearchTaskDraft:
+        if self.research_stage != "scout" and len(self.subjects) != 1:
+            raise ValueError(
+                f"{self.research_stage} task must declare exactly one subject; "
+                f"got {len(self.subjects)} — split into one task per subject"
+            )
+        return self
 
 
 class ResearchTask(ResearchTaskDraft):

@@ -12,6 +12,7 @@ import typer
 from prospector.agents.llm import LlmNotConfiguredError
 from prospector.agents.scope import run_scope, write_research_brief
 from prospector.config import clear_settings_cache, get_settings
+from prospector.deterministic.budget import limits_for_effort
 from prospector.flow.research_graph import build_research_graph, thread_config
 from prospector.flow.state import initial_research_state
 from prospector.obs.logging import get_logger, setup_logging
@@ -20,6 +21,12 @@ from prospector.runtime.hitl.brief_confirm import (
     BriefConfirmAborted,
     confirm_brief,
     require_tty,
+)
+from prospector.runtime.timeline import (
+    ResearchTimelineFollower,
+    ResearchTimelineRenderer,
+    emit_timeline_line,
+    follow_timeline,
 )
 from prospector.schemas.brief import EffortLevel, ResearchBrief, ScopeOutcome
 from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
@@ -162,16 +169,28 @@ def ask(
         repository = ResearchRepository()
         brief_id = repository.freeze_brief(job_id, confirmed)
         typer.echo(f"\nJOB_CREATED: {job_id}", err=True)
-        typer.echo(
-            f"另一个终端可运行：prospector-local job events {job_id} --follow",
-            err=True,
+        typer.echo("研究时间线：", err=True)
+        renderer = ResearchTimelineRenderer(
+            repository,
+            limits_for_effort(confirmed.effort),
         )
-        with checkpointer_session() as checkpointer:
-            graph = build_research_graph(checkpointer)
-            result = graph.invoke(
-                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
-                thread_config(str(job_id)),
-            )
+        follower = ResearchTimelineFollower(
+            repository,
+            renderer,
+            job_id,
+            after_id=repository.latest_event_id(job_id),
+            emit=emit_timeline_line,
+        )
+        follower.start()
+        try:
+            with checkpointer_session() as checkpointer:
+                graph = build_research_graph(checkpointer)
+                result = graph.invoke(
+                    initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                    thread_config(str(job_id)),
+                )
+        finally:
+            follower.stop()
         typer.echo(
             f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
             err=True,
@@ -195,13 +214,6 @@ def ask(
     assert confirmed is not None
 
 
-def _format_event(event: dict[str, object]) -> str:
-    event_type = str(event["event_type"])
-    payload = event["payload"]
-    prefix = "  " if event_type.startswith("task.") else ""
-    return f"{prefix}{event['id']} {event_type} {payload}"
-
-
 @job_app.command("events")
 def job_events(
     job_id: Annotated[str, typer.Argument(help="Research job UUID")],
@@ -216,21 +228,17 @@ def job_events(
     try:
         _bootstrap()
         repository = ResearchRepository()
-        last_id = 0
-        while True:
-            rows = repository.list_events(parsed_job_id)
-            fresh = [row for row in rows if int(row["id"]) > last_id]
-            for row in fresh:
-                typer.echo(_format_event(row))
-                last_id = int(row["id"])
-            terminal = any(
-                row["event_type"] == "job.phase_changed"
-                and row["payload"].get("phase") in {"verifier_pending", "failed"}
-                for row in rows
-            )
-            if not follow or terminal:
-                break
-            time.sleep(0.5)
+        renderer = ResearchTimelineRenderer(
+            repository,
+            limits_for_effort(repository.get_job_effort(parsed_job_id)),
+        )
+        follow_timeline(
+            repository,
+            renderer,
+            parsed_job_id,
+            emit=emit_timeline_line,
+            follow=follow,
+        )
     finally:
         close_pool()
 

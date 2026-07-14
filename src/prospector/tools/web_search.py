@@ -48,11 +48,19 @@ class ExaClient:
             {"query": query, "numResults": num_results, "type": "auto"},
         )
 
-    async def contents(self, url: str) -> dict[str, Any]:
+    async def contents(
+        self,
+        url: str,
+        task_question: str,
+    ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._post,
             "contents",
-            {"urls": [url], "text": True},
+            {
+                "urls": [url],
+                "text": True,
+                "highlights": {"query": task_question},
+            },
         )
 
 
@@ -110,7 +118,16 @@ WEB_SEARCH_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "One complete natural-language question or request for a single "
+                        "evidence need, as if asking a librarian. Prefer a verb or "
+                        "interrogative; do not stack keywords, space-separated "
+                        "alternatives, or long noun phrases without a verb. Search "
+                        "alternative objects or source types in separate calls."
+                    ),
+                },
                 "num_results": {"type": "integer", "minimum": 1, "maximum": 20},
             },
             "required": ["query"],

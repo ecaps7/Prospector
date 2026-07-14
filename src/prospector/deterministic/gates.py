@@ -29,7 +29,5 @@ class InformationGainCounter:
     consecutive_empty_saves: int = 0
 
     def record_save(self, inserted_rows: int) -> bool:
-        self.consecutive_empty_saves = (
-            self.consecutive_empty_saves + 1 if inserted_rows == 0 else 0
-        )
+        self.consecutive_empty_saves = self.consecutive_empty_saves + 1 if inserted_rows == 0 else 0
         return self.consecutive_empty_saves >= 2
