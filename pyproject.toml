@@ -1,0 +1,67 @@
+[project]
+name = "prospector"
+version = "0.1.0"
+description = "Deep research agent (Prospector v2)"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "Yanzhen Zhao", email = "ecaps7@126.com" }]
+dependencies = [
+    "alembic>=1.18.5",
+    "boto3>=1.43.46",
+    "langgraph>=1.2.9",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "opentelemetry-api>=1.43.0",
+    "opentelemetry-sdk>=1.43.0",
+    "psycopg-pool>=3.3.1",
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "sqlalchemy>=2.0.51",
+    "structlog>=26.1.0",
+    "typer>=0.26.8",
+]
+
+[project.scripts]
+prospector-local = "prospector.runtime.entrypoints.local:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.37.0",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.0.0",
+    "ruff>=0.12.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+reportMissingImports = true
+reportUnusedImport = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: requires docker compose (postgres + minio)",
+]
+asyncio_mode = "auto"
+
+[tool.alembic]
+script_location = "migrations"
+prepend_sys_path = ["src"]
