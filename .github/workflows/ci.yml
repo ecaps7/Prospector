@@ -63,7 +63,7 @@ jobs:
         run: uv run basedpyright
 
       - name: Unit tests
-        run: uv run pytest tests/unit -q
+        run: uv run pytest tests/unit -q -m "not live"
 
       - name: Ensure MinIO bucket
         run: |

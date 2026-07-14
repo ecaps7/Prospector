@@ -1,36 +1,78 @@
-"""Single-process local entrypoint: setup / run / resume empty flow."""
+"""Single-process local entrypoint: setup + interactive Scope with Brief HITL."""
 
 from __future__ import annotations
 
+import sys
+import time
 from typing import Annotated
-from uuid import UUID, uuid4
 
 import typer
-from opentelemetry import trace
 
+from prospector.agents.llm import LlmNotConfiguredError
+from prospector.agents.scope import run_scope, write_research_brief
 from prospector.config import clear_settings_cache, get_settings
-from prospector.flow.research_graph import build_empty_flow_graph, thread_config
-from prospector.flow.state import EmptyFlowState
-from prospector.obs.logging import bind_job_id, get_logger, setup_logging
+from prospector.obs.logging import get_logger, setup_logging
 from prospector.obs.tracing import setup_tracing
-from prospector.store.checkpoint import (
-    checkpointer_session,
-    close_pool,
-    setup_checkpointer,
+from prospector.runtime.hitl.brief_confirm import (
+    BriefConfirmAborted,
+    confirm_brief,
+    require_tty,
 )
-from prospector.store.jobs import JobStatus, create_job, update_job_status
+from prospector.schemas.brief import EffortLevel, ResearchBrief, ScopeOutcome
+from prospector.store.checkpoint import close_pool, setup_checkpointer
 from prospector.store.object_store import ObjectStore
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 log = get_logger("prospector.local")
-tracer = trace.get_tracer("prospector.local")
 
 
-def _bootstrap() -> None:
+def _output_separator() -> None:
+    """Print a visual separator to stderr before business output on stdout.
+
+    Intentionally ``"\\n" + "─" * 40`` — not ``"\\n─" * 40``, which would
+    emit ~40 nearly-blank lines (one dash each).
+    """
+    print("\n" + "\u2500" * 40, file=sys.stderr)
+
+
+def _bootstrap(*, require_llm: bool = False) -> None:
     clear_settings_cache()
     setup_logging()
     setup_tracing()
-    get_settings()  # fail-fast on missing env
+    settings = get_settings()  # fail-fast on missing DB / S3
+    log.info("bootstrap", config="loaded", db=settings.database_url[:30] + "...")
+    if require_llm:
+        from prospector.agents.llm import require_llm_settings
+
+        require_llm_settings(settings)
+        log.info("bootstrap", llm="ready")
+    log.info("bootstrap", result="done")
+
+
+def format_scope_outcome(outcome: ScopeOutcome) -> str:
+    if outcome.kind == "clarify":
+        return f"CLARIFY:\n{outcome.clarification_question}"
+    assert outcome.brief is not None
+    brief = outcome.brief
+    return (
+        "BRIEF_PENDING:\n"
+        f"question: {brief.question}\n"
+        f"effort: {brief.effort}\n"
+        f"language: {brief.language}\n"
+        f"output_format: {brief.output_format}\n"
+        f"\n{brief.brief_text}"
+    )
+
+
+def format_confirmed_brief(brief: ResearchBrief) -> str:
+    return (
+        "BRIEF_CONFIRMED:\n"
+        f"question: {brief.question}\n"
+        f"effort: {brief.effort}\n"
+        f"language: {brief.language}\n"
+        f"output_format: {brief.output_format}\n"
+        f"\n{brief.brief_text}"
+    )
 
 
 @app.command()
@@ -44,76 +86,87 @@ def setup() -> None:
     close_pool()
 
 
-@app.command("run")
-def run_job(
-    job_id: Annotated[
-        UUID | None,
-        typer.Option("--job-id", help="Reuse an existing job/thread id"),
-    ] = None,
-) -> None:
-    """Start a new empty-flow job (or continue if checkpoint already exists)."""
-    _bootstrap()
-    jid = job_id or uuid4()
-    create_job(job_id=jid)
-    bind_job_id(str(jid))
-    try:
-        with tracer.start_as_current_span("empty_flow.run") as span:
-            span.set_attribute("job_id", str(jid))
-            with checkpointer_session() as checkpointer:
-                graph = build_empty_flow_graph(checkpointer)
-                initial: EmptyFlowState = {
-                    "job_id": str(jid),
-                    "step": 0,
-                    "notes": [],
-                }
-                result = graph.invoke(initial, thread_config(str(jid)))
-            update_job_status(jid, JobStatus.COMPLETED)
-            log.info(
-                "empty_flow_completed",
-                message="empty flow finished",
-                job_id=str(jid),
-                step=result.get("step"),
-                notes=result.get("notes"),
-            )
-            typer.echo(str(jid))
-    except Exception:
-        update_job_status(jid, JobStatus.FAILED)
-        raise
-    finally:
-        bind_job_id(None)
-        close_pool()
-
-
 @app.command()
-def resume(
-    job_id: Annotated[UUID, typer.Argument(help="Job / thread id to resume")],
+def ask(
+    question: Annotated[str, typer.Argument(help="Natural-language research question")],
+    effort: Annotated[
+        str,
+        typer.Option("--effort", help="quick | standard | deep"),
+    ] = "standard",
+    language: Annotated[str, typer.Option("--language", help="Report language")] = "zh",
 ) -> None:
-    """Resume an interrupted empty-flow job from PG checkpoint."""
-    _bootstrap()
-    bind_job_id(str(job_id))
+    """Run Scope, clarify once if needed, then require Brief confirmation."""
+    if effort not in ("quick", "standard", "deep"):
+        raise typer.BadParameter("effort must be quick, standard, or deep")
+    effort_level: EffortLevel = effort  # type: ignore[assignment]
+    t0 = time.monotonic()
+    confirmed: ResearchBrief | None = None
     try:
-        update_job_status(job_id, JobStatus.RUNNING)
-        with tracer.start_as_current_span("empty_flow.resume") as span:
-            span.set_attribute("job_id", str(job_id))
-            with checkpointer_session() as checkpointer:
-                graph = build_empty_flow_graph(checkpointer)
-                # None input resumes from the latest checkpoint for this thread.
-                result = graph.invoke(None, thread_config(str(job_id)))
-            update_job_status(job_id, JobStatus.COMPLETED)
-            log.info(
-                "empty_flow_resumed",
-                message="empty flow resumed to completion",
-                job_id=str(job_id),
-                step=result.get("step"),
-                notes=result.get("notes"),
+        _bootstrap(require_llm=True)
+        try:
+            require_tty()
+        except BriefConfirmAborted as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2) from exc
+
+        outcome = run_scope(
+            question,
+            language=language,
+            effort=effort_level,
+        )
+        if outcome.kind == "clarify":
+            assert outcome.clarification_question is not None
+            _output_separator()
+            typer.echo(format_scope_outcome(outcome))
+            clarification_answer = typer.prompt("回答").strip()
+            if not clarification_answer:
+                raise ValueError("clarification answer must not be blank")
+            outcome = run_scope(
+                question,
+                clarification_question=outcome.clarification_question,
+                clarification_answer=clarification_answer,
+                language=language,
+                effort=effort_level,
             )
-            typer.echo(str(job_id))
-    except Exception:
-        update_job_status(job_id, JobStatus.FAILED)
-        raise
+
+        if outcome.kind != "brief_pending" or outcome.brief is None:
+            raise RuntimeError(f"expected brief_pending, got {outcome.kind!r}")
+
+        def revise_once(brief: ResearchBrief, note: str) -> ResearchBrief:
+            return write_research_brief(
+                question,
+                previous_brief=brief,
+                revision_note=note,
+                language=language,
+                effort=effort_level,
+            )
+
+        confirmed = confirm_brief(
+            outcome.brief,
+            prompt=lambda msg: typer.prompt(msg),
+            revise_once_fn=revise_once,
+            echo=lambda msg: typer.echo(msg, err=True),
+        )
+    except BriefConfirmAborted as exc:
+        log.info("brief.confirm", result="aborted", reason=str(exc))
+        typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1) from exc
+    except LlmNotConfiguredError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        log.exception("error", message=str(exc))
+        typer.secho(f"scope failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
     finally:
-        bind_job_id(None)
+        elapsed = time.monotonic() - t0
+        log.info("done", elapsed=f"{elapsed:.1f}s")
         close_pool()
+
+    assert confirmed is not None
+    log.info("brief.confirm", result="confirmed", brief_len=len(confirmed.brief_text))
+    _output_separator()
+    typer.echo(format_confirmed_brief(confirmed))
 
 
 def main() -> None:
