@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+HighlightSourceId = Annotated[str, StringConstraints(pattern=r"^h[1-9][0-9]*$")]
 
 
 class SourceRef(BaseModel):
@@ -64,20 +66,16 @@ class Assertion(BaseModel):
 class FindingInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_ids: list[str] = Field(..., min_length=1)
+    source_ids: list[HighlightSourceId] = Field(..., min_length=1)
     statement: str = Field(..., min_length=1)
     topic_tags: list[str] = Field(..., max_length=12)
 
     @field_validator("source_ids")
     @classmethod
-    def _valid_source_ids(cls, values: list[str]) -> list[str]:
-        cleaned = [value.strip() for value in values]
-        if any(
-            len(value) < 2 or value[0] != "h" or not value[1:].isdigit() or int(value[1:]) < 1
-            for value in cleaned
-        ):
-            raise ValueError("source ids must use positive hN identifiers")
-        return list(dict.fromkeys(cleaned))
+    def _deduplicate_source_ids(
+        cls, values: list[HighlightSourceId]
+    ) -> list[HighlightSourceId]:
+        return list(dict.fromkeys(values))
 
     @field_validator("statement")
     @classmethod

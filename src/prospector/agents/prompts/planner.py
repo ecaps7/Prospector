@@ -80,6 +80,10 @@ def planner_system_prompt(*, today: str | None = None) -> str:
 - 无法获得的证据已明确记录；
 - 继续研究的预期信息增益较低。
 
+runtime_feedback 为 verifier_gap 时：major_gaps 是必须补查的缺口；
+unusable_assertions 列出已取消证据资格的断言（含 assertion_id / statement / reason）。
+这些断言即使曾出现在更早的 worker_projection 中，也不得再作为覆盖依据或 finish 理由。
+
 没有任何已落库证据时，finish 会被代码拒绝。
 
 输出格式（严格遵守）：

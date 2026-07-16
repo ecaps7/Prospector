@@ -30,25 +30,25 @@ EFFORT_LIMITS: dict[EffortLevel, ResearchLimits] = {
     "quick": ResearchLimits(
         8,
         {
-            "scout": StageBudget(max_concurrency=6, max_worker_rounds=13),
-            "deep_dive": StageBudget(max_concurrency=3, max_worker_rounds=25),
-            "verify": StageBudget(max_concurrency=3, max_worker_rounds=13),
+            "scout": StageBudget(max_concurrency=6, max_worker_rounds=16),
+            "deep_dive": StageBudget(max_concurrency=3, max_worker_rounds=32),
+            "verify": StageBudget(max_concurrency=3, max_worker_rounds=12),
         },
     ),
     "standard": ResearchLimits(
         12,
         {
-            "scout": StageBudget(max_concurrency=6, max_worker_rounds=21),
-            "deep_dive": StageBudget(max_concurrency=3, max_worker_rounds=49),
-            "verify": StageBudget(max_concurrency=3, max_worker_rounds=17),
+            "scout": StageBudget(max_concurrency=6, max_worker_rounds=24),
+            "deep_dive": StageBudget(max_concurrency=3, max_worker_rounds=64),
+            "verify": StageBudget(max_concurrency=3, max_worker_rounds=18),
         },
     ),
     "deep": ResearchLimits(
         24,
         {
-            "scout": StageBudget(max_concurrency=8, max_worker_rounds=25),
-            "deep_dive": StageBudget(max_concurrency=5, max_worker_rounds=73),
-            "verify": StageBudget(max_concurrency=5, max_worker_rounds=21),
+            "scout": StageBudget(max_concurrency=8, max_worker_rounds=32),
+            "deep_dive": StageBudget(max_concurrency=5, max_worker_rounds=81),
+            "verify": StageBudget(max_concurrency=5, max_worker_rounds=24),
         },
     ),
 }

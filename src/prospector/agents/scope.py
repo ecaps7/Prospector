@@ -84,7 +84,9 @@ def _chat_json(
             messages=messages,
             extra_body={"enable_thinking": False},
         )
-    content = response.choices[0].message.content
+    content = None
+    if getattr(response, "choices", None):
+        content = response.choices[0].message.content
     if not content:
         raise RuntimeError(f"empty LLM response for {label}")
     usage = getattr(response, "usage", None)

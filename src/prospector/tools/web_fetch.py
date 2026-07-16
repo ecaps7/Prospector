@@ -11,6 +11,7 @@ from uuid import uuid4
 from prospector.schemas.evidence import SourceRef, SourceViewItem
 from prospector.store.object_store import ObjectStore, workspace_key
 from prospector.store.repositories import ResearchRepository
+from prospector.tools._retry import retry_async
 from prospector.tools.base import ToolContext
 from prospector.tools.web_search import ExaClient
 
@@ -38,7 +39,12 @@ class HttpSourceMediaProbe:
         return "pdf" if b"%PDF-" in prefix else "html"
 
     async def detect(self, url: str) -> MediaType:
-        return await asyncio.to_thread(self._detect, url)
+        return await retry_async(
+            asyncio.to_thread,
+            self._detect,
+            url,
+            label=f"media_probe({url!r})",
+        )
 
 
 class WebFetchTool:
@@ -100,7 +106,7 @@ class WebFetchTool:
                 storage_ref=ref.as_uri(),
                 source_meta={
                     "title": item.get("title"),
-                    "publisher": item.get("author"),
+                    "author": item.get("author"),
                     "published_at": item.get("publishedDate"),
                 },
                 tool_call_id=context.tool_call_id,

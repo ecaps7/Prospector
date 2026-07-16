@@ -192,6 +192,8 @@ class OpenAIPlannerModel:
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
+        if not getattr(response, "choices", None):
+            return ""
         return response.choices[0].message.content or ""
 
     @staticmethod

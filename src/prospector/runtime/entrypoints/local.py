@@ -13,7 +13,11 @@ from prospector.agents.llm import LlmNotConfiguredError
 from prospector.agents.scope import run_scope, write_research_brief
 from prospector.config import clear_settings_cache, get_settings
 from prospector.deterministic.budget import limits_for_effort
-from prospector.flow.research_graph import build_research_graph, thread_config
+from prospector.flow.research_graph import (
+    VerifierMajorGapError,
+    build_research_graph,
+    thread_config,
+)
 from prospector.flow.state import initial_research_state
 from prospector.obs.logging import get_logger, setup_logging
 from prospector.obs.tracing import setup_tracing
@@ -109,7 +113,7 @@ def ask(
     ] = "standard",
     language: Annotated[str, typer.Option("--language", help="Report language")] = "zh",
 ) -> None:
-    """Confirm a Brief, then run the checkpointed Planner-Worker research loop."""
+    """Confirm a Brief, then run Planner-Worker through Research Verifier."""
     if effort not in ("quick", "standard", "deep"):
         raise typer.BadParameter("effort must be quick, standard, or deep")
     effort_level: EffortLevel = effort  # type: ignore[assignment]
@@ -200,6 +204,9 @@ def ask(
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=1) from exc
     except LlmNotConfiguredError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except VerifierMajorGapError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     except Exception as exc:

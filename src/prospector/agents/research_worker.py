@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
-from uuid import UUID
+from typing import Annotated, Any, Literal, Protocol
+from uuid import UUID, uuid4
 
 from openai import AsyncOpenAI
 from opentelemetry import trace
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from prospector.agents.llm import get_async_openai_client, mid_model
 from prospector.agents.prompts.research_worker import (
@@ -23,13 +30,12 @@ from prospector.agents.prompts.research_worker import (
     worker_task_message,
 )
 from prospector.deterministic.gates import InformationGainCounter
-from prospector.schemas.evidence import Assertion
+from prospector.obs.logging import get_logger
+from prospector.schemas.evidence import Assertion, FindingInput
 from prospector.schemas.plan import ResearchTask
 from prospector.store.repositories import ResearchRepository
 from prospector.tools.base import ToolContext, WorkerTool
-from prospector.tools.save_findings import SAVE_FINDINGS_SCHEMA
-from prospector.tools.web_fetch import WEB_FETCH_SCHEMA
-from prospector.tools.web_search import WEB_SEARCH_SCHEMA
+from prospector.tools.save_findings import SaveFindingsArguments
 
 WorkerDeclaredStopReason = Literal[
     "expected_evidence_satisfied",
@@ -45,11 +51,29 @@ StopReason = Literal[
     "blocked_by_scope",
 ]
 SUMMARY_TOOL_NAME = "submit_worker_summary"
-FINISH_TOOL_NAME = "submit_worker_finish"
 # Rounds cap depth; this caps per-round breadth so a single round cannot fan out
 # unboundedly (each result still lengthens the thread and bills the Exa API).
 MAX_PARALLEL_TOOL_CALLS_PER_ROUND = 8
+AUTO_FETCH_TOP_N = 2
+LLM_EMPTY_RESPONSE_RETRIES = 2
+LLM_RETRY_DELAYS = (1.0, 2.0)
+log = get_logger("prospector.research_worker")
 tracer = trace.get_tracer("prospector.research_worker")
+
+
+class EmptyLLMResponseError(RuntimeError):
+    """Raised when an LLM response contains no choices."""
+
+
+def _require_first_choice(response: Any, *, label: str) -> Any:
+    """Validate that the LLM response has at least one choice; raise if empty."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        finish_reason = getattr(response, "choices", None)
+        raise EmptyLLMResponseError(
+            f"{label}: LLM returned empty choices (finish_reason={finish_reason!r})"
+        )
+    return choices[0]
 
 
 class WorkerFinish(BaseModel):
@@ -75,12 +99,81 @@ class WorkerFinish(BaseModel):
         return self
 
 
-WORKER_FINISH_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": FINISH_TOOL_NAME,
-        "description": "结束当前研究任务并提交简短原因。",
-        "parameters": WorkerFinish.model_json_schema(),
+class WorkerSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="围绕单个证据缺口的一句完整自然语言问题或请求",
+    )
+
+
+EvidenceSourceRef = Annotated[
+    str,
+    StringConstraints(pattern=r"^s[1-9][0-9]*:h[1-9][0-9]*$"),
+]
+
+
+class WorkerFindingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_refs: list[EvidenceSourceRef] = Field(..., min_length=1)
+    statement: str = Field(..., min_length=1)
+    topic_tags: list[str] = Field(..., max_length=12)
+
+    @field_validator("source_refs")
+    @classmethod
+    def _deduplicate_source_refs(cls, values: list[EvidenceSourceRef]) -> list[EvidenceSourceRef]:
+        return list(dict.fromkeys(values))
+
+    @field_validator("statement")
+    @classmethod
+    def _strip_statement(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("statement must not be blank")
+        return text
+
+
+class WorkerSaveBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    findings: list[WorkerFindingInput] = Field(..., min_length=1)
+
+
+class WorkerAction(BaseModel):
+    """One strict, runtime-dispatched Worker action for a single decision round."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["search", "save", "finish"]
+    searches: list[WorkerSearch] = Field(..., max_length=MAX_PARALLEL_TOOL_CALLS_PER_ROUND)
+    save_batches: list[WorkerSaveBatch] = Field(
+        ...,
+        max_length=MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
+    )
+    finish: WorkerFinish | None
+
+    @model_validator(mode="after")
+    def _validate_single_action_kind(self) -> WorkerAction:
+        if self.action == "search":
+            if not self.searches or self.save_batches or self.finish is not None:
+                raise ValueError("search action requires searches only")
+        elif self.action == "save":
+            if self.searches or not self.save_batches or self.finish is not None:
+                raise ValueError("save action requires save_batches only")
+        elif self.searches or self.save_batches or self.finish is None:
+            raise ValueError("finish action requires finish only")
+        return self
+
+
+WORKER_ACTION_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "worker_action",
+        "description": "Prospector Worker 下一决策轮的唯一动作单",
+        "schema": WorkerAction.model_json_schema(),
         "strict": True,
     },
 }
@@ -140,6 +233,129 @@ class ToolExecution:
     error: Exception | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedEvidenceSource:
+    doc_id: UUID
+    view_id: UUID
+    source_id: str
+
+
+class EvidenceSourceRegistry:
+    def __init__(self) -> None:
+        self._next_source_number = 1
+        self._sources: dict[str, ResolvedEvidenceSource] = {}
+
+    def expose_fetch_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        source_number = self._next_source_number
+        self._next_source_number += 1
+        exposed_items: list[dict[str, str]] = []
+        for item in result.get("items", []):
+            for source_id in item.get("source_ids", []):
+                source_ref = f"s{source_number}:{source_id}"
+                self._sources[source_ref] = ResolvedEvidenceSource(
+                    doc_id=UUID(str(result["doc_id"])),
+                    view_id=UUID(str(result["view_id"])),
+                    source_id=str(source_id),
+                )
+                exposed_items.append(
+                    {"source_ref": source_ref, "text": str(item.get("text") or "")}
+                )
+        return {
+            "media_type": result.get("media_type"),
+            "view_kind": result.get("view_kind"),
+            "items": exposed_items,
+        }
+
+    def resolve_save_batch(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:
+        batch = WorkerSaveBatch.model_validate(arguments)
+        grouped: dict[tuple[UUID, UUID], list[FindingInput]] = {}
+        for finding in batch.findings:
+            sources_by_view: dict[tuple[UUID, UUID], list[str]] = {}
+            for source_ref in finding.source_refs:
+                source = self._sources.get(source_ref)
+                if source is None:
+                    raise ValueError(
+                        f"source_ref is not available in the current worker: {source_ref}"
+                    )
+                key = (source.doc_id, source.view_id)
+                sources_by_view.setdefault(key, []).append(source.source_id)
+            for key, source_ids in sources_by_view.items():
+                grouped.setdefault(key, []).append(
+                    FindingInput(
+                        source_ids=source_ids,
+                        statement=finding.statement,
+                        topic_tags=finding.topic_tags,
+                    )
+                )
+        return [
+            SaveFindingsArguments(
+                doc_id=doc_id,
+                view_id=view_id,
+                findings=findings,
+            ).model_dump(mode="json")
+            for (doc_id, view_id), findings in grouped.items()
+        ]
+
+
+def _extract_top_urls(
+    search_executions: list[ToolExecution],
+    *,
+    top_n: int,
+) -> list[str]:
+    """Extract deduplicated top-N URLs from successful web_search executions."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for execution in search_executions:
+        results = (execution.result or {}).get("results", [])
+        for item in results[:top_n]:
+            url = str(item.get("url") or "").strip()
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _runtime_results_message(
+    executions: list[ToolExecution],
+    source_registry: EvidenceSourceRegistry,
+) -> str:
+    fetch_executions = [
+        execution for execution in executions if execution.call.tool_name == "web_fetch"
+    ]
+    all_fetches_failed = bool(fetch_executions) and all(
+        execution.error is not None for execution in fetch_executions
+    )
+    results = []
+    for execution in executions:
+        item: dict[str, Any] = {
+            "tool": execution.call.tool_name,
+            "tool_call_id": execution.call.tool_call_id,
+        }
+        if (
+            execution.call.tool_name == "web_search"
+            and execution.error is None
+            and all_fetches_failed
+        ):
+            item["query"] = str(execution.call.arguments.get("query") or "")
+            item["result"] = {
+                "result_count": len((execution.result or {}).get("results", [])),
+            }
+            results.append(item)
+            continue
+        if execution.error is not None:
+            item["error"] = str(execution.error)
+        elif execution.call.tool_name == "web_fetch":
+            item["result"] = source_registry.expose_fetch_result(execution.result or {})
+        else:
+            item["result"] = execution.result or {}
+        results.append(item)
+    return "上一轮运行结果：\n" + json.dumps(
+        results,
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 class WorkerModel(Protocol):
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction: ...
 
@@ -158,65 +374,68 @@ class OpenAIWorkerModel:
     def __init__(self, client: AsyncOpenAI | None = None, model: str | None = None) -> None:
         self.client = client or get_async_openai_client()
         self.model = model or mid_model()
-        self.tool_schemas = [
-            WEB_SEARCH_SCHEMA,
-            WEB_FETCH_SCHEMA,
-            SAVE_FINDINGS_SCHEMA,
-            WORKER_FINISH_SCHEMA,
-        ]
+
+    async def _create_with_retry(self, *, label: str, **kwargs: Any) -> Any:
+        """Call the LLM with automatic retry on empty choices."""
+        last_exc: EmptyLLMResponseError | None = None
+        for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
+            response = await self.client.chat.completions.create(**kwargs)
+            try:
+                return _require_first_choice(response, label=label)
+            except EmptyLLMResponseError as exc:
+                last_exc = exc
+                if attempt < LLM_EMPTY_RESPONSE_RETRIES:
+                    delay = LLM_RETRY_DELAYS[min(attempt, len(LLM_RETRY_DELAYS) - 1)]
+                    log.warning(
+                        "llm.empty_choices",
+                        label=label,
+                        attempt=attempt + 1,
+                        retry_in=f"{delay}s",
+                    )
+                    await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
-        response = await self.client.chat.completions.create(
+        choice = await self._create_with_retry(
+            label="worker.next_action",
             model=self.model,
             temperature=0.0,
             messages=messages,  # type: ignore[arg-type]
-            tools=self.tool_schemas,  # type: ignore[arg-type]
-            tool_choice="auto",
-            parallel_tool_calls=True,
+            response_format=WORKER_ACTION_RESPONSE_FORMAT,
             extra_body={"enable_thinking": False},
         )
-        message = response.choices[0].message
-        serialized = message.model_dump(mode="json")
-        calls = message.tool_calls or []
-        if calls:
-            finish_calls = [
-                call
-                for call in calls
-                if getattr(getattr(call, "function", None), "name", None) == FINISH_TOOL_NAME
-            ]
-            if finish_calls:
-                if len(calls) != 1:
-                    raise ValueError("Worker finish must be the only action in its round")
-                function = getattr(finish_calls[0], "function", None)
-                if function is None:
-                    raise ValueError("Worker returned a non-function finish call")
-                arguments = json.loads(function.arguments)
-                if not isinstance(arguments, dict):
-                    raise ValueError("Worker finish arguments must be a JSON object")
-                return WorkerModelAction(
-                    assistant_message=serialized,
-                    finish=WorkerFinish.model_validate(arguments),
-                )
-            tool_calls: list[WorkerToolCall] = []
-            for call in calls:
-                function = getattr(call, "function", None)
-                if function is None:
-                    raise ValueError("Worker returned a non-function tool call")
-                arguments = json.loads(function.arguments)
-                if not isinstance(arguments, dict):
-                    raise ValueError("Worker tool arguments must be a JSON object")
-                tool_calls.append(
-                    WorkerToolCall(
-                        tool_name=function.name,
-                        tool_call_id=call.id,
-                        arguments=arguments,
-                    )
-                )
+        content = choice.message.content
+        if not content:
+            raise ValueError("Worker returned an empty action")
+        action = WorkerAction.model_validate_json(content)
+        assistant_message = {"role": "assistant", "content": content}
+        if action.action == "finish":
             return WorkerModelAction(
-                assistant_message=serialized,
-                tool_calls=tool_calls,
+                assistant_message=assistant_message,
+                finish=action.finish,
             )
-        raise ValueError("Worker returned neither research tool calls nor submit_worker_finish")
+        if action.action == "search":
+            calls = [
+                WorkerToolCall(
+                    tool_name="web_search",
+                    tool_call_id=f"worker-search-{uuid4()}",
+                    arguments=search.model_dump(mode="json"),
+                )
+                for search in action.searches
+            ]
+        else:
+            calls = [
+                WorkerToolCall(
+                    tool_name="save_findings",
+                    tool_call_id=f"worker-save-{uuid4()}",
+                    arguments=batch.model_dump(mode="json"),
+                )
+                for batch in action.save_batches
+            ]
+        return WorkerModelAction(
+            assistant_message=assistant_message,
+            tool_calls=calls,
+        )
 
     async def assess_coverage(
         self,
@@ -225,7 +444,8 @@ class OpenAIWorkerModel:
         task_question: str,
         expected_evidence: str,
     ) -> WorkerCoverageAssessment:
-        response = await self.client.chat.completions.create(
+        choice = await self._create_with_retry(
+            label="worker.assess_coverage",
             model=self.model,
             temperature=0.0,
             messages=[
@@ -241,7 +461,7 @@ class OpenAIWorkerModel:
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
-        content = response.choices[0].message.content
+        content = choice.message.content
         if not content:
             raise RuntimeError("Worker coverage assessment returned empty content")
         return WorkerCoverageAssessment.model_validate_json(content)
@@ -264,7 +484,8 @@ class OpenAIWorkerModel:
             "required": slots,
             "additionalProperties": False,
         }
-        response = await self.client.chat.completions.create(
+        choice = await self._create_with_retry(
+            label="worker.summarize",
             model=self.model,
             temperature=0.0,
             messages=[
@@ -291,7 +512,7 @@ class OpenAIWorkerModel:
             parallel_tool_calls=False,
             extra_body={"enable_thinking": False},
         )
-        calls = response.choices[0].message.tool_calls or []
+        calls = choice.message.tool_calls or []
         call = calls[0] if len(calls) == 1 else None
         function = getattr(call, "function", None)
         if function is None or function.name != SUMMARY_TOOL_NAME:
@@ -327,6 +548,7 @@ class ResearchWorker:
             {"role": "user", "content": worker_task_message(task)},
         ]
         information_gain = InformationGainCounter()
+        source_registry = EvidenceSourceRegistry()
         tool_calls_used = 0
         worker_rounds_used = 0
         goal_met = False
@@ -339,18 +561,44 @@ class ResearchWorker:
         }
 
         async def execute_tool(call: WorkerToolCall) -> ToolExecution:
-            call_context = ToolContext(
-                job_id=job_id,
-                task_id=task.task_id,
-                worker_id=worker_id,
-                task_question=task.question,
-                tool_call_id=call.tool_call_id,
-            )
             try:
-                with tracer.start_as_current_span(
-                    f"tool.{call.tool_name}", attributes=span_attributes
-                ):
-                    result = await self.tools[call.tool_name](call.arguments, call_context)
+                resolved_calls = (
+                    source_registry.resolve_save_batch(call.arguments)
+                    if call.tool_name == "save_findings"
+                    else [call.arguments]
+                )
+                results: list[dict[str, Any]] = []
+                for index, arguments in enumerate(resolved_calls, start=1):
+                    tool_call_id = (
+                        f"{call.tool_call_id}:{index}"
+                        if len(resolved_calls) > 1
+                        else call.tool_call_id
+                    )
+                    call_context = ToolContext(
+                        job_id=job_id,
+                        task_id=task.task_id,
+                        worker_id=worker_id,
+                        task_question=task.question,
+                        tool_call_id=tool_call_id,
+                    )
+                    with tracer.start_as_current_span(
+                        f"tool.{call.tool_name}", attributes=span_attributes
+                    ):
+                        results.append(await self.tools[call.tool_name](arguments, call_context))
+                result = (
+                    {
+                        "inserted": sum(int(value.get("inserted", 0)) for value in results),
+                        "assertion_ids": list(
+                            dict.fromkeys(
+                                assertion_id
+                                for value in results
+                                for assertion_id in value.get("assertion_ids", [])
+                            )
+                        ),
+                    }
+                    if call.tool_name == "save_findings"
+                    else results[0]
+                )
                 return ToolExecution(call=call, result=result)
             except Exception as exc:
                 recorded = await asyncio.to_thread(
@@ -407,27 +655,47 @@ class ResearchWorker:
                 raise ValueError(
                     "Worker requested more parallel tool calls than the per-round limit"
                 )
+            model_callable_tools = {"web_search", "save_findings"}
             unavailable = sorted(
-                {call.tool_name for call in calls if call.tool_name not in self.tools}
+                {call.tool_name for call in calls if call.tool_name not in model_callable_tools}
             )
             if unavailable:
                 raise ValueError(f"Worker selected unavailable tools: {unavailable}")
 
             executions = await asyncio.gather(*(execute_tool(call) for call in calls))
             tool_calls_used += sum(1 for execution in executions if execution.error is None)
-            for execution in executions:
-                content: dict[str, Any]
-                if execution.error is not None:
-                    content = {"error": str(execution.error)}
-                else:
-                    content = execution.result or {}
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": execution.call.tool_call_id,
-                        "content": json.dumps(content, ensure_ascii=False, default=str),
-                    }
+            round_executions = list(executions)
+
+            # --- Auto-fetch: fan out web_fetch for top-N search results ---
+            search_executions = [
+                e for e in executions if e.call.tool_name == "web_search" and e.error is None
+            ]
+            if search_executions:
+                urls_to_fetch = _extract_top_urls(
+                    search_executions,
+                    top_n=AUTO_FETCH_TOP_N,
                 )
+                if urls_to_fetch:
+                    fetch_calls = [
+                        WorkerToolCall(
+                            tool_name="web_fetch",
+                            tool_call_id=f"auto-fetch-{uuid4()}",
+                            arguments={"url": url},
+                        )
+                        for url in urls_to_fetch
+                    ]
+                    fetch_executions = await asyncio.gather(
+                        *(execute_tool(call) for call in fetch_calls),
+                    )
+                    round_executions.extend(fetch_executions)
+                    tool_calls_used += sum(1 for e in fetch_executions if e.error is None)
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _runtime_results_message(round_executions, source_registry),
+                }
+            )
 
             save_inserted = sum(
                 int((execution.result or {}).get("inserted", 0))

@@ -15,8 +15,9 @@ from prospector.agents.prompts.research_worker import (
     worker_system_prompt,
 )
 from prospector.agents.research_worker import (
-    FINISH_TOOL_NAME,
-    WORKER_FINISH_SCHEMA,
+    AUTO_FETCH_TOP_N,
+    WORKER_ACTION_RESPONSE_FORMAT,
+    EvidenceSourceRegistry,
     OpenAIWorkerModel,
     ResearchWorker,
     SummaryItem,
@@ -79,27 +80,24 @@ class FakeSummaryClient:
 
 
 class FakeActionMessage:
-    def __init__(self, *, tool_calls: list[Any], content: str | None = None) -> None:
-        self.tool_calls = tool_calls
+    def __init__(self, *, content: str | None = None) -> None:
         self.content = content
-
-    def model_dump(self, *, mode: str) -> dict[str, Any]:
-        assert mode == "json"
-        return {"role": "assistant", "content": self.content, "tool_calls": []}
 
 
 class FakeActionCompletions:
     def __init__(self, message: FakeActionMessage) -> None:
         self.message = message
+        self.request: dict[str, Any] | None = None
 
     async def create(self, **kwargs: Any) -> Any:
-        del kwargs
+        self.request = kwargs
         return SimpleNamespace(choices=[SimpleNamespace(message=self.message)])
 
 
 class FakeActionClient:
     def __init__(self, message: FakeActionMessage) -> None:
-        self.chat = SimpleNamespace(completions=FakeActionCompletions(message))
+        self.completions = FakeActionCompletions(message)
+        self.chat = SimpleNamespace(completions=self.completions)
 
 
 class ConcurrentTool:
@@ -144,7 +142,12 @@ class ParallelWorkerModel:
                     ),
                 ],
             )
-        assert len([item for item in messages if item.get("role") == "tool"]) == 2
+        assert any(
+            "上一轮运行结果" in str(item.get("content"))
+            and "search-a" in str(item.get("content"))
+            and "search-b" in str(item.get("content"))
+            for item in messages
+        )
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
@@ -194,6 +197,18 @@ class PartialFetchTool:
         raise RuntimeError("Exa highlights 为空")
 
 
+class SearchForPartialFetchTool:
+    name = "web_search"
+
+    async def __call__(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> dict[str, Any]:
+        del arguments, context
+        return {"results": [{"url": "https://example.test/source"}]}
+
+
 class PartialFailureModel:
     def __init__(self) -> None:
         self.calls = 0
@@ -206,9 +221,9 @@ class PartialFailureModel:
                 assistant_message={"role": "assistant", "content": None},
                 tool_calls=[
                     WorkerToolCall(
-                        tool_name="web_fetch",
-                        tool_call_id="fetch-partial",
-                        arguments={"url": "https://example.test/source"},
+                        tool_name="web_search",
+                        tool_call_id="search-partial",
+                        arguments={"query": "寻找可抓取的直接证据"},
                     )
                 ],
             )
@@ -274,10 +289,7 @@ class FailThenSucceedModel:
                 ],
             )
         if self.action_calls == 2:
-            assert any(
-                item.get("role") == "tool" and "temporarily unavailable" in str(item.get("content"))
-                for item in messages
-            )
+            assert any("temporarily unavailable" in str(item.get("content")) for item in messages)
             return WorkerModelAction(
                 assistant_message={"role": "assistant", "content": None},
                 tool_calls=[
@@ -321,9 +333,7 @@ class FailTwiceThenSucceedModel:
         if self.action_calls <= 3:
             if self.action_calls > 1:
                 assert any(
-                    item.get("role") == "tool"
-                    and "temporarily unavailable" in str(item.get("content"))
-                    for item in messages
+                    "temporarily unavailable" in str(item.get("content")) for item in messages
                 )
             return WorkerModelAction(
                 assistant_message={"role": "assistant", "content": None},
@@ -423,9 +433,21 @@ class SaveThenSatisfiedModel:
 
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
         self.action_calls += 1
-        if self.action_calls > self.complete_after:
+        if self.action_calls == 1:
+            return WorkerModelAction(
+                assistant_message={"role": "assistant", "content": None},
+                tool_calls=[
+                    WorkerToolCall(
+                        tool_name="web_search",
+                        tool_call_id="search-for-save",
+                        arguments={"query": "查找目标事实的直接证据"},
+                    )
+                ],
+            )
+        save_number = self.action_calls - 1
+        if save_number > self.complete_after:
             raise AssertionError("落证满足 expected_evidence 后不应再请求下一步动作")
-        if self.action_calls > 1:
+        if save_number > 1:
             assert any(
                 "还缺少第二条独立来源的直接证据" in str(message.get("content", ""))
                 for message in messages
@@ -437,9 +459,13 @@ class SaveThenSatisfiedModel:
                     tool_name="save_findings",
                     tool_call_id="save-complete",
                     arguments={
-                        "doc_id": str(uuid4()),
-                        "view_id": str(uuid4()),
-                        "findings": [{"source_ids": ["h1"]}],
+                        "findings": [
+                            {
+                                "source_refs": ["s1:h1"],
+                                "statement": "目标事实已有带原文定位的直接证据。",
+                                "topic_tags": ["目标事实"],
+                            }
+                        ],
                     },
                 )
             ],
@@ -580,38 +606,126 @@ def test_worker_finish_requires_reason() -> None:
         )
 
 
-async def test_openai_worker_finish_is_a_strict_tool_action() -> None:
-    function = SimpleNamespace(
-        name=FINISH_TOOL_NAME,
-        arguments=json.dumps(
-            {
+async def test_openai_worker_action_uses_strict_json_schema() -> None:
+    content = json.dumps(
+        {
+            "action": "finish",
+            "searches": [],
+            "save_batches": [],
+            "finish": {
                 "goal_met": True,
                 "stop_reason": "expected_evidence_satisfied",
                 "reason": "已覆盖任务要求的直接证据。",
             },
-            ensure_ascii=False,
-        ),
+        },
+        ensure_ascii=False,
     )
-    message = FakeActionMessage(tool_calls=[SimpleNamespace(function=function)])
-    model = OpenAIWorkerModel(client=cast(Any, FakeActionClient(message)), model="test-model")
+    message = FakeActionMessage(content=content)
+    client = FakeActionClient(message)
+    model = OpenAIWorkerModel(client=cast(Any, client), model="test-model")
 
     action = await model.next_action([])
 
     assert action.finish is not None
     assert action.finish.reason == "已覆盖任务要求的直接证据。"
-    assert WORKER_FINISH_SCHEMA["function"]["strict"] is True
-    assert WORKER_FINISH_SCHEMA["function"]["parameters"]["additionalProperties"] is False
+    assert WORKER_ACTION_RESPONSE_FORMAT["json_schema"]["strict"] is True
+    assert WORKER_ACTION_RESPONSE_FORMAT["json_schema"]["schema"]["additionalProperties"] is False
+    assert client.completions.request is not None
+    assert client.completions.request["response_format"] == WORKER_ACTION_RESPONSE_FORMAT
+    assert "tools" not in client.completions.request
 
-    prose_message = FakeActionMessage(
-        tool_calls=[],
-        content='我认为可以结束。\n{"goal_met": true}',
-    )
+    prose_message = FakeActionMessage(content='我认为可以结束。\n{"goal_met": true}')
     prose_model = OpenAIWorkerModel(
         client=cast(Any, FakeActionClient(prose_message)),
         model="test-model",
     )
-    with pytest.raises(ValueError, match="submit_worker_finish"):
+    with pytest.raises(ValidationError):
         await prose_model.next_action([])
+
+
+async def test_openai_worker_save_action_keeps_findings_as_an_array() -> None:
+    content = json.dumps(
+        {
+            "action": "save",
+            "searches": [],
+            "save_batches": [
+                {
+                    "findings": [
+                        {
+                            "source_refs": ["s1:h1"],
+                            "statement": "带原文定位的事实。",
+                            "topic_tags": [],
+                        }
+                    ],
+                }
+            ],
+            "finish": None,
+        },
+        ensure_ascii=False,
+    )
+    model = OpenAIWorkerModel(
+        client=cast(Any, FakeActionClient(FakeActionMessage(content=content))),
+        model="test-model",
+    )
+
+    action = await model.next_action([])
+
+    assert action.finish is None
+    assert action.tool_calls is not None
+    assert len(action.tool_calls) == 1
+    call = action.tool_calls[0]
+    assert call.tool_name == "save_findings"
+    assert call.tool_call_id.startswith("worker-save-")
+    assert isinstance(call.arguments["findings"], list)
+    assert "doc_id" not in call.arguments
+    assert "view_id" not in call.arguments
+
+
+def test_source_registry_resolves_runtime_refs_without_exposing_storage_ids() -> None:
+    registry = EvidenceSourceRegistry()
+    doc_id = str(uuid4())
+    view_id = str(uuid4())
+
+    exposed = registry.expose_fetch_result(
+        {
+            "doc_id": doc_id,
+            "view_id": view_id,
+            "media_type": "html",
+            "view_kind": "exa_highlights",
+            "items": [{"text": "原文证据。", "source_ids": ["h1"]}],
+        }
+    )
+    resolved = registry.resolve_save_batch(
+        {
+            "findings": [
+                {
+                    "source_refs": ["s1:h1"],
+                    "statement": "原文支持目标事实。",
+                    "topic_tags": [],
+                }
+            ]
+        }
+    )
+
+    assert exposed["items"] == [{"source_ref": "s1:h1", "text": "原文证据。"}]
+    assert doc_id not in str(exposed)
+    assert view_id not in str(exposed)
+    assert resolved[0]["doc_id"] == doc_id
+    assert resolved[0]["view_id"] == view_id
+    assert resolved[0]["findings"][0]["source_ids"] == ["h1"]
+
+    with pytest.raises(ValueError, match="not available in the current worker"):
+        registry.resolve_save_batch(
+            {
+                "findings": [
+                    {
+                        "source_refs": ["s99:h1"],
+                        "statement": "不得接受编造的引用。",
+                        "topic_tags": [],
+                    }
+                ]
+            }
+        )
 
 
 async def test_worker_executes_independent_calls_concurrently_within_round_budget() -> None:
@@ -690,7 +804,7 @@ async def test_partial_fetch_event_does_not_hide_the_tool_error() -> None:
     worker = ResearchWorker(
         cast(ResearchRepository, repository),
         [
-            ConcurrentTool("web_search", tracker),
+            SearchForPartialFetchTool(),
             PartialFetchTool(repository),
             ConcurrentTool("save_findings", tracker),
         ],
@@ -699,13 +813,11 @@ async def test_partial_fetch_event_does_not_hide_the_tool_error() -> None:
 
     feedback = await worker.run(uuid4(), _task(), worker_id="rw_partial")
 
-    matching = [
-        event for event in repository.tool_events if event.get("tool_call_id") == "fetch-partial"
-    ]
+    matching = [event for event in repository.tool_events if event.get("tool") == "web_fetch"]
     assert len(matching) == 2
     assert "doc_id" in matching[0]
     assert matching[1]["error"] == "Exa highlights 为空"
-    assert feedback.tool_calls_used == 0
+    assert feedback.tool_calls_used == 1
 
 
 async def test_failed_tool_calls_still_consume_rounds_but_not_call_count() -> None:
@@ -787,13 +899,12 @@ async def test_persistent_failures_stop_at_worker_round_limit_without_using_tool
 
 async def test_worker_checks_coverage_after_save_and_stops_with_budget_remaining() -> None:
     repository = FakeRepository()
-    tracker = {"active": 0, "max_active": 0}
     model = SaveThenSatisfiedModel()
     worker = ResearchWorker(
         cast(ResearchRepository, repository),
         [
-            ConcurrentTool("web_search", tracker),
-            ConcurrentTool("web_fetch", tracker),
+            SearchWithResultsTool([{"url": "https://example.test/evidence"}]),
+            RecordingFetchTool(),
             SavingTool(repository),
         ],
         model,
@@ -802,22 +913,21 @@ async def test_worker_checks_coverage_after_save_and_stops_with_budget_remaining
     feedback = await worker.run(uuid4(), _task(), worker_id="rw_save")
 
     assert model.coverage_checks == 1
-    assert model.action_calls == 1
+    assert model.action_calls == 2
     assert feedback.goal_met is True
     assert feedback.stop_reason == "expected_evidence_satisfied"
     assert feedback.finish_reason == "已取得满足任务要求的直接证据。"
-    assert feedback.tool_calls_used == 1
+    assert feedback.tool_calls_used == 3
 
 
 async def test_worker_checks_coverage_after_every_save_until_goal_is_met() -> None:
     repository = FakeRepository()
-    tracker = {"active": 0, "max_active": 0}
     model = SaveThenSatisfiedModel(complete_after=2)
     worker = ResearchWorker(
         cast(ResearchRepository, repository),
         [
-            ConcurrentTool("web_search", tracker),
-            ConcurrentTool("web_fetch", tracker),
+            SearchWithResultsTool([{"url": "https://example.test/evidence"}]),
+            RecordingFetchTool(),
             SavingTool(repository),
         ],
         model,
@@ -826,10 +936,10 @@ async def test_worker_checks_coverage_after_every_save_until_goal_is_met() -> No
     feedback = await worker.run(uuid4(), _task(), worker_id="rw_save")
 
     assert model.coverage_checks == 2
-    assert model.action_calls == 2
+    assert model.action_calls == 3
     assert feedback.goal_met is True
     assert feedback.stop_reason == "expected_evidence_satisfied"
-    assert feedback.tool_calls_used == 2
+    assert feedback.tool_calls_used == 4
 
 
 async def test_worker_binds_summary_text_to_ledger_id_without_model_copying_uuid() -> None:
@@ -861,3 +971,342 @@ async def test_worker_binds_summary_text_to_ledger_id_without_model_copying_uuid
         SummaryItem(assertion_id=assertion_id, text="压缩后的断言文本。")
     ]
     assert feedback.finish_reason == "仍缺少独立来源。"
+
+
+# ---------------------------------------------------------------------------
+# Auto-fetch after web_search
+# ---------------------------------------------------------------------------
+
+
+class SearchWithResultsTool:
+    """web_search tool returning a fixed list of URL results."""
+
+    name = "web_search"
+
+    def __init__(self, results: list[dict[str, str]]) -> None:
+        self.results = results
+
+    async def __call__(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> dict[str, Any]:
+        del arguments, context
+        return {"results": self.results}
+
+
+class RecordingFetchTool:
+    """web_fetch tool that records which URLs were fetched."""
+
+    name = "web_fetch"
+
+    def __init__(self, *, fail_urls: set[str] | None = None) -> None:
+        self.fetched_urls: list[str] = []
+        self.fail_urls = fail_urls or set()
+
+    async def __call__(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> dict[str, Any]:
+        url = str(arguments.get("url", ""))
+        self.fetched_urls.append(url)
+        if url in self.fail_urls:
+            raise RuntimeError(f"Exa returned no content for {url}")
+        return {
+            "doc_id": str(uuid4()),
+            "view_id": str(uuid4()),
+            "media_type": "html",
+            "view_kind": "exa_highlights",
+            "items": [{"text": "目标事实的原文证据。", "source_ids": ["h1"]}],
+        }
+
+
+class SearchThenFinishModel:
+    """Issues one web_search round then finishes."""
+
+    def __init__(self, query: str = "test query") -> None:
+        self.calls = 0
+        self.query = query
+        self.seen_messages: list[dict[str, Any]] = []
+
+    async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
+        self.seen_messages = list(messages)
+        self.calls += 1
+        if self.calls == 1:
+            return WorkerModelAction(
+                assistant_message={"role": "assistant", "content": None},
+                tool_calls=[
+                    WorkerToolCall(
+                        tool_name="web_search",
+                        tool_call_id="search-1",
+                        arguments={"query": self.query},
+                    )
+                ],
+            )
+        return WorkerModelAction(
+            assistant_message={"role": "assistant", "content": "finish"},
+            finish=WorkerFinish(
+                goal_met=False,
+                stop_reason="no_public_evidence",
+                reason="搜索结果均无可保存证据。",
+            ),
+        )
+
+    async def summarize(self, assertions: list[Assertion]) -> list[str]:
+        return []
+
+    async def assess_coverage(
+        self,
+        assertions: list[Assertion],
+        *,
+        task_question: str,
+        expected_evidence: str,
+    ) -> WorkerCoverageAssessment:
+        raise AssertionError("没有落证时不应检查覆盖度")
+
+
+class ParallelSearchThenFinishModel:
+    """Issues two parallel web_search calls then finishes."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
+        self.calls += 1
+        if self.calls == 1:
+            return WorkerModelAction(
+                assistant_message={"role": "assistant", "content": None},
+                tool_calls=[
+                    WorkerToolCall(
+                        tool_name="web_search",
+                        tool_call_id="search-a",
+                        arguments={"query": "query a"},
+                    ),
+                    WorkerToolCall(
+                        tool_name="web_search",
+                        tool_call_id="search-b",
+                        arguments={"query": "query b"},
+                    ),
+                ],
+            )
+        return WorkerModelAction(
+            assistant_message={"role": "assistant", "content": "finish"},
+            finish=WorkerFinish(
+                goal_met=False,
+                stop_reason="no_public_evidence",
+                reason="两条搜索路径均未发现可保存证据。",
+            ),
+        )
+
+    async def summarize(self, assertions: list[Assertion]) -> list[str]:
+        return []
+
+    async def assess_coverage(
+        self,
+        assertions: list[Assertion],
+        *,
+        task_question: str,
+        expected_evidence: str,
+    ) -> WorkerCoverageAssessment:
+        raise AssertionError("没有落证时不应检查覆盖度")
+
+
+async def test_auto_fetch_after_web_search_fans_out_top_n_urls() -> None:
+    urls = [f"https://example.test/{i}" for i in range(AUTO_FETCH_TOP_N)]
+    search_tool = SearchWithResultsTool(
+        [{"url": url, "title": f"Result {i}"} for i, url in enumerate(urls)]
+    )
+    fetch_tool = RecordingFetchTool()
+    model = SearchThenFinishModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [search_tool, fetch_tool, ConcurrentTool("save_findings", {"active": 0, "max_active": 0})],
+        model,
+    )
+
+    feedback = await worker.run(uuid4(), _task(), worker_id="rw_auto_fetch")
+
+    assert fetch_tool.fetched_urls == urls
+    assert feedback.worker_rounds_used == 2
+    # 1 search + AUTO_FETCH_TOP_N successful fetches
+    assert feedback.tool_calls_used == 1 + AUTO_FETCH_TOP_N
+    assert feedback.stop_reason == "no_public_evidence"
+
+
+async def test_auto_fetch_deduplicates_urls_across_parallel_searches() -> None:
+    shared_urls = [f"https://example.test/{i}" for i in range(AUTO_FETCH_TOP_N)]
+    extra_url = "https://example.test/unique"
+
+    # Search A returns shared_urls; Search B returns shared_urls[1:] + extra_url
+    class DualSearchTool:
+        name = "web_search"
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def __call__(
+            self,
+            arguments: dict[str, Any],
+            context: ToolContext,
+        ) -> dict[str, Any]:
+            self.call_count += 1
+            if self.call_count == 1:
+                return {"results": [{"url": u} for u in shared_urls]}
+            return {"results": [{"url": u} for u in shared_urls[1:]] + [{"url": extra_url}]}
+
+    fetch_tool = RecordingFetchTool()
+    model = ParallelSearchThenFinishModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [
+            DualSearchTool(),
+            fetch_tool,
+            ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
+        ],
+        model,
+    )
+
+    feedback = await worker.run(uuid4(), _task(), worker_id="rw_dedup")
+
+    # All shared_urls + extra_url should be fetched exactly once
+    assert len(fetch_tool.fetched_urls) == len(set(fetch_tool.fetched_urls))
+    assert set(fetch_tool.fetched_urls) == set(shared_urls) | {extra_url}
+    assert feedback.worker_rounds_used == 2
+
+
+async def test_auto_fetch_handles_errors_without_breaking_loop() -> None:
+    good_url = "https://example.test/good"
+    bad_url = "https://example.test/bad"
+    search_tool = SearchWithResultsTool([{"url": good_url}, {"url": bad_url}])
+    fetch_tool = RecordingFetchTool(fail_urls={bad_url})
+    model = SearchThenFinishModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [search_tool, fetch_tool, ConcurrentTool("save_findings", {"active": 0, "max_active": 0})],
+        model,
+    )
+
+    feedback = await worker.run(uuid4(), _task(), worker_id="rw_fetch_err")
+
+    # Both URLs were attempted
+    assert good_url in fetch_tool.fetched_urls
+    assert bad_url in fetch_tool.fetched_urls
+    # Only the successful fetch counts
+    assert feedback.tool_calls_used == 1 + 1  # 1 search + 1 good fetch
+    assert feedback.worker_rounds_used == 2
+    assert feedback.stop_reason == "no_public_evidence"
+
+
+async def test_all_auto_fetches_failed_keeps_query_but_hides_search_results() -> None:
+    query = "哪些官方材料能够直接证明目标公司的扩张计划？"
+    fetched_urls = ["https://example.test/failed-a", "https://example.test/failed-b"]
+    hidden_url = "https://example.test/search-only"
+    search_tool = SearchWithResultsTool(
+        [
+            {
+                "url": fetched_urls[0],
+                "title": "raw failed title a",
+                "summary": "raw failed summary a",
+            },
+            {
+                "url": fetched_urls[1],
+                "title": "raw failed title b",
+                "summary": "raw failed summary b",
+            },
+            {
+                "url": hidden_url,
+                "title": "raw hidden title",
+                "summary": "raw hidden summary",
+            },
+        ]
+    )
+    fetch_tool = RecordingFetchTool(fail_urls=set(fetched_urls))
+    model = SearchThenFinishModel(query)
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [
+            search_tool,
+            fetch_tool,
+            ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
+        ],
+        model,
+    )
+
+    feedback = await worker.run(uuid4(), _task(), worker_id="rw_all_fetch_failed")
+
+    result_message = next(
+        str(message["content"])
+        for message in model.seen_messages
+        if "上一轮运行结果" in str(message.get("content"))
+    )
+    assert fetch_tool.fetched_urls == fetched_urls
+    assert query in result_message
+    assert '"result_count": 3' in result_message
+    assert "raw failed title" not in result_message
+    assert "raw failed summary" not in result_message
+    assert "raw hidden title" not in result_message
+    assert "raw hidden summary" not in result_message
+    assert hidden_url not in result_message
+    assert all(f"Exa returned no content for {url}" in result_message for url in fetched_urls)
+    assert feedback.tool_calls_used == 1
+
+
+async def test_partial_auto_fetch_success_keeps_complete_search_results() -> None:
+    good_url = "https://example.test/good-context"
+    bad_url = "https://example.test/bad-context"
+    search_tool = SearchWithResultsTool(
+        [
+            {"url": good_url, "title": "visible good title"},
+            {"url": bad_url, "title": "visible bad title"},
+        ]
+    )
+    fetch_tool = RecordingFetchTool(fail_urls={bad_url})
+    model = SearchThenFinishModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [
+            search_tool,
+            fetch_tool,
+            ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
+        ],
+        model,
+    )
+
+    await worker.run(uuid4(), _task(), worker_id="rw_partial_fetch_context")
+
+    result_message = next(
+        str(message["content"])
+        for message in model.seen_messages
+        if "上一轮运行结果" in str(message.get("content"))
+    )
+    assert "visible good title" in result_message
+    assert "visible bad title" in result_message
+    assert good_url in result_message
+    assert bad_url in result_message
+
+
+async def test_auto_fetch_respects_top_n_limit() -> None:
+    num_results = AUTO_FETCH_TOP_N + 3  # more than top_n
+    urls = [f"https://example.test/{i}" for i in range(num_results)]
+    search_tool = SearchWithResultsTool([{"url": u} for u in urls])
+    fetch_tool = RecordingFetchTool()
+    model = SearchThenFinishModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [search_tool, fetch_tool, ConcurrentTool("save_findings", {"active": 0, "max_active": 0})],
+        model,
+    )
+
+    feedback = await worker.run(uuid4(), _task(), worker_id="rw_top_n")
+
+    # Only top-N URLs should be fetched
+    assert len(fetch_tool.fetched_urls) == AUTO_FETCH_TOP_N
+    assert fetch_tool.fetched_urls == urls[:AUTO_FETCH_TOP_N]
+    assert feedback.tool_calls_used == 1 + AUTO_FETCH_TOP_N

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -19,7 +20,7 @@ from prospector.deterministic.gates import (
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.plan import ResearchTaskDraft, SourcePolicy
-from prospector.tools.save_findings import SAVE_FINDINGS_SCHEMA, SaveFindingsArguments
+from prospector.tools.save_findings import SaveFindingsArguments
 from prospector.tools.web_search import ExaClient
 
 
@@ -191,12 +192,11 @@ def test_hard_gates_are_deterministic() -> None:
 
 
 def test_save_findings_uses_strict_persisted_view_source_ids() -> None:
-    function = SAVE_FINDINGS_SCHEMA["function"]
-    parameters = function["parameters"]
+    parameters = SaveFindingsArguments.model_json_schema()
     finding = parameters["$defs"]["FindingInput"]
-    assert function["strict"] is True
     assert parameters["required"] == ["doc_id", "view_id", "findings"]
     assert finding["required"] == ["source_ids", "statement", "topic_tags"]
+    assert finding["properties"]["source_ids"]["items"]["pattern"] == "^h[1-9][0-9]*$"
 
     parsed = SaveFindingsArguments.model_validate(
         {
@@ -213,7 +213,7 @@ def test_save_findings_uses_strict_persisted_view_source_ids() -> None:
     )
     assert parsed.findings[0].source_ids == ["h1", "h2"]
 
-    with pytest.raises(ValidationError, match="positive hN"):
+    with pytest.raises(ValidationError, match="String should match pattern"):
         SaveFindingsArguments.model_validate(
             {
                 "doc_id": str(uuid4()),
@@ -225,6 +225,26 @@ def test_save_findings_uses_strict_persisted_view_source_ids() -> None:
                         "topic_tags": [],
                     }
                 ],
+            }
+        )
+
+
+def test_save_findings_rejects_stringified_findings() -> None:
+    with pytest.raises(ValidationError):
+        SaveFindingsArguments.model_validate(
+            {
+                "doc_id": str(uuid4()),
+                "view_id": str(uuid4()),
+                "findings": json.dumps(
+                    [
+                        {
+                            "source_ids": ["h1"],
+                            "statement": "字符串化数组不得进入工具层。",
+                            "topic_tags": [],
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
             }
         )
 

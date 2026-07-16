@@ -72,16 +72,3 @@ class SaveFindingsTool:
             "inserted": inserted,
             "assertion_ids": [str(assertion.assertion_id) for assertion in assertions],
         }
-
-
-SAVE_FINDINGS_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "save_findings",
-        "description": (
-            "Persist source items from one web_fetch view and bind them to assertions atomically."
-        ),
-        "parameters": SaveFindingsArguments.model_json_schema(),
-        "strict": True,
-    },
-}

@@ -1,6 +1,7 @@
 # 深度研究智能体（Deep Research Agent）设计文档
 
-- **版本**：v4.13（草案）
+- **版本**：v4.14（草案）
+- **v4.14 变更**：新增 AssertionDisposition（§4.13）：Research Verifier 可将不可信断言标为 unusable（存储不删）；覆盖判断与成文投影只认 usable 断言；冲突侧 LLM 只点 assertion_id、代码绑定 excerpt（与实现对齐）
 - **v4.13 变更**：与 Planner-Worker 实现对齐：ResearchTask 增加 `subjects`；同批任务只能属于一个研究阶段；`effort` 映射全局 Planner 决策轮和分阶段并发/Worker 决策轮；取消 Worker 工具调用总数上限，单轮并行工具调用固定限 8；联网证据统一通过任务级 DocumentView 中的 Exa highlights 落库
 - **v4.12 变更**：ResearchTask 增加必填 `research_stage`（scout / deep_dive / verify），与 `research_mode`、`source_policy` 正交；跨任务综合仍由 Planner 基于断言投影完成，不设 synthesize Worker；任务目标与局部完成判断统一由 `expected_evidence` 承担
 - **v4.11 变更**：Planner 决策上下文从「每轮无状态从库重建」改为**持久 append-only 消息线程**（随 checkpoint 序列化）：保留强制三选一 schema、决策日志落库与「摘要 = 断言投影」三条纪律不变；有界性改由决策轮上限与限长摘要保证；`reflect.note` 从唯一跨轮记忆通道回调为策略审计记录；「逐字回放某轮 prompt」由确定性重建降级为每轮全量 prompt 随 `decision_log` 持久化的记录性满足（§3.3 / §5.2 / §6.7 / §8）
@@ -103,7 +104,7 @@ flowchart TD
     RW -.迭代调用.- TOOLS
     DW -.迭代调用.- TOOLS
 
-    RW -- 片段 + 断言<br/>（联网来源：fetch 写快照与 view；按 source_ids 落证） --> ES[(Evidence Store<br/>Document / DocumentView / Excerpt / Assertion)]
+    RW -- 片段 + 断言<br/>（联网来源：fetch 写快照与 view；按 source_ref 落证） --> ES[(Evidence Store<br/>Document / DocumentView / Excerpt / Assertion)]
     DW -- 片段 + 断言 + Computation --> ES
     UP[上传 / 纳入私有知识库] -- 入库时写快照 + 建树 --> DOC[(对象存储 Document 快照<br/>+ PageIndex 树索引)]
     DOC -.kb_read 读原文.- T3
@@ -134,7 +135,7 @@ flowchart TD
     OBS -.- CEV
 ```
 
-关键修正说明（相对朴素画法）：**工具层不是流水线中的一站，而是 worker 的能力挂载**。工具结果回到 worker 上下文后被过滤与判断，再把 Excerpt 与 Assertion 写入 Evidence Store。本地/私有文档的 **Document 快照在入库时**写入对象存储并绑定 PageIndex 树；`kb_read` 只产出片段，不新建整份快照。联网路径不区分普通网页与 PDF：`web_fetch` 统一请求 Exa 全文与任务相关 highlights，全文写入 Document 快照，highlights 以 `hN` 写入任务级 DocumentView。`save_findings` 只能使用同一 `view_id` 中实际出现的 `source_ids` 落证（D12）。**存储层留全量、上下文层做视图**——全文不进入任何 Prospector LLM 上下文，但快照和 Worker 实际看到的视图都必须持久化（详见 §4 与 §6.2）。**Brief 只负责展开问题，不预制执行清单**：Planner 在决策环中从候选研究空间里选择方向、动态派发 ResearchTask；Plan 版本记录各轮实际形成的执行合同，而非一次性写完的完整 DAG（§5.2）。
+关键修正说明（相对朴素画法）：**工具层不是流水线中的一站，而是 worker 的能力挂载**。工具结果回到 worker 上下文后被过滤与判断，再把 Excerpt 与 Assertion 写入 Evidence Store。本地/私有文档的 **Document 快照在入库时**写入对象存储并绑定 PageIndex 树；`kb_read` 只产出片段，不新建整份快照。联网路径不区分普通网页与 PDF：`web_fetch` 统一请求 Exa 全文与任务相关 highlights，全文写入 Document 快照，highlights 以 `hN` 写入任务级 DocumentView。运行时为每个持久化 highlight 生成当前 Worker 内唯一的 `source_ref`；Worker 只选择 `source_ref`，由代码解析对应的 `doc_id`、`view_id` 与 `hN` 后调用 `save_findings` 落证（D12）。**存储层留全量、上下文层做视图**——全文不进入任何 Prospector LLM 上下文，但快照和 Worker 实际看到的视图都必须持久化（详见 §4 与 §6.2）。**Brief 只负责展开问题，不预制执行清单**：Planner 在决策环中从候选研究空间里选择方向、动态派发 ResearchTask；Plan 版本记录各轮实际形成的执行合同，而非一次性写完的完整 DAG（§5.2）。
 
 ### 3.2 Worker 内部循环
 
@@ -145,7 +146,7 @@ flowchart LR
     A[接收 ResearchTask<br/>question + stage + mode + policy + 预算] --> B[思考：拟定检索策略]
     B --> C[调用工具<br/>search 元数据 / fetch highlights 视图]
     C --> D[评估结果<br/>相关性 / 质量 / 新信息量]
-    D --> S[save_findings 落证<br/>view_id + source_ids → Excerpt + 断言原子绑定]
+    D --> S[save 动作落证<br/>source_ref → 代码解析存储引用 → Excerpt + 断言原子绑定]
     S --> E{局部停止条件}
     E -- 未满足且有预算 --> B
     E -- 满足 --> G[收工声明<br/>goal_met / stop_reason / reason]
@@ -154,20 +155,20 @@ flowchart LR
 
 **三条循环纪律（worker 产物合同）**：
 
-1. **发现只有一个入口**：worker 在循环内通过 `save_findings(doc_id, view_id, [{source_ids, statement, topic_tags}])` 落证；运行时先验证 view 属于当前 Job、Task 与 Document version，再创建 Excerpt、Assertion 并绑定 `excerpt_ids`——断言与其证据在同一次调用中出生、原子绑定，不存在"断言引用不存在的证据"的状态。所有联网来源的 `hN` 都只能解析为该任务持久化的 Exa highlight。未经该入口的内容没有任何通道进入 Planner 或下游视野。
+1. **发现只有一个入口**：worker 输出严格 `save` 动作，只提交 `source_refs、statement、topic_tags`；运行时从当前 Worker 的来源注册表解析出 `doc_id、view_id、source_ids`，再调用内部 `save_findings` 落证。运行时验证 view 属于当前 Job、Task 与 Document version，再创建 Excerpt、Assertion 并绑定 `excerpt_ids`——断言与其证据在同一次调用中出生、原子绑定，不存在"断言引用不存在的证据"的状态。所有联网来源的 `source_ref` 都只能解析为该任务持久化的 Exa highlight。未经该入口的内容没有任何通道进入 Planner 或下游视野。
    Worker 必须按「单个证据缺口 → 搜索/抓取 → 立即落证 → 覆盖判断」循环推进，禁止积压已经发现的可用来源后继续扩展新方向。每次 `save_findings` 成功后，运行时只使用该任务全部已落库断言与 `expected_evidence` 做独立覆盖判断；必需证据已满足时主动收工，未满足时只把明确缺口回注给下一轮研究。
-2. **收工声明只汇报决策原因，不汇报发现**：Worker 必须严格调用 `submit_worker_finish {goal_met, stop_reason, reason}`。`goal_met` 为对照 `expected_evidence` 的自评；`reason`（限长）用一句极短中文说明为何现在结束，持久化为 `finish_reason`。它是标注过的决策观察，不是事实陈述。
+2. **收工声明只汇报决策原因，不汇报发现**：Worker 每轮通过 `response_format=json_schema + strict=true` 输出唯一 `WorkerAction`，只能选择 `search / save / finish` 之一；收工时选择 `finish` 并填写 `{goal_met, stop_reason, reason}`。`goal_met` 为对照 `expected_evidence` 的自评；`reason`（限长）用一句极短中文说明为何现在结束，持久化为 `finish_reason`。它是标注过的决策观察，不是事实陈述。
 3. **任务摘要 = 库投影的干净上下文压缩**：worker 收工时生成一段供 Planner 判断覆盖度的综合摘要，但该调用的 prompt **从零构建**，仅含本 task 已落库的断言列表（statement + assertion_id）与收工声明，**禁止携带消息轨迹**——轨迹在上下文里时，"只按库总结"就从结构保证退化为提示词祈祷。摘要用中档模型（§3.3）。可选加固：要求摘要中事实句内联引用 `assertion_id`，运行时确定性校验 id 存在于本 task 名下。摘要是库的纯函数：若崩溃发生在"断言已落库、摘要未生成"的间隙，恢复时只补摘要、不重跑研究。摘要失真的爆炸半径由此被钉死——最坏导致 Planner 对派发的轻微误判，Verifier 与成文线只读库，任何失真进不了证据链。
 
 #### 联网工具合同（网页路径）
 
-一句话：**Worker 只消费持久化的任务级视图，并且只能用该视图实际返回的 source_ids 落证。**
+一句话：**Worker 只消费持久化的任务级视图，并且只能用运行时代码为该视图生成的 source_ref 落证。**
 
 | 工具 | 合同 |
 |------|------|
 | `web_search` | 只返回条目元数据（标题、URL、snippet 等），**不**触发抓取或内容抽取。Worker 自行判断哪些 URL 值得 `web_fetch`。与 legacy「搜索即抓取即摘要」不同：Exa contents 与 highlights 成本只花在主动选中的页面上。 |
-| `web_fetch(url)` | **不返回全文**。工具对普通网页和 PDF 使用同一合同：请求 Exa `text` 与 `highlights.query=task.question`，全文写入 Document 快照，抽取片段编号为 `hN` 并写入任务级 DocumentView；Prospector 不调用额外 LLM、不自行切段。返回 `doc_id`、`version`、`media_type`、`view_id` 与 items。 |
-| `save_findings(doc_id, view_id, source_ids)` | 唯一落证入口。先验证 view 的 Job、Task、Document version 和 source_ids；`hN` 直接取回该 view 中持久化的 Exa highlight，再原子写入 Excerpt + Assertion。 |
+| `web_fetch(url)` | **不返回全文**。工具对普通网页和 PDF 使用同一合同：请求 Exa `text` 与 `highlights.query=task.question`，全文写入 Document 快照，抽取片段编号为 `hN` 并写入任务级 DocumentView；Prospector 不调用额外 LLM、不自行切段。工具内部返回存储 ID 与 items，Worker 运行时只向模型暴露唯一 `source_ref` 和 highlight 原文。 |
+| `save(source_refs, statement, topic_tags)` | 模型唯一落证动作。运行时从来源注册表解析存储 ID，校验当前 Worker 可见性，再调用内部 `save_findings` 验证 view 的 Job、Task、Document version 和 source_ids；`hN` 直接取回持久化 highlight，原子写入 Excerpt + Assertion。 |
 
 配套规则：
 
@@ -199,7 +200,7 @@ Worker 停止后，其产出仍要经过 Verifier 检查；Verifier 可产出缺
 |------|------|------|------|----------|
 | 0 问题展开 | Scope Agent | 用户问题 | 具体化并展开研究空间的 Research Brief（待确认） | 中档 |
 | 1 规划 | Planner | 持久消息线程：Brief 前缀 + 历轮决策 + 断言投影摘要 / Verifier gap / 拒绝反馈（§5.2 决策上下文合同） | Research Plan vN（本轮执行合同与派发的 ResearchTask） | 最强档 |
-| 2 搜集 | Research / Data Worker ×N | ResearchTask | 片段 + 断言（经 `save_findings` 原子入库；联网来源经持久化 view 的 source_ids 落证）+ 收工声明 + 断言投影摘要 | 中档（并行，成本敏感） |
+| 2 搜集 | Research / Data Worker ×N | ResearchTask | 片段 + 断言（经 `save_findings` 原子入库；联网来源由 source_ref 解析至持久化 view）+ 收工声明 + 断言投影摘要 | 中档（并行，成本敏感） |
 | — | 工具侧来源视图 | `web_fetch` 内部：URL + task.question | 带 `hN` 的 Exa highlights | Exa contents 能力；Prospector 不调用额外 LLM |
 | 3 验证 | Research Verifier | Evidence Store + Research Plan 版本历史 + Brief | 执行合同覆盖判断 / 偏题检查 / gap 建议 / 放行；有预算则 Replan → Planner | 最强档 |
 | 4 声明 | Outline + Claim Drafter + Claim Verifier | 断言 + Excerpt | 大纲 + 已验证 Claim 集 | 中档（可并行分片） |
@@ -230,7 +231,7 @@ Worker 停止后，其产出仍要经过 Verifier 检查；Verifier 可产出缺
 
 **私有知识库即文档集**：同一私有知识库内的 Document 构成可检索语料；一次研究默认可检索该库全文，不另建 Job 级文档白名单。创建研究时可附带可选 `seed_document_refs`（用户点名的附件），只作 Scope/Planner/Worker 的**优先关注提示**并参与幂等输入摘要，**不**限制检索范围。树导航与相关性判断由 Research Worker 的 ReAct 循环完成，**不在 PageIndex 工具内再套一层 LLM 检索**，避免嵌套耗尽 Task 预算并保持可审计。跨文档粗选依赖各文档 description / 元数据与 Worker 推理，不另建向量私有库。多用户运行时（§13）下，私有知识库与用户/租户文档空间对应；本设计不引入 Job↔Document 关联表。
 
-**落证**：本地文档经 `kb_read` 适配层写入 `EvidenceExcerpt`（锚定已有 `doc_id` + `version` + page/line locator），再经 `save_findings` 绑定 Assertion。联网路径在 **`web_fetch` 时**写 Document 快照与任务级 DocumentView；`save_findings` 只接受同一 view 中的 `hN`，并从持久化 Exa highlights 回取原文。PageIndex 不进入引用链；权威链仍是 Claim → Excerpt → Document version。工具入参只接受本系统的 `doc_id` 和 `view_id`，后端校验 Job、Task、Document version 归属。
+**落证**：本地文档经 `kb_read` 适配层写入 `EvidenceExcerpt`（锚定已有 `doc_id` + `version` + page/line locator），再经 `save_findings` 绑定 Assertion。联网路径在 **`web_fetch` 时**写 Document 快照与任务级 DocumentView；运行时为 view 中的 `hN` 生成唯一 `source_ref`，模型只提交该引用，代码解析出存储 ID 后从持久化 Exa highlights 回取原文。PageIndex 不进入引用链；权威链仍是 Claim → Excerpt → Document version。内部存储工具只接受代码解析出的本系统 `doc_id` 和 `view_id`，后端校验 Job、Task、Document version 归属。
 
 ---
 
@@ -245,7 +246,7 @@ Worker 停止后，其产出仍要经过 Verifier 检查；Verifier 可产出缺
 | 确定性执行记录 | Computation（沙箱计算的执行事实） | 不可变，内容寻址 |
 | 模型的判断 | Assertion / Claim + 关系与判定表（ClaimEvidence / ClaimPremise / ClaimComputation / ClaimVerdict / ConflictResolution） | 追加式演化，判断历史可审计 |
 
-分层的原因：原始证据、模型抽取的事实、模型对证据的判断三者的生命周期与可信级别完全不同，混在一张表里会破坏 append-only 语义（判断演化时被迫回写"证据"），并让引用验证退化为"拿模型输出验证模型输出"。核心原则是**存储层留全量，上下文层做视图**——DocumentView 是投喂 LLM 的任务级视图，不是 Document 的存储格式。
+分层的原因：原始证据、模型抽取的事实、模型对证据的判断三者的生命周期与可信级别完全不同，混在一张表里会破坏 append-only 语义（判断演化时被迫回写"证据"），并让引用验证退化为"拿模型输出验证模型输出"。核心原则是**存储层留全量，上下文层做视图**——DocumentView 是投喂 LLM 的任务级视图，不是 Document 的存储格式；Assertion 的 usable 投影（§4.13）同理：废证判断追加落库，默认消费视图过滤 unusable。
 
 ### 4.1 Research Brief
 
@@ -340,7 +341,7 @@ Document 是某次纳入系统时那份文件的**完整原文副本**，落库�
   "index_ref": "s3://.../doc_889_v2/pageindex/",
   "source_meta": {
     "title": "...",
-    "publisher": "...",
+    "author": "...",
     "published_at": "2026-03-14"
   }
 }
@@ -350,7 +351,7 @@ Document 是某次纳入系统时那份文件的**完整原文副本**，落库�
 
 `DocumentView` 是某个 Task 实际看到的联网来源视图，记录 `view_id`、`job_id`、`task_id`、`doc_id`、`doc_version`、`view_kind` 与 items。所有联网来源的 items 都保存 Exa highlight 原文及其 `hN`。同一 Document 可因 task question 不同产生多个 view，禁止把任务相关 highlights 固化进 Document 版本。
 
-**Document 不存 tier 字段**——v2.1 曾把 tier 放在 `source_meta` 里，这与"策略调整时无需回写任何证据"自相矛盾：字段固化即需回写。tier 在**读取时**由 `publisher` 经版本化的 tier 策略表解析得出（official / academic / major_media / industry / ugc），与"Assertion 是可从 Excerpt 重建的视图"遵循同一原则：**能从权威源推导的东西不固化为字段**。tier 的语义不变：它不是事实，是先验——由策略表或人工配置产生，只表示来源类别的基础优先级，用于检索排序与 Verifier 可信度检查的加权。高 tier 不意味着该来源的任意 Excerpt 支持任意 Claim——"某条 Excerpt 是否支持某条 Claim"永远由 Claim Verifier 逐条裁决，tier 不参与该裁决。否则系统会滑向"官方网站 = 任何主张都可信"。
+**Document 不存 tier 字段，当前也不建设来源 tier 策略表。** Exa 不提供 publisher 字段；Research Verifier 读取 URL、标题、author、发布时间与 Excerpt 原文，并结合是否存在独立佐证直接判断来源可信度。来源身份只是先验：官方来源适合证明官方行为和表态，不自动证明效果或因果；低可信度来源可以提供线索，但关键结论不能只依赖它。"某条 Excerpt 是否支持某条 Claim"仍由 Claim Verifier 逐条裁决，Research Verifier 的来源判断不替代该裁决。
 
 ### 4.4 EvidenceExcerpt（精确原文片段）
 
@@ -525,7 +526,7 @@ computed 型的权威链为 **Claim → ClaimComputation → Computation → inp
 
 - **`conflict_key`** 为冲突双方 `excerpt_ids` 排序后的哈希，幂等去重键（重复检测同一冲突不产生语义重复，§13.4 幂等纪律的自然延伸）。它可从 `excerpt_ids` 推导，是为 ClaimVerdict 聚合热路径保留的**反规范化缓存**（拿到 contradict 证据对 → 算哈希 → 查覆盖），与 `depth`（§4.8）同一辩护。行由 **(conflict_key, verifier_run_id)** 复合键标识，与其余关系/判定表同构，不设代理主键。锚定 Excerpt 而非 Claim，使研究期（§5.3 矛盾检测发生在 claim 尚不存在时）与声明期共用同一张表。
 - **`decision` 只有两个终态**，正对应"并陈或裁决"。"需补搜裁决"不是第三种 decision——它表现为**本轮不写 resolution + 生成 gap 补搜任务**，补搜完成后的下一次 verifier run 再裁决。悬而未决的冲突就是没有 resolution 行的冲突，质量门据此拦截，无需 pending 状态。
-- **adjudicated 必须给出 `winning_excerpt_ids` 与 `rationale`**——"择一"从此不可能静默：选了谁、为什么，都是可审计的落库事实。tier 可作为 rationale 的权衡输入（这与 §4.3"tier 不参与 claim 支撑裁决"不冲突：冲突裁决权衡的正是来源可信度先验）。
+- **adjudicated 必须给出 `winning_excerpt_ids` 与 `rationale`**——"择一"从此不可能静默：选了谁、为什么，都是可审计的落库事实。来源身份、原文质量、时效性与独立佐证可作为 rationale 的权衡输入，但不能以来源身份代替对具体 Excerpt 的判断。
 
 四个下游消费点：
 
@@ -535,6 +536,26 @@ computed 型的权威链为 **Claim → ClaimComputation → Computation → inp
 | Claim Drafter | present_both 的冲突起草为**双方各自的 `opinion_attributed` claim**（§4.6 已有类型），不择一、不调和成含混表述 |
 | Narrative Composer（§5.4） | present_both 的 claim 对必须相邻并陈且各带来源归属；adjudicated 正常引用胜方，可选择性脚注分歧的存在 |
 | 质量门（§3.2 条件 3 / §7） | 机器可查：不存在"有 contradict 关系、无覆盖 resolution"的高优先级 claim |
+
+研究期冲突由 Research Verifier 输出 `conflict_judgements`（只引用 `assertion_id`）；持久化前由代码按 `assertions.excerpt_ids` 绑定为 `ConflictResolution.excerpt_ids`，模型不得直接填写 excerpt UUID。
+
+### 4.13 AssertionDisposition（断言证据资格，版本化）
+
+Research Verifier 对**单条 Assertion** 的证据资格判断：伪学术、UGC 幻觉数字、或无独立佐证却支撑核心定量结论的断言，应被标为 `unusable`。Document / Excerpt / Assertion **不删**；资格判断按 `verifier_run` 追加，有效状态按 plan_version 升序 last-write-wins（`unusable` / `restored`；从未处置 → usable）。
+
+```json
+{
+  "assertion_id": "as_310",
+  "status": "unusable | restored",
+  "reason": "来源为人人文库类 UGC 伪学术，定量数字无法在真实期刊复现",
+  "verifier_run_id": "vr_006",
+  "created_at": "..."
+}
+```
+
+- **挂在 Assertion，不做 excerpt 绑定**：毒的是那句抽取事实；冲突（§4.12）才需要 excerpt 对撞服务于 Claim 期。
+- **`source_credibility` 缺口必须带 `related_assertion_ids`**，且这些 ID 必须在同轮 dispositions 中为 `unusable`——禁止只填 excerpt 绕过废证。
+- **消费约定**：Verifier 覆盖度与后续 Outline/Claim 默认只读 usable 投影；Replan 时把 `unusable_assertions`（id/statement/reason）注入 Planner 线程，历史 worker_projection 中的假句不得再作覆盖依据。
 
 ---
 
@@ -636,12 +657,12 @@ flowchart TD
 
 ### 5.3 Phase 3：Verifier 的四项检查
 
-1. **执行合同覆盖度**：对照 Research Plan 版本历史、任务完成条件与 Planner 的 `finish.reason`，判断现有 Assertion / Excerpt 是否足以履行 Planner 已作出的研究承诺；同时回看 Brief，检查 Planner 是否遗漏或偏离用户的核心问题。Brief 中由 Scope 补充的候选方向本身不构成缺口，只有被 Planner 纳入 Plan 的方向才进入覆盖判断。可记录简短 coverage rationale 与缺口叙述，供 Composer 披露局限、供 Replan 定向补派；
+1. **执行合同覆盖度**：对照 Research Plan 版本历史、任务完成条件与 Planner 的 `finish.reason`，判断现有 **usable** Assertion / Excerpt 是否足以履行 Planner 已作出的研究承诺（`unusable` 断言不得算作成绩，见 §4.13）；同时回看 Brief，检查 Planner 是否遗漏或偏离用户的核心问题。Brief 中由 Scope 补充的候选方向本身不构成缺口，只有被 Planner 纳入 Plan 的方向才进入覆盖判断。可记录简短 coverage rationale 与缺口叙述，供 Composer 披露局限、供 Replan 定向补派；
 2. **矛盾检测**：对语义冲突的 Assertion 簇下钻到各自的 Excerpt 原文比对，判定是"来源分歧需并陈"还是"需补搜裁决"——并陈与裁决写入版本化的 ConflictResolution（§4.12），补搜路径表现为本轮不写 resolution + 生成 gap 补搜建议，下一轮 Planner / verifier run 再裁决；
-3. **可信度**：关键结论是否过度依赖低 tier 来源（tier 由 Excerpt 所属 Document 的 publisher 经策略表解析，仅作加权先验，见 §4.3）；
+3. **可信度**：结合 URL、标题、author、发布时间、Excerpt 原文与独立佐证，直接判断关键结论是否过度依赖不可靠来源（见 §4.3）。若断言本身不可采信，须同时写入 AssertionDisposition（`unusable`）；实质影响结论时再开 `source_credibility` 重大缺口并 Replan——**缺口负责补查，废证负责取消资格**，二者不可互相替代；
 4. **缺口**：生成结构化 gap list（建议的补查子课题说明、已尝试路径、为何不足），转化为定向补派并生成新 Plan 版本交回 Planner。补搜建议优先**换取证角度 / 来源类型**，避免对同一死指标同义重搜。
 
-Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入声明起草，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束，保存 partial report 与结构化 gap artifact（该 artifact 同时是 FR-11 追问式研究的天然入口）。决策轮上限与预算一样，只停止研究，不放行质量门（§7）。
+Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入声明起草，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。当前 Verifier-only 实现尚无 Claim/Composer，因此此处直接报错退出，不生成 partial report 或 gap artifact；完整成文链接入后再由失败出口生成这两类产物。决策轮上限与预算一样，只停止研究，不放行质量门（§7）。
 
 ### 5.4 Phase 4–5：声明起草、验证与成文
 成文流水线为：**Verified Evidence → Outline → Atomic Claim Draft → Claim Verification → Narrative Composition → No-new-facts Audit → Deterministic Presentation Render**。核心规则：叙述只能由已验证 Claim 组织，任何新事实性表达必须回炉验证，不能直接出现在报告里。
@@ -812,7 +833,7 @@ v4.0 引入的分层 Brief / Phase 0.5 前哨校准在 v4.1 **废止**。理由�
 
 ### 6.12 D12：Exa highlights 来源视图与原子落证（整页原文不进 Prospector LLM 上下文）
 
-**决策**：联网路径上，Worker（及一切编排/验证 LLM）的上下文只消费持久化 DocumentView。普通网页和 PDF 统一使用带 `hN` 的 Exa highlights，Excerpt 直接使用该任务持久化的抽取片段。`save_findings` 必须同时校验 `doc_id`、`view_id`、当前 Job/Task 与 source_ids。`web_search` 与 `web_fetch` 职责拆开：搜索发现、fetch 请求 Exa 全文与 highlights 并形成 view、`save_findings` 落证。
+**决策**：联网路径上，Worker（及一切编排/验证 LLM）的上下文只消费持久化 DocumentView。普通网页和 PDF 统一使用带 `hN` 的 Exa highlights，Excerpt 直接使用该任务持久化的抽取片段。Worker 运行时只向模型暴露唯一 `source_ref`；代码解析后，`save_findings` 必须同时校验 `doc_id`、`view_id`、当前 Job/Task 与 source_ids。`web_search` 与 `web_fetch` 职责拆开：搜索发现、fetch 请求 Exa 全文与 highlights 并形成 view、`save_findings` 落证。
 
 **硬规则**：整页原文不进入 Worker、Planner、Verifier、成文模型或任何其他 Prospector LLM 上下文。全文由 Exa 处理，Prospector 中的模型只看到 highlights。
 
@@ -872,8 +893,8 @@ flowchart TD
 | 编排失控 | 简单问题派生大量 worker | effort scaling 启发式 + 每轮并发上限 + 决策轮上限（凡决策皆计数，§5.2 / §7） |
 | 检索死循环 | Worker 反复搜索不存在的信息或工具持续失败 | 信息增益停止条件机器判定（连续 2 轮 `save_findings` 无新增 Excerpt / Assertion 行即停，§3.2）+ Worker 决策轮硬上限 |
 | 全文灌进 Worker | 为「提效」把网页全文塞进上下文 | D12 硬规则；`web_fetch` 只返回持久化的任务级来源视图 |
-| 未经 view 落证 | Worker 提交未见过的 highlight id 或任意文本 | `save_findings` 强制校验 view 的 Job、Task、Document version 与 source_ids |
-| 证据污染 | 低质量来源支撑关键结论 | 来源 tier 先验 + Verifier 可信度检查；tier 不替代逐条验证（§4.3） |
+| 未经 view 落证 | Worker 提交未见过的 source_ref 或任意文本 | 运行时先校验 source_ref 属于当前 Worker，再由 `save_findings` 校验 view 的 Job、Task、Document version 与 source_ids |
+| 证据污染 | 低质量来源支撑关键结论 | Verifier 结合来源元数据、Excerpt 原文与独立佐证直接判断；来源身份不替代逐条验证（§4.3） |
 | 声明无证据支撑 | claim 与 Excerpt 不符 | Claim 验证前移，成文前逐条拦截；验证失败不受预算豁免（§7） |
 | 叙述引入新事实 | 报告中出现 claim 集合外的事实表达 | no-new-facts 审计逐句检出 → 回炉验证（归纳性结论登记为 derived），通过才补录，否则改写或删除 |
 | 推理过度延伸 | derived claim 结论强于前提所能支撑 | 前提审查（硬查前提有效性 + 软查推理跳跃与校准）+ 推理链深度上限 2 + 呈现层显式标记为分析结论 |
@@ -1035,7 +1056,7 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 | 原始文档存储 | 对象存储（S3 兼容） | Document 快照与 PageIndex 树产物按 version 落桶；debug 诊断负载使用 Workspace 隔离前缀和独立生命周期；PostgreSQL 只存业务对象的 `storage_ref` / `index_ref` |
 | 任务分发 | RabbitMQ | 工作队列语义（逐条 ack、消费者竞争、独立消费池承接 Data Worker 安全边界）；否决方案见 D9 |
 | 热状态 | Redis | 仅两项职责：SSE 事件流（Stream）与带 TTL 的 job debug flag；事件可从 PG 重建，debug flag 可安全丢弃（§13.2） |
-| 网页获取 | Exa（search + `/contents`）+ 任务级来源视图 | `web_search` 仅元数据；所有联网来源通过一次 `/contents` 请求取得全文与 task-aware highlights，全文写 Document 快照，带 `hN` 的 highlights 写任务级 DocumentView。`save_findings` 只能使用同一 view 的 source_ids（D12）；Prospector 不调用额外压缩 LLM |
+| 网页获取 | Exa（search + `/contents`）+ 任务级来源视图 | `web_search` 仅元数据；所有联网来源通过一次 `/contents` 请求取得全文与 task-aware highlights，全文写 Document 快照，带 `hN` 的 highlights 写任务级 DocumentView。运行时向 Worker 暴露唯一 source_ref，并由代码解析至同一 view 的 source_ids 后调用 `save_findings`（D12）；Prospector 不调用额外压缩 LLM |
 | 本地/私有文档 | PageIndex（外依赖） | 入库建树；Worker 经 `kb_list` / `kb_structure` / `kb_read` 导航；不移植实现、不另建向量库 |
 | 计算 | 沙箱化 Python / SQL | 数值结论一律代码算，LLM 不做算术（沿用既有原则） |
 | 后端 | FastAPI + SSE | 异步并发 + 流式推送 |
@@ -1076,7 +1097,7 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 
 ## 12. 风险与开放问题
 
-1. **矛盾裁决的边界**：来源冲突时"并陈 vs 裁决"的判定规则目前依赖 LLM 判断。处置决定连同理由现已落 ConflictResolution（§4.12），误判率可对人工标注集直接度量（评测文档 §3.2），必要时引入来源 tier 加权规则。
+1. **矛盾裁决的边界**：来源冲突时"并陈 vs 裁决"的判定规则目前依赖 LLM 判断。处置决定连同理由现已落 ConflictResolution（§4.12），误判率可对人工标注集直接度量（评测文档 §3.2）。
 2. **Assertion 视图与原文的漂移**：Claim Drafter 以 Assertion 为起草线索，若抽取阶段产生偏差，会体现为起草出的 claim 在验证时被高频驳回。前移后修订成本已降为 claim 级，但驳回率过高仍浪费预算。缓解：对 `number` / `fact` 类高风险断言在抽取时即做一次轻量 Excerpt 回验；监控 claim 验证驳回率作为抽取质量的代理指标。存储与回取成本（快照全量落库、验证时按需拉取 Excerpt）需在 M1 落地后观测，预期对象存储成本可忽略、主要关注验证阶段的读放大。
 3. **research_mode 枚举集的充分性**：当前枚举（factual / comparison / counterargument / risk_scan / timeline）是否覆盖真实任务分布，是否需要 entity_profile 等新模式，由 M3 评测基建产出的评估数据驱动扩展。本地长文档精读已由 PageIndex 三原语承接（D10），不再预留独立 deep_read runtime。
 4. **推理审查的软判断可靠性**：derived claim 的"过度延伸"与"校准失当"检测依赖 LLM 判断，无法像 Excerpt 比对那样机器化；深度上限 2 与人工抽检是兜底而非解决。需在评估集中专设推理型题目，监控 derived claim 的人工复核不一致率，过高则收紧深度上限或对高风险 claim_type（causal）禁用 derived。

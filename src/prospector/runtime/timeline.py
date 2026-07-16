@@ -15,7 +15,7 @@ from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.plan import ResearchTask
 
 POLL_INTERVAL_SECONDS = 0.2
-TERMINAL_PHASES = {"verifier_pending", "failed"}
+TERMINAL_PHASES = {"outline_pending", "failed"}
 
 EmitLine = Callable[[str], None]
 
@@ -33,7 +33,9 @@ _NEAR_BLACK = "\033[38;5;232m"
 _TASK_COLORS = (_DARK_CYAN, _DARK_MAGENTA, _DARK_ORANGE, _DARK_BLUE, _DARK_GREEN)
 _TASK_PREFIX_RE = re.compile(r"^\[T(\d+)\]")
 _BRANCH_TASK_RE = re.compile(r"^  [├└]─ T(\d+)\b")
-_GLOBAL_PREFIX_RE = re.compile(r"^\[(?:研究|轮\s+\d+)\]")
+_BRANCH_GAP_RE = re.compile(r"^  [├└]─ ")
+_BRANCH_CONT_RE = re.compile(r"^  │")
+_GLOBAL_PREFIX_RE = re.compile(r"^\[(?:研究|核验|重规划|轮\s+\d+)\]")
 
 
 def _timeline_colors_enabled() -> bool:
@@ -75,9 +77,16 @@ def colorize_timeline_line(line: str, *, colors: bool | None = None) -> str:
     if branch_match is not None:
         return f"{_task_color(int(branch_match.group(1)))}{line}{_RESET}"
 
+    if _BRANCH_GAP_RE.match(line) or _BRANCH_CONT_RE.match(line):
+        if "重大" in line:
+            return f"{_DARK_RED}{line}{_RESET}"
+        return f"{_DARK_ORANGE}{line}{_RESET}"
+
     if _GLOBAL_PREFIX_RE.match(line):
-        if "失败" in line:
+        if "失败" in line or "不通过" in line:
             return f"{_BOLD}{_DARK_RED}{line}{_RESET}"
+        if "通过" in line or "收工" in line:
+            return f"{_BOLD}{_DARK_GREEN}{line}{_RESET}"
         return f"{_BOLD}{_NEAR_BLACK}{line}{_RESET}"
 
     return line
@@ -123,6 +132,28 @@ _REJECTION_LABELS = {
     "over_scope": "单任务申报对象超出工具预算可覆盖范围",
     "schema_error": "输出格式不合法",
     "empty_finish": "尚无证据，不能结束研究",
+}
+
+_GAP_KIND_LABELS = {
+    "plan_coverage": "覆盖",
+    "brief_alignment": "Brief对齐",
+    "conflict": "冲突",
+    "source_credibility": "来源可信度",
+}
+
+_GAP_SEVERITY_LABELS = {
+    "major": "重大",
+    "minor": "次要",
+}
+
+_CONFLICT_DECISION_LABELS = {
+    "present_both": "并陈",
+    "adjudicated": "裁决",
+}
+
+_VERIFIER_TRIGGER_LABELS = {
+    "planner_finish": "Planner finish",
+    "budget_exhausted": "决策轮耗尽",
 }
 
 
@@ -176,6 +207,15 @@ class ResearchTimelineRenderer:
             remaining = self._remaining_rounds(decision_round)
             return [f"[轮 {decision_round}] Planner 决策被拒绝：{reason}（余 {remaining} 轮）"]
 
+        if event_type == "verifier.completed":
+            return self._render_verifier_completed(event, payload)
+
+        if event_type == "replan.triggered":
+            return [
+                f"[重规划] Verifier {_short_id(payload.get('verifier_run_id'))} "
+                f"触发 Plan v{int(payload['plan_version'])}"
+            ]
+
         task_id = payload.get("task_id") or event.get("task_id")
         if task_id is None:
             return []
@@ -188,8 +228,11 @@ class ResearchTimelineRenderer:
             )
             budget = dict(payload.get("budget") or {})
             round_limit = int(budget.get("max_worker_rounds", 0))
+            subjects = list(payload.get("subjects") or [])
+            subjects_hint = f" · 对象：{'、'.join(subjects)}" if subjects else ""
             return [
-                f"[{task_label}] 开始：{stage}阶段 / {mode}（Worker 决策轮预算 {round_limit} 轮）"
+                f"[{task_label}] 开始：{stage}阶段 / {mode}"
+                f"（Worker 决策轮预算 {round_limit} 轮）{subjects_hint}"
             ]
 
         if event_type == "task.tool_used":
@@ -216,16 +259,115 @@ class ResearchTimelineRenderer:
 
         return []
 
+    def _render_verifier_completed(
+        self, event: dict[str, Any], payload: dict[str, Any]
+    ) -> list[str]:
+        plan_version = int(payload["plan_version"])
+        major_count = int(payload.get("major_gap_count", 0))
+        minor_count = int(payload.get("minor_gap_count", 0))
+        conflict_count = int(payload.get("conflict_resolution_count", 0))
+        unusable_count = int(payload.get("unusable_assertion_count", 0))
+        reason = _first_line(payload.get("decision_reason"))
+        gap_summaries = list(payload.get("gap_summaries") or [])
+        conflict_summaries = list(payload.get("conflict_summaries") or [])
+        unusable_summaries = list(payload.get("unusable_summaries") or [])
+
+        if payload.get("release_decision") == "pass":
+            lines = [
+                f"[核验] Plan v{plan_version} 通过"
+                f"（重大缺口 {major_count}，冲突裁决 {conflict_count}"
+                f"，废证 {unusable_count}）"
+            ]
+            if reason:
+                lines.append(f"[核验] 收工：{reason}")
+            if unusable_summaries:
+                lines.extend(self._render_unusable_tree(unusable_summaries))
+            return lines
+
+        decision_round = int(event.get("decision_round") or 0)
+        remaining = self._remaining_rounds(decision_round)
+        header = (
+            f"[核验] Plan v{plan_version} 不通过：{major_count} 个重大缺口"
+            f"（次要 {minor_count}，冲突 {conflict_count}，废证 {unusable_count}）"
+        )
+        lines = [header]
+        lines.extend(self._render_gap_tree(gap_summaries))
+        if unusable_summaries:
+            lines.extend(self._render_unusable_tree(unusable_summaries))
+        if conflict_summaries:
+            points = "；".join(
+                f"{_CONFLICT_DECISION_LABELS.get(str(item.get('decision')), item.get('decision'))}"
+                f"「{_first_line(item.get('disputed_point'))}」"
+                for item in conflict_summaries
+            )
+            lines.append(f"[核验] 冲突处理：{points}")
+        if remaining == 0:
+            lines.append(
+                "[核验] 失败：重大缺口且 Planner 决策轮已耗尽"
+                + (f"：{reason}" if reason else "")
+            )
+        else:
+            lines.append(
+                f"[核验] 返回 Planner 补查（余 {remaining} 轮）"
+                + (f"：{reason}" if reason else "")
+            )
+        return lines
+
+    @staticmethod
+    def _render_gap_tree(gap_summaries: list[Any]) -> list[str]:
+        if not gap_summaries:
+            return []
+        lines: list[str] = []
+        for index, gap in enumerate(gap_summaries):
+            item = dict(gap or {})
+            branch = "└─" if index == len(gap_summaries) - 1 else "├─"
+            severity = _GAP_SEVERITY_LABELS.get(
+                str(item.get("severity") or ""), str(item.get("severity") or "")
+            )
+            kind = _GAP_KIND_LABELS.get(
+                str(item.get("kind") or ""), str(item.get("kind") or "")
+            )
+            description = _first_line(item.get("description"))
+            lines.append(f"  {branch} {severity}·{kind}：{description}")
+            recommendation = _first_line(item.get("recommended_research"))
+            if recommendation:
+                if index == len(gap_summaries) - 1:
+                    lines.append(f"        建议：{recommendation}")
+                else:
+                    lines.append(f"  │     建议：{recommendation}")
+        return lines
+
+    @staticmethod
+    def _render_unusable_tree(unusable_summaries: list[Any]) -> list[str]:
+        if not unusable_summaries:
+            return []
+        lines = [f"[核验] 废证 {len(unusable_summaries)} 条："]
+        for index, item in enumerate(unusable_summaries):
+            row = dict(item or {})
+            branch = "└─" if index == len(unusable_summaries) - 1 else "├─"
+            assertion_id = _short_id(row.get("assertion_id"))
+            reason = _first_line(row.get("reason"))
+            lines.append(f"  {branch} {assertion_id}：{reason}")
+        return lines
+
     def _render_phase(self, payload: dict[str, Any]) -> list[str]:
         phase = str(payload.get("phase") or "")
         if phase == "research":
             return ["[研究] 开始"]
-        if phase == "verifier_pending":
-            return ["[研究] 研究阶段结束：等待 Verifier"]
+        if phase == "verifier":
+            plan_version = payload.get("plan_version")
+            trigger = str(payload.get("trigger") or "")
+            trigger_label = _VERIFIER_TRIGGER_LABELS.get(trigger, trigger or "未知")
+            plan_part = f"Plan v{plan_version}，" if plan_version is not None else ""
+            return [f"[研究] 研究阶段结束，等待核验（{plan_part}触发：{trigger_label}）"]
+        if phase == "outline_pending":
+            return ["[研究] 研究阶段结束，等待 Outline"]
         if phase == "failed":
             error_code = str(payload.get("error_code") or "unknown_error")
             if error_code == "research_budget_exhausted_without_evidence":
                 return ["[研究] 失败：预算耗尽且没有保存任何证据"]
+            if error_code == "verifier_major_gap":
+                return ["[核验] 失败：存在重大缺口且 Planner 决策轮已耗尽"]
             return [f"[研究] 失败：{error_code}"]
         return []
 
@@ -257,7 +399,14 @@ class ResearchTimelineRenderer:
     def _render_tool_event(task_label: str, payload: dict[str, Any]) -> list[str]:
         tool = str(payload.get("tool") or "unknown_tool")
         if payload.get("error"):
-            return [f"[{task_label}] {tool} 失败：{_first_line(payload['error'])}"]
+            raw = str(payload["error"]).strip()
+            head, *rest = raw.splitlines()
+            lines = [f"[{task_label}] {tool} 失败：{head.strip()}"]
+            for extra in rest:
+                stripped = extra.strip()
+                if stripped:
+                    lines.append(f"[{task_label}]   {stripped}")
+            return lines
         if tool == "web_search":
             query = str(payload.get("query") or "")
             count = int(payload.get("result_count", 0))

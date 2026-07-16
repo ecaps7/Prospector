@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from prospector.config import Settings, get_settings
 from prospector.store.repositories import ResearchRepository
+from prospector.tools._retry import retry_async
 from prospector.tools.base import ToolContext
 
 
@@ -42,10 +43,12 @@ class ExaClient:
             return json.loads(response.read().decode("utf-8"))
 
     async def search(self, query: str, num_results: int) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        return await retry_async(
+            asyncio.to_thread,
             self._post,
             "search",
             {"query": query, "numResults": num_results, "type": "auto"},
+            label=f"exa.search({query!r})",
         )
 
     async def contents(
@@ -53,7 +56,8 @@ class ExaClient:
         url: str,
         task_question: str,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        return await retry_async(
+            asyncio.to_thread,
             self._post,
             "contents",
             {
@@ -61,6 +65,7 @@ class ExaClient:
                 "text": True,
                 "highlights": {"query": task_question},
             },
+            label=f"exa.contents({url!r})",
         )
 
 
@@ -106,32 +111,3 @@ class WebSearchTool:
             },
         )
         return {"results": [result.model_dump() for result in results]}
-
-
-WEB_SEARCH_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": (
-            "Search the web and return metadata only; choose URLs to inspect separately."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "One complete natural-language question or request for a single "
-                        "evidence need, as if asking a librarian. Prefer a verb or "
-                        "interrogative; do not stack keywords, space-separated "
-                        "alternatives, or long noun phrases without a verb. Search "
-                        "alternative objects or source types in separate calls."
-                    ),
-                },
-                "num_results": {"type": "integer", "minimum": 1, "maximum": 20},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    },
-}

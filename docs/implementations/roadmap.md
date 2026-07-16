@@ -1,7 +1,7 @@
 # Prospector v2 实现路线图
 
-- **版本**：1.5
-- **日期**：2026-07-14
+- **版本**：1.6
+- **日期**：2026-07-16
 - **依据**：[设计文档](../design.md)（§11）、[M1 实现设计](./m1.md)、[评测文档](../eval.md)、[CLI 文档](../cli.md)、[开工确认清单](./preflight.md)
 - **实现设计**：[M0](./m0.md)、[M1](./m1.md)
 - **用途**：定义里程碑范围、依赖顺序和完成出口。机制细节由设计文档与对应实现设计负责，本文不建立第二套合同。
@@ -102,7 +102,7 @@ runtime / cli
 
 实现设计：[m1.md](./m1.md)
 
-当前已完成 Brief 生成、interactive HITL 与 Planner-Worker，研究图可从冻结 Brief 运行到 `verifier_pending`。Verifier/Replan 与成文链是下一实现边界；M1 最终交付仍按完整主图统一验收。
+当前已完成 Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan 与 ConflictResolution，研究图可从冻结 Brief 运行到 `outline_pending`。Claim 验证与成文链是下一实现边界；M1 最终交付仍按完整主图统一验收。
 
 交付：
 

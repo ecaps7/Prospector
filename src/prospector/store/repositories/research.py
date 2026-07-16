@@ -25,6 +25,15 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
+from prospector.schemas.verifier import (
+    AssertionDisposition,
+    ConflictResolution,
+    VerifierDecision,
+    VerifierTrigger,
+    conflict_key,
+    effective_unusable_assertion_ids,
+    validate_verifier_references,
+)
 from prospector.store.database import get_engine
 
 
@@ -428,6 +437,18 @@ class ResearchRepository:
                     "reason": reason.splitlines()[0],
                 },
             )
+            if trigger_verifier_run is not None:
+                self._event(
+                    conn,
+                    job_id=job_id,
+                    event_type=EventType.REPLAN_TRIGGERED,
+                    decision_round=decision_round,
+                    payload={
+                        "verifier_run_id": str(trigger_verifier_run),
+                        "plan_version": version,
+                        "decision_round": decision_round,
+                    },
+                )
         return Plan(
             plan_id=plan_id,
             job_id=job_id,
@@ -477,6 +498,7 @@ class ResearchRepository:
                     "task_id": str(task.task_id),
                     "research_stage": task.research_stage,
                     "research_mode": task.research_mode,
+                    "subjects": task.subjects,
                     "source_policy": task.source_policy.model_dump(),
                     "question": task.question.splitlines()[0],
                     "budget": task.budget.model_dump(),
@@ -985,7 +1007,9 @@ class ResearchRepository:
                 )
         return unique_assertions, inserted_rows
 
-    def list_assertions(self, task_id: UUID) -> list[Assertion]:
+    def list_assertions(
+        self, task_id: UUID, *, usable_only: bool = False
+    ) -> list[Assertion]:
         with self.engine.connect() as conn:
             rows = (
                 conn.execute(
@@ -1001,7 +1025,10 @@ class ResearchRepository:
                 .mappings()
                 .all()
             )
-        return [
+            job_id = None
+            if usable_only and rows:
+                job_id = UUID(str(rows[0]["job_id"]))
+        assertions = [
             Assertion.model_validate(
                 {
                     "assertion_id": row["id"],
@@ -1013,6 +1040,52 @@ class ResearchRepository:
             )
             for row in rows
         ]
+        if not usable_only or not assertions or job_id is None:
+            return assertions
+        unusable = self.list_effective_unusable_assertion_ids(job_id)
+        return [item for item in assertions if item.assertion_id not in unusable]
+
+    def list_effective_unusable_assertion_ids(self, job_id: UUID) -> set[UUID]:
+        """Return assertion IDs whose latest disposition status is unusable."""
+        with self.engine.connect() as conn:
+            return self._effective_unusable_assertion_ids(conn, job_id)
+
+    @staticmethod
+    def _load_dispositions_by_plan_version(
+        conn: Connection, job_id: UUID
+    ) -> list[tuple[int, list[AssertionDisposition]]]:
+        rows = conn.execute(
+            text(
+                """
+                SELECT vr.evaluated_plan_version AS plan_version,
+                       d.assertion_id, d.status, d.reason
+                FROM app.assertion_dispositions d
+                JOIN app.verifier_runs vr ON vr.id = d.verifier_run_id
+                WHERE vr.job_id=:job_id AND vr.status='completed'
+                ORDER BY vr.evaluated_plan_version, d.assertion_id
+                """
+            ),
+            {"job_id": job_id},
+        ).mappings()
+        by_version: dict[int, list[AssertionDisposition]] = {}
+        for row in rows:
+            plan_version = int(row["plan_version"])
+            by_version.setdefault(plan_version, []).append(
+                AssertionDisposition(
+                    assertion_id=UUID(str(row["assertion_id"])),
+                    status=row["status"],
+                    reason=row["reason"],
+                )
+            )
+        return sorted(by_version.items(), key=lambda item: item[0])
+
+    @classmethod
+    def _effective_unusable_assertion_ids(
+        cls, conn: Connection, job_id: UUID
+    ) -> set[UUID]:
+        return effective_unusable_assertion_ids(
+            cls._load_dispositions_by_plan_version(conn, job_id)
+        )
 
     def count_excerpts(self, job_id: UUID) -> int:
         with self.engine.connect() as conn:
@@ -1022,6 +1095,462 @@ class ResearchRepository:
                     {"job_id": job_id},
                 ).scalar_one()
             )
+
+    def build_verifier_snapshot(
+        self,
+        job_id: UUID,
+        *,
+        trigger: VerifierTrigger,
+        decision_round: int,
+        decision_round_limit: int,
+    ) -> dict[str, Any]:
+        """Reconstruct the Verifier's authority view from persisted business facts."""
+        with self.engine.connect() as conn:
+            brief = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT b.question, b.brief_text, b.output_format, b.language, b.effort
+                        FROM app.briefs b JOIN app.jobs j ON j.brief_id=b.id
+                        WHERE j.id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            plans = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT id AS plan_id, version, decision_round,
+                               trigger_verifier_run, task_ids, created_at
+                        FROM app.plans WHERE job_id=:job_id ORDER BY version
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            ]
+            tasks = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT id AS task_id, question, subjects, research_stage, research_mode,
+                               expected_evidence, status, stop_reason, finish_reason
+                        FROM app.tasks WHERE job_id=:job_id ORDER BY created_at, id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            ]
+            assertions = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT id AS assertion_id, task_id, statement, excerpt_ids, topic_tags
+                        FROM app.assertions WHERE job_id=:job_id ORDER BY created_at, id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            ]
+            excerpts = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT e.id AS excerpt_id, e.doc_id, e.doc_version, e.text, e.locator,
+                               d.source_uri AS url,
+                               d.source_meta->>'title' AS title,
+                               d.source_meta->>'author' AS author,
+                               d.source_meta->>'published_at' AS published_at
+                        FROM app.excerpts e JOIN app.documents d ON d.id=e.doc_id
+                        WHERE e.job_id=:job_id ORDER BY e.created_at, e.id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            ]
+            if trigger == "planner_finish":
+                planner_finish_reason = conn.execute(
+                    text(
+                        """
+                        SELECT decision_payload->'finish'->>'reason'
+                        FROM app.decision_log
+                        WHERE job_id=:job_id AND decision_type='finish' AND status='accepted'
+                        ORDER BY decision_round DESC LIMIT 1
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).scalar_one_or_none()
+            else:
+                planner_finish_reason = None
+
+            prior_by_version = self._load_dispositions_by_plan_version(conn, job_id)
+            prior_assertion_dispositions = [
+                {
+                    "plan_version": plan_version,
+                    "assertion_id": str(item.assertion_id),
+                    "status": item.status,
+                    "reason": item.reason,
+                }
+                for plan_version, dispositions in prior_by_version
+                for item in dispositions
+            ]
+            effective_unusable = sorted(
+                str(value)
+                for value in effective_unusable_assertion_ids(prior_by_version)
+            )
+
+        if not plans:
+            raise RuntimeError("Verifier requires at least one persisted Plan")
+        return {
+            "brief": dict(brief),
+            "plans": plans,
+            "tasks": tasks,
+            "planner_exit": {
+                "trigger": trigger,
+                "finish_reason": planner_finish_reason,
+                "decision_round": decision_round,
+                "decision_round_limit": decision_round_limit,
+                "decision_rounds_remaining": max(0, decision_round_limit - decision_round),
+            },
+            "assertions": assertions,
+            "excerpts": excerpts,
+            "prior_assertion_dispositions": prior_assertion_dispositions,
+            "effective_unusable_assertion_ids": effective_unusable,
+        }
+
+    def get_completed_verifier_run(
+        self, job_id: UUID, evaluated_plan_version: int
+    ) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT * FROM app.verifier_runs
+                        WHERE job_id=:job_id AND evaluated_plan_version=:plan_version
+                        """
+                    ),
+                    {"job_id": job_id, "plan_version": evaluated_plan_version},
+                )
+                .mappings()
+                .first()
+            )
+            if row is None or row["status"] != "completed":
+                return None
+            resolutions = [
+                dict(item)
+                for item in conn.execute(
+                    text(
+                        """
+                        SELECT disputed_point, excerpt_ids, decision, winning_excerpt_ids, rationale
+                        FROM app.conflict_resolutions
+                        WHERE verifier_run_id=:run_id ORDER BY conflict_key
+                        """
+                    ),
+                    {"run_id": row["id"]},
+                ).mappings()
+            ]
+            dispositions = [
+                dict(item)
+                for item in conn.execute(
+                    text(
+                        """
+                        SELECT assertion_id, status, reason
+                        FROM app.assertion_dispositions
+                        WHERE verifier_run_id=:run_id ORDER BY assertion_id
+                        """
+                    ),
+                    {"run_id": row["id"]},
+                ).mappings()
+            ]
+        decision = VerifierDecision.model_validate(
+            {
+                "release_decision": row["release_decision"],
+                "decision_reason": row["decision_reason"],
+                "brief_alignment": row["brief_alignment"],
+                "coverage_rationale": row["coverage_rationale"],
+                "brief_alignment_rationale": row["brief_alignment_rationale"],
+                "credibility_rationale": row["credibility_rationale"],
+                "gaps": row["gaps"],
+                "conflict_resolutions": resolutions,
+                "assertion_dispositions": dispositions,
+            }
+        )
+        return {"run_id": row["id"], "decision": decision}
+
+    def begin_verifier_run(
+        self,
+        job_id: UUID,
+        *,
+        evaluated_plan_version: int,
+        decision_round: int,
+        trigger: VerifierTrigger,
+        full_prompt: list[dict[str, str]],
+    ) -> UUID:
+        run_id = uuid4()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.verifier_runs
+                      (id, job_id, evaluated_plan_version, decision_round, trigger,
+                       full_prompt, status, created_at)
+                    VALUES
+                      (:id, :job_id, :plan_version, :decision_round, :trigger,
+                       CAST(:full_prompt AS JSONB), 'prompted', :now)
+                    ON CONFLICT (job_id, evaluated_plan_version) DO NOTHING
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "job_id": job_id,
+                    "plan_version": evaluated_plan_version,
+                    "decision_round": decision_round,
+                    "trigger": trigger,
+                    "full_prompt": _json(full_prompt),
+                    "now": datetime.now(UTC),
+                },
+            )
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, full_prompt FROM app.verifier_runs
+                        WHERE job_id=:job_id AND evaluated_plan_version=:plan_version
+                        """
+                    ),
+                    {"job_id": job_id, "plan_version": evaluated_plan_version},
+                )
+                .mappings()
+                .one()
+            )
+            if row["full_prompt"] != full_prompt:
+                raise RuntimeError("Verifier replayed with a different persisted prompt")
+            return UUID(str(row["id"]))
+
+    def complete_verifier_run(
+        self,
+        job_id: UUID,
+        run_id: UUID,
+        *,
+        decision: VerifierDecision,
+        raw_output: object,
+        evaluated_plan_version: int,
+        decision_round: int,
+    ) -> None:
+        with self.engine.begin() as conn:
+            task_ids = {
+                UUID(str(value))
+                for value in conn.execute(
+                    text("SELECT id FROM app.tasks WHERE job_id=:job_id"),
+                    {"job_id": job_id},
+                ).scalars()
+            }
+            assertion_ids = {
+                UUID(str(value))
+                for value in conn.execute(
+                    text("SELECT id FROM app.assertions WHERE job_id=:job_id"),
+                    {"job_id": job_id},
+                ).scalars()
+            }
+            excerpt_ids = {
+                UUID(str(value))
+                for value in conn.execute(
+                    text("SELECT id FROM app.excerpts WHERE job_id=:job_id"),
+                    {"job_id": job_id},
+                ).scalars()
+            }
+            validate_verifier_references(
+                decision,
+                task_ids=task_ids,
+                assertion_ids=assertion_ids,
+                excerpt_ids=excerpt_ids,
+            )
+            now = datetime.now(UTC)
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE app.verifier_runs
+                    SET raw_output=CAST(:raw_output AS JSONB),
+                        decision_reason=:decision_reason,
+                        coverage_rationale=:coverage_rationale,
+                        brief_alignment=:brief_alignment,
+                        brief_alignment_rationale=:brief_alignment_rationale,
+                        credibility_rationale=:credibility_rationale,
+                        release_decision=:release_decision,
+                        gaps=CAST(:gaps AS JSONB), status='completed', completed_at=:now
+                    WHERE id=:run_id AND job_id=:job_id AND status='prompted'
+                    """
+                ),
+                {
+                    "raw_output": _json(raw_output),
+                    "decision_reason": decision.decision_reason,
+                    "coverage_rationale": decision.coverage_rationale,
+                    "brief_alignment": decision.brief_alignment,
+                    "brief_alignment_rationale": decision.brief_alignment_rationale,
+                    "credibility_rationale": decision.credibility_rationale,
+                    "release_decision": decision.release_decision,
+                    "gaps": _json([gap.model_dump(mode="json") for gap in decision.gaps]),
+                    "now": now,
+                    "run_id": run_id,
+                    "job_id": job_id,
+                },
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("Verifier run is missing or already completed")
+            for resolution in decision.conflict_resolutions:
+                self._insert_conflict_resolution(conn, run_id, resolution, now)
+            for disposition in decision.assertion_dispositions:
+                self._insert_assertion_disposition(conn, run_id, disposition, now)
+            major_count = sum(gap.severity == "major" for gap in decision.gaps)
+            minor_count = len(decision.gaps) - major_count
+            unusable_dispositions = [
+                item for item in decision.assertion_dispositions if item.status == "unusable"
+            ]
+            self._event(
+                conn,
+                job_id=job_id,
+                event_type=EventType.VERIFIER_COMPLETED,
+                decision_round=decision_round,
+                payload={
+                    "verifier_run_id": str(run_id),
+                    "plan_version": evaluated_plan_version,
+                    "release_decision": decision.release_decision,
+                    "decision_reason": decision.decision_reason.splitlines()[0],
+                    "major_gap_count": major_count,
+                    "minor_gap_count": minor_count,
+                    "conflict_resolution_count": len(decision.conflict_resolutions),
+                    "unusable_assertion_count": len(unusable_dispositions),
+                    "gap_summaries": [
+                        {
+                            "severity": gap.severity,
+                            "kind": gap.kind,
+                            "description": gap.description.splitlines()[0],
+                            "recommended_research": (
+                                gap.recommended_research.splitlines()[0]
+                                if gap.recommended_research
+                                else ""
+                            ),
+                        }
+                        for gap in decision.gaps
+                        if gap.severity == "major"
+                    ],
+                    "conflict_summaries": [
+                        {
+                            "decision": resolution.decision,
+                            "disputed_point": resolution.disputed_point.splitlines()[0],
+                        }
+                        for resolution in decision.conflict_resolutions
+                    ],
+                    "unusable_summaries": [
+                        {
+                            "assertion_id": str(item.assertion_id),
+                            "reason": item.reason.splitlines()[0],
+                        }
+                        for item in unusable_dispositions[:8]
+                    ],
+                },
+            )
+
+    @staticmethod
+    def _insert_conflict_resolution(
+        conn: Connection,
+        run_id: UUID,
+        resolution: ConflictResolution,
+        created_at: datetime,
+    ) -> None:
+        conn.execute(
+            text(
+                """
+                INSERT INTO app.conflict_resolutions
+                  (conflict_key, verifier_run_id, disputed_point, excerpt_ids,
+                   decision, winning_excerpt_ids, rationale, created_at)
+                VALUES
+                  (:conflict_key, :run_id, :disputed_point, CAST(:excerpt_ids AS JSONB),
+                   :decision, CAST(:winners AS JSONB), :rationale, :created_at)
+                """
+            ),
+            {
+                "conflict_key": conflict_key(resolution.excerpt_ids),
+                "run_id": run_id,
+                "disputed_point": resolution.disputed_point,
+                "excerpt_ids": _json([str(value) for value in resolution.excerpt_ids]),
+                "decision": resolution.decision,
+                "winners": _json([str(value) for value in resolution.winning_excerpt_ids]),
+                "rationale": resolution.rationale,
+                "created_at": created_at,
+            },
+        )
+
+    @staticmethod
+    def _insert_assertion_disposition(
+        conn: Connection,
+        run_id: UUID,
+        disposition: AssertionDisposition,
+        created_at: datetime,
+    ) -> None:
+        conn.execute(
+            text(
+                """
+                INSERT INTO app.assertion_dispositions
+                  (assertion_id, verifier_run_id, status, reason, created_at)
+                VALUES
+                  (:assertion_id, :run_id, :status, :reason, :created_at)
+                """
+            ),
+            {
+                "assertion_id": disposition.assertion_id,
+                "run_id": run_id,
+                "status": disposition.status,
+                "reason": disposition.reason,
+                "created_at": created_at,
+            },
+        )
+
+    def list_unusable_assertion_details(
+        self, job_id: UUID, dispositions: list[AssertionDisposition]
+    ) -> list[dict[str, str]]:
+        """Resolve statements for unusable dispositions in the given decision."""
+        unusable = [item for item in dispositions if item.status == "unusable"]
+        if not unusable:
+            return []
+        reason_by_id = {item.assertion_id: item.reason for item in unusable}
+        details: list[dict[str, str]] = []
+        with self.engine.connect() as conn:
+            for disposition in unusable:
+                row = (
+                    conn.execute(
+                        text(
+                            """
+                            SELECT id, statement FROM app.assertions
+                            WHERE job_id=:job_id AND id=:assertion_id
+                            """
+                        ),
+                        {
+                            "job_id": job_id,
+                            "assertion_id": disposition.assertion_id,
+                        },
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is None:
+                    continue
+                details.append(
+                    {
+                        "assertion_id": str(row["id"]),
+                        "statement": row["statement"],
+                        "reason": reason_by_id[UUID(str(row["id"]))].splitlines()[0],
+                    }
+                )
+        return details
 
     def set_research_outcome(
         self,
@@ -1047,21 +1576,14 @@ class ResearchRepository:
                     "job_id": job_id,
                 },
             )
-            self._event(
-                conn,
-                job_id=job_id,
-                event_type=EventType.JOB_PHASE_CHANGED,
-                payload={"phase": phase, "outcome": outcome, "error_code": error_code},
-            )
-
-    def record_phase_changed(self, job_id: UUID, phase: str) -> None:
-        with self.engine.begin() as conn:
             exists = conn.execute(
                 text(
                     """
                     SELECT 1 FROM app.events
                     WHERE job_id=:job_id AND event_type=:event_type
                       AND payload->>'phase'=:phase
+                      AND payload->>'outcome'=:outcome
+                      AND COALESCE(payload->>'error_code', '')=COALESCE(:error_code, '')
                     LIMIT 1
                     """
                 ),
@@ -1069,6 +1591,8 @@ class ResearchRepository:
                     "job_id": job_id,
                     "event_type": EventType.JOB_PHASE_CHANGED.value,
                     "phase": phase,
+                    "outcome": outcome,
+                    "error_code": error_code,
                 },
             ).scalar_one_or_none()
             if exists:
@@ -1077,7 +1601,64 @@ class ResearchRepository:
                 conn,
                 job_id=job_id,
                 event_type=EventType.JOB_PHASE_CHANGED,
-                payload={"phase": phase, "outcome": None, "error_code": None},
+                payload={"phase": phase, "outcome": outcome, "error_code": error_code},
+            )
+
+    def record_phase_changed(
+        self,
+        job_id: UUID,
+        phase: str,
+        *,
+        plan_version: int | None = None,
+        trigger: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"phase": phase, "outcome": None, "error_code": None}
+        if plan_version is not None:
+            payload["plan_version"] = plan_version
+        if trigger is not None:
+            payload["trigger"] = trigger
+        with self.engine.begin() as conn:
+            if plan_version is None:
+                exists = conn.execute(
+                    text(
+                        """
+                        SELECT 1 FROM app.events
+                        WHERE job_id=:job_id AND event_type=:event_type
+                          AND payload->>'phase'=:phase
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "job_id": job_id,
+                        "event_type": EventType.JOB_PHASE_CHANGED.value,
+                        "phase": phase,
+                    },
+                ).scalar_one_or_none()
+            else:
+                exists = conn.execute(
+                    text(
+                        """
+                        SELECT 1 FROM app.events
+                        WHERE job_id=:job_id AND event_type=:event_type
+                          AND payload->>'phase'=:phase
+                          AND payload->>'plan_version'=:plan_version
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "job_id": job_id,
+                        "event_type": EventType.JOB_PHASE_CHANGED.value,
+                        "phase": phase,
+                        "plan_version": str(plan_version),
+                    },
+                ).scalar_one_or_none()
+            if exists:
+                return
+            self._event(
+                conn,
+                job_id=job_id,
+                event_type=EventType.JOB_PHASE_CHANGED,
+                payload=payload,
             )
 
     def list_events(self, job_id: UUID) -> list[dict[str, Any]]:

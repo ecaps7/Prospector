@@ -16,10 +16,11 @@ from alembic.config import Config
 from sqlalchemy import text
 
 from prospector.agents.planner import PlannerModelResult, PlannerOutputError
+from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.research_verifier import VerifierModelResult
 from prospector.agents.research_worker import (
     ResearchWorker,
     WorkerCoverageAssessment,
-    WorkerFinish,
     WorkerModelAction,
     WorkerToolCall,
 )
@@ -37,6 +38,7 @@ from prospector.runtime.timeline import ResearchTimelineRenderer, drain_timeline
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.evidence import Assertion
+from prospector.schemas.verifier import AssertionDisposition, VerifierDecision, VerifierGap
 from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
 from prospector.store.jobs import create_job
 from prospector.store.object_store import ObjectStore
@@ -89,6 +91,83 @@ class ScriptedPlanner:
         if isinstance(item, Exception):
             raise item
         return PlannerModelResult(raw_output=item.model_dump(mode="json"), decision=item)
+
+
+class PassingVerifier:
+    def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
+        decision = VerifierDecision(
+            release_decision="pass",
+            decision_reason="测试证据足以履行 Plan。",
+            brief_alignment="aligned",
+            coverage_rationale="测试证据履行了 Plan。",
+            brief_alignment_rationale="测试研究未偏离 Brief。",
+            credibility_rationale="测试来源足以支撑当前研究出口。",
+        )
+        return VerifierModelResult(
+            full_prompt=research_verifier_messages(snapshot),
+            raw_output=decision.model_dump(mode="json"),
+            decision=decision,
+        )
+
+
+class CredibilityGapVerifier:
+    """Reject once with source_credibility + unusable disposition, then pass."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
+        self.calls += 1
+        assertions = list(snapshot.get("assertions") or [])
+        assertion_id = UUID(str(assertions[0]["assertion_id"]))
+        if self.calls == 1:
+            decision = VerifierDecision(
+                release_decision="needs_research",
+                decision_reason="核心断言依赖不可信来源。",
+                brief_alignment="aligned",
+                coverage_rationale="假断言不能履行 Plan。",
+                brief_alignment_rationale="研究仍围绕 Brief。",
+                credibility_rationale="来源不可信。",
+                gaps=[
+                    VerifierGap(
+                        kind="source_credibility",
+                        severity="major",
+                        related_assertion_ids=[assertion_id],
+                        description="核心断言来源不可信",
+                        attempted_paths=["查阅现有落证"],
+                        why_insufficient="缺乏独立真实来源",
+                        recommended_research="在权威来源中补查替代证据",
+                    )
+                ],
+                assertion_dispositions=[
+                    AssertionDisposition(
+                        assertion_id=assertion_id,
+                        status="unusable",
+                        reason="测试废证：伪学术来源。",
+                    )
+                ],
+            )
+        else:
+            decision = VerifierDecision(
+                release_decision="pass",
+                decision_reason="补查后真实证据已足够。",
+                brief_alignment="aligned",
+                coverage_rationale="剩余可用证据履行 Plan。",
+                brief_alignment_rationale="研究仍围绕 Brief。",
+                credibility_rationale="可信来源已到位。",
+                assertion_dispositions=[
+                    AssertionDisposition(
+                        assertion_id=assertion_id,
+                        status="unusable",
+                        reason="测试废证：伪学术来源。",
+                    )
+                ],
+            )
+        return VerifierModelResult(
+            full_prompt=research_verifier_messages(snapshot),
+            raw_output=decision.model_dump(mode="json"),
+            decision=decision,
+        )
 
 
 class MockExa:
@@ -192,8 +271,12 @@ class LedgerWorkerModel:
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
         task = self._task(messages)
         task_id = task["task_id"]
-        tool_messages = [message for message in messages if message.get("role") == "tool"]
-        if not tool_messages:
+        runtime_messages = [
+            message
+            for message in messages
+            if str(message.get("content", "")).startswith("上一轮运行结果：")
+        ]
+        if not runtime_messages:
             self.research_runs[task_id] = self.research_runs.get(task_id, 0) + 1
             return WorkerModelAction(
                 assistant_message={"role": "assistant", "content": None},
@@ -205,19 +288,15 @@ class LedgerWorkerModel:
                     )
                 ],
             )
-        last = json.loads(tool_messages[-1]["content"])
-        if len(tool_messages) == 1:
-            return WorkerModelAction(
-                assistant_message={"role": "assistant", "content": None},
-                tool_calls=[
-                    WorkerToolCall(
-                        tool_name="web_fetch",
-                        tool_call_id=f"fetch-{task_id}",
-                        arguments={"url": last["results"][0]["url"]},
-                    )
-                ],
-            )
-        if len(tool_messages) == 2:
+        latest_results = json.loads(str(runtime_messages[-1]["content"]).partition("\n")[2])
+        fetched = [
+            item["result"]
+            for item in latest_results
+            if item["tool"] == "web_fetch" and "result" in item
+        ]
+        if fetched:
+            source = fetched[0]
+            source_ref = source["items"][0]["source_ref"]
             return WorkerModelAction(
                 assistant_message={"role": "assistant", "content": None},
                 tool_calls=[
@@ -225,11 +304,9 @@ class LedgerWorkerModel:
                         tool_name="save_findings",
                         tool_call_id=f"save-{task_id}",
                         arguments={
-                            "doc_id": last["doc_id"],
-                            "view_id": last["view_id"],
                             "findings": [
                                 {
-                                    "source_ids": ["h1"],
+                                    "source_refs": [source_ref],
                                     "statement": f"任务 {task_id} 找到带年度口径的公开事实。",
                                     "topic_tags": ["公开事实"],
                                 }
@@ -238,17 +315,7 @@ class LedgerWorkerModel:
                     )
                 ],
             )
-        return WorkerModelAction(
-            assistant_message={
-                "role": "assistant",
-                "content": ('{"goal_met":true,"stop_reason":"expected_evidence_satisfied"}'),
-            },
-            finish=WorkerFinish(
-                goal_met=True,
-                stop_reason="expected_evidence_satisfied",
-                reason="已保存任务要求的直接证据。",
-            ),
-        )
+        raise AssertionError("运行结果中没有可保存的 web_fetch 视图")
 
     async def summarize(self, assertions: list[Assertion]) -> list[str]:
         return [item.statement for item in assertions]
@@ -271,7 +338,11 @@ class LedgerWorkerModel:
         )
 
 
-def _services(planner: ScriptedPlanner) -> tuple[ResearchGraphServices, MockExa, LedgerWorkerModel]:
+def _services(
+    planner: ScriptedPlanner,
+    *,
+    verifier: Any | None = None,
+) -> tuple[ResearchGraphServices, MockExa, LedgerWorkerModel]:
     repository = ResearchRepository()
     object_store = ObjectStore()
     exa = MockExa()
@@ -290,7 +361,11 @@ def _services(planner: ScriptedPlanner) -> tuple[ResearchGraphServices, MockExa,
         ],
         model,
     )
-    return ResearchGraphServices(repository, planner, worker), exa, model
+    return (
+        ResearchGraphServices(repository, planner, worker, verifier or PassingVerifier()),
+        exa,
+        model,
+    )
 
 
 def _create_research_job(effort: str = "standard") -> tuple[UUID, UUID, ResearchRepository]:
@@ -528,7 +603,7 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
 
         assert result["decision_round"] == 4
         assert result["plan_version"] == 1
-        assert result["outcome"] == "ready_for_verifier"
+        assert result["outcome"] == "ready_for_outline"
         assert exa.max_active >= 2
 
         events = repository.list_events(job_id)
@@ -540,6 +615,10 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert event_types.count("task.finished") == 2
         assert event_types[-1] == "job.phase_changed"
         assert all(event["payload"].get("tool_call_id") for event in tool_events)
+        verifier_event = next(
+            event for event in events if event["event_type"] == "verifier.completed"
+        )
+        assert verifier_event["payload"]["decision_reason"] == "测试证据足以履行 Plan。"
 
         timeline_lines: list[str] = []
         standard_limits = limits_for_effort("standard")
@@ -564,8 +643,16 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
             f"Worker 决策轮预算 {verify_budget.max_worker_rounds} 轮" in line
             for line in timeline_lines
         )
-        assert timeline_lines[-1] == "[研究] 研究阶段结束：等待 Verifier"
-
+        verifier_lines = [
+            "[核验] Plan v1 通过（重大缺口 0，冲突裁决 0，废证 0）",
+            "[核验] 收工：测试证据足以履行 Plan。",
+            "[研究] 研究阶段结束，等待 Outline",
+        ]
+        assert timeline_lines[-3:] == verifier_lines
+        assert any(
+            line.startswith("[研究] 研究阶段结束，等待核验（Plan v1，触发：")
+            for line in timeline_lines
+        )
         with repository.engine.connect() as conn:
             prompts = (
                 conn.execute(
@@ -588,8 +675,13 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
                 .mappings()
                 .all()
             )
+            verifier_reason = conn.execute(
+                text("SELECT decision_reason FROM app.verifier_runs WHERE job_id=:job_id"),
+                {"job_id": job_id},
+            ).scalar_one()
         assert len(prompts) == 4
         assert len(assertions) == 2
+        assert verifier_reason == "测试证据足以履行 Plan。"
         assert all(str(row["task_id"]) == row["produced_by"]["task_id"] for row in assertions)
         assert "document_view" not in json.dumps(prompts, ensure_ascii=False, default=str)
         assert "你的输出不合法" in json.dumps(
@@ -626,6 +718,96 @@ def test_empty_finish_burns_every_round_then_fails_without_verifier() -> None:
         assert [event["payload"]["reason_code"] for event in rejected] == [
             "empty_finish"
         ] * round_limit
+    finally:
+        with repository.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_unusable_disposition_filters_assertions_and_replans() -> None:
+    dispatch = PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "dispatch": {
+                "tasks": [_task("废证")],
+                "reason": "先落一条证据再触发废证",
+            },
+        }
+    )
+    finish = PlannerDecision.model_validate(
+        {"decision": "finish", "finish": {"reason": "证据已落库，交给核验"}}
+    )
+    replan_dispatch = PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "dispatch": {
+                "tasks": [_task("补查")],
+                "reason": "按废证缺口补查真实来源",
+            },
+        }
+    )
+    finish_again = PlannerDecision.model_validate(
+        {"decision": "finish", "finish": {"reason": "补查完成，再次交给核验"}}
+    )
+    verifier = CredibilityGapVerifier()
+    planner = ScriptedPlanner([dispatch, finish, replan_dispatch, finish_again])
+    services, _, _ = _services(planner, verifier=verifier)
+    job_id, brief_id, repository = _create_research_job("quick")
+    try:
+        with checkpointer_session() as checkpointer:
+            graph = build_research_graph(checkpointer, services)
+            result = graph.invoke(
+                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                thread_config(str(job_id)),
+            )
+        assert result["outcome"] == "ready_for_outline"
+        assert verifier.calls == 2
+        events = repository.list_events(job_id)
+        gap_feedback = next(
+            event
+            for event in events
+            if event["event_type"] == "verifier.completed"
+            and event["payload"].get("release_decision") == "needs_research"
+        )
+        assert gap_feedback["payload"]["unusable_assertion_count"] == 1
+        with repository.engine.connect() as conn:
+            first_task_id = UUID(
+                str(
+                    conn.execute(
+                        text(
+                            """
+                            SELECT id FROM app.tasks
+                            WHERE job_id=:job_id
+                            ORDER BY created_at, id LIMIT 1
+                            """
+                        ),
+                        {"job_id": job_id},
+                    ).scalar_one()
+                )
+            )
+        all_assertions = repository.list_assertions(first_task_id)
+        usable = repository.list_assertions(first_task_id, usable_only=True)
+        assert len(all_assertions) == 1
+        assert usable == []
+        assert all_assertions[0].assertion_id in repository.list_effective_unusable_assertion_ids(
+            job_id
+        )
+        with repository.engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT full_prompt FROM app.decision_log
+                        WHERE job_id=:job_id ORDER BY decision_round
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .all()
+            )
+            decision_prompts = [json.dumps(row["full_prompt"], ensure_ascii=False) for row in rows]
+        assert any("unusable_assertions" in prompt for prompt in decision_prompts)
+        assert any("测试废证：伪学术来源。" in prompt for prompt in decision_prompts)
     finally:
         with repository.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})

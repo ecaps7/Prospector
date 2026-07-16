@@ -22,12 +22,15 @@ from prospector.agents.planner import (
     append_runtime_feedback,
     initial_planner_messages,
 )
+from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.research_verifier import OpenAIResearchVerifier, VerifierModel
 from prospector.agents.research_worker import ResearchWorker
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.gates import dispatch_rejection, finish_rejection
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
 from prospector.schemas.decisions import PlannerDecision
+from prospector.schemas.verifier import VerifierDecision
 from prospector.store.object_store import ObjectStore
 from prospector.store.repositories import ResearchRepository
 from prospector.tools.save_findings import SaveFindingsTool
@@ -43,6 +46,11 @@ class ResearchGraphServices:
     repository: ResearchRepository
     planner: PlannerModel
     worker: ResearchWorker
+    verifier: VerifierModel
+
+
+class VerifierMajorGapError(RuntimeError):
+    """Raised after persisting a terminal Research Verifier rejection."""
 
 
 def default_research_services() -> ResearchGraphServices:
@@ -58,6 +66,7 @@ def default_research_services() -> ResearchGraphServices:
         repository=repository,
         planner=OpenAIPlannerModel(),
         worker=ResearchWorker(repository, tools),
+        verifier=OpenAIResearchVerifier(),
     )
 
 
@@ -119,6 +128,7 @@ def _initialize_node(services: ResearchGraphServices):
             "outcome": None,
             "error_code": None,
             "planner_messages": messages,
+            "verifier_trigger": None,
             "route": "planner",
         }
 
@@ -140,17 +150,12 @@ def _end_for_budget(state: ResearchState, services: ResearchGraphServices) -> di
             "error_code": "research_budget_exhausted_without_evidence",
             "route": "end",
         }
-    services.repository.set_research_outcome(
-        job_id,
-        outcome="ready_for_verifier",
-        error_code=None,
-        phase="verifier_pending",
-    )
     return {
-        "phase": "verifier_pending",
+        "phase": "verifier",
         "outcome": "ready_for_verifier",
         "error_code": None,
-        "route": "end",
+        "verifier_trigger": "budget_exhausted",
+        "route": "verifier",
     }
 
 
@@ -289,6 +294,7 @@ def _planner_node(services: ResearchGraphServices):
                     "current_research_stage": decision.dispatch.tasks[0].research_stage,
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
+                    "last_verifier_run_id": None,
                     "route": "workers",
                 }
 
@@ -336,19 +342,14 @@ def _planner_node(services: ResearchGraphServices):
                     decision,
                     {"reason": decision.finish.reason.splitlines()[0]},
                 )
-                services.repository.set_research_outcome(
-                    job_id,
-                    outcome="ready_for_verifier",
-                    error_code=None,
-                    phase="verifier_pending",
-                )
                 return {
                     "decision_round": decision_round,
                     "planner_messages": messages,
-                    "phase": "verifier_pending",
+                    "phase": "verifier",
                     "outcome": "ready_for_verifier",
                     "error_code": None,
-                    "route": "end",
+                    "verifier_trigger": "planner_finish",
+                    "route": "verifier",
                 }
 
         updated_state = {**state, "decision_round": decision_round, **result}
@@ -502,6 +503,138 @@ def _workers_node(services: ResearchGraphServices):
     return workers
 
 
+def _major_gap_summary(decision: VerifierDecision) -> str:
+    return "；".join(gap.description for gap in decision.gaps if gap.severity == "major")
+
+
+def _verifier_node(services: ResearchGraphServices):
+    def verifier(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        plan_version = int(state["plan_version"])
+        decision_round = int(state["decision_round"])
+        trigger = state.get("verifier_trigger")
+        if trigger not in {"planner_finish", "budget_exhausted"}:
+            raise RuntimeError("Verifier entered without a valid trigger")
+
+        services.repository.record_phase_changed(
+            job_id,
+            "verifier",
+            plan_version=plan_version,
+            trigger=trigger,
+        )
+
+        stored = services.repository.get_completed_verifier_run(job_id, plan_version)
+        if stored is None:
+            snapshot = services.repository.build_verifier_snapshot(
+                job_id,
+                trigger=trigger,
+                decision_round=decision_round,
+                decision_round_limit=int(state["decision_round_limit"]),
+            )
+            full_prompt = research_verifier_messages(snapshot)
+            run_id = services.repository.begin_verifier_run(
+                job_id,
+                evaluated_plan_version=plan_version,
+                decision_round=decision_round,
+                trigger=trigger,
+                full_prompt=full_prompt,
+            )
+            with tracer.start_as_current_span(
+                "llm.call",
+                attributes={
+                    "prospector.job_id": str(job_id),
+                    "prospector.plan_version": plan_version,
+                    "prospector.agent": "research_verifier",
+                },
+            ):
+                model_result = services.verifier.verify(snapshot)
+            if model_result.full_prompt != full_prompt:
+                raise RuntimeError("Verifier model used a different prompt than the persisted run")
+            decision = model_result.decision
+            services.repository.complete_verifier_run(
+                job_id,
+                run_id,
+                decision=decision,
+                raw_output=model_result.raw_output,
+                evaluated_plan_version=plan_version,
+                decision_round=decision_round,
+            )
+            major_gap_count = sum(gap.severity == "major" for gap in decision.gaps)
+            log.debug(
+                "verifier.completed",
+                message=decision.decision_reason,
+                outcome=decision.release_decision,
+                reason_code=decision.release_decision,
+                job_id=str(job_id),
+                plan_version=plan_version,
+                verifier_run_id=str(run_id),
+                major_gap_count=major_gap_count,
+            )
+        else:
+            run_id = UUID(str(stored["run_id"]))
+            decision = stored["decision"]
+
+        if decision.release_decision == "pass":
+            services.repository.set_research_outcome(
+                job_id,
+                outcome="ready_for_outline",
+                error_code=None,
+                phase="outline_pending",
+            )
+            return {
+                "phase": "outline_pending",
+                "outcome": "ready_for_outline",
+                "error_code": None,
+                "last_verifier_run_id": str(run_id),
+                "verifier_trigger": None,
+                "route": "end",
+            }
+
+        rounds_remaining = int(state["decision_round_limit"]) - decision_round
+        if rounds_remaining <= 0:
+            services.repository.set_research_outcome(
+                job_id,
+                outcome="failed",
+                error_code="verifier_major_gap",
+                phase="failed",
+            )
+            raise VerifierMajorGapError(
+                "Verifier 发现重大缺口，且 Planner 决策轮已耗尽：" + _major_gap_summary(decision)
+            )
+
+        major_gaps = [
+            gap.model_dump(mode="json") for gap in decision.gaps if gap.severity == "major"
+        ]
+        unusable_assertions = services.repository.list_unusable_assertion_details(
+            job_id, decision.assertion_dispositions
+        )
+        messages = append_runtime_feedback(
+            state["planner_messages"],
+            feedback_type="verifier_gap",
+            payload={
+                "verifier_run_id": str(run_id),
+                "major_gaps": major_gaps,
+                "unusable_assertions": unusable_assertions,
+            },
+        )
+        messages = append_runtime_feedback(
+            messages,
+            feedback_type="research_state",
+            payload=_research_state_message(state),
+        )
+        return {
+            "phase": "research",
+            "outcome": None,
+            "error_code": None,
+            "last_verifier_run_id": str(run_id),
+            "planner_messages": messages,
+            "verifier_trigger": None,
+            "route": "planner",
+        }
+
+    return verifier
+
+
 def _route(state: ResearchState) -> str:
     return state["route"]
 
@@ -515,14 +648,25 @@ def build_research_graph(
     graph.add_node("initialize", _initialize_node(runtime))
     graph.add_node("planner", _planner_node(runtime))
     graph.add_node("workers", _workers_node(runtime))
+    graph.add_node("verifier", _verifier_node(runtime))
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
     graph.add_conditional_edges(
         "planner",
         _route,
-        {"planner": "planner", "workers": "workers", "end": END},
+        {
+            "planner": "planner",
+            "workers": "workers",
+            "verifier": "verifier",
+            "end": END,
+        },
     )
     graph.add_edge("workers", "planner")
+    graph.add_conditional_edges(
+        "verifier",
+        _route,
+        {"planner": "planner", "end": END},
+    )
     return graph.compile(checkpointer=checkpointer)
 
 
