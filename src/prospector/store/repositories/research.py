@@ -776,7 +776,7 @@ class ResearchRepository:
         job_id: UUID,
         task_id: UUID,
         document: Document,
-        view_kind: Literal["exa_highlights"],
+        view_kind: Literal["exa_highlights", "kb_read"],
         items: list[SourceViewItem],
     ) -> DocumentView:
         view_id = uuid4()

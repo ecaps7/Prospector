@@ -40,7 +40,7 @@ class DocumentView(BaseModel):
     task_id: UUID
     doc_id: UUID
     doc_version: int = Field(..., ge=1)
-    view_kind: Literal["exa_highlights"]
+    view_kind: Literal["exa_highlights", "kb_read"]
     items: list[SourceViewItem] = Field(..., min_length=1)
     created_at: datetime
 
