@@ -21,6 +21,7 @@ class EventType(StrEnum):
     TASK_FINISHED = "task.finished"
     VERIFIER_COMPLETED = "verifier.completed"
     REPLAN_TRIGGERED = "replan.triggered"
+    REPORT_DRAFT_RENDERED = "report.draft_rendered"
     REPORT_GENERATED = "report.generated"
     GAP_ARTIFACT_WRITTEN = "gap_artifact.written"
 

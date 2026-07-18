@@ -15,7 +15,7 @@ from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.plan import ResearchTask
 
 POLL_INTERVAL_SECONDS = 0.2
-TERMINAL_PHASES = {"outline_pending", "failed"}
+TERMINAL_PHASES = {"draft_rendered", "failed"}
 
 EmitLine = Callable[[str], None]
 
@@ -216,6 +216,12 @@ class ResearchTimelineRenderer:
                 f"触发 Plan v{int(payload['plan_version'])}"
             ]
 
+        if event_type == "report.draft_rendered":
+            return [
+                "[成文] 草稿已生成（引用待逐句验证）："
+                + str(payload.get("markdown_ref") or "")
+            ]
+
         task_id = payload.get("task_id") or event.get("task_id")
         if task_id is None:
             return []
@@ -360,8 +366,12 @@ class ResearchTimelineRenderer:
             trigger_label = _VERIFIER_TRIGGER_LABELS.get(trigger, trigger or "未知")
             plan_part = f"Plan v{plan_version}，" if plan_version is not None else ""
             return [f"[研究] 研究阶段结束，等待核验（{plan_part}触发：{trigger_label}）"]
-        if phase == "outline_pending":
-            return ["[研究] 研究阶段结束，等待 Outline"]
+        if phase == "composition_pending":
+            return ["[成文] Research Verifier 已放行，等待 Writer"]
+        if phase == "writing":
+            return ["[成文] Writer 正在组织深度研究报告"]
+        if phase == "draft_rendered":
+            return ["[成文] 草稿渲染完成，等待逐句验证"]
         if phase == "failed":
             error_code = str(payload.get("error_code") or "unknown_error")
             if error_code == "research_budget_exhausted_without_evidence":

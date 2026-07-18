@@ -25,6 +25,7 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
+from prospector.schemas.report import ReportDraft, WriterSnapshot
 from prospector.schemas.verifier import (
     AssertionDisposition,
     ConflictResolution,
@@ -1007,9 +1008,7 @@ class ResearchRepository:
                 )
         return unique_assertions, inserted_rows
 
-    def list_assertions(
-        self, task_id: UUID, *, usable_only: bool = False
-    ) -> list[Assertion]:
+    def list_assertions(self, task_id: UUID, *, usable_only: bool = False) -> list[Assertion]:
         with self.engine.connect() as conn:
             rows = (
                 conn.execute(
@@ -1080,9 +1079,7 @@ class ResearchRepository:
         return sorted(by_version.items(), key=lambda item: item[0])
 
     @classmethod
-    def _effective_unusable_assertion_ids(
-        cls, conn: Connection, job_id: UUID
-    ) -> set[UUID]:
+    def _effective_unusable_assertion_ids(cls, conn: Connection, job_id: UUID) -> set[UUID]:
         return effective_unusable_assertion_ids(
             cls._load_dispositions_by_plan_version(conn, job_id)
         )
@@ -1202,8 +1199,7 @@ class ResearchRepository:
                 for item in dispositions
             ]
             effective_unusable = sorted(
-                str(value)
-                for value in effective_unusable_assertion_ids(prior_by_version)
+                str(value) for value in effective_unusable_assertion_ids(prior_by_version)
             )
 
         if not plans:
@@ -1602,6 +1598,377 @@ class ResearchRepository:
                 job_id=job_id,
                 event_type=EventType.JOB_PHASE_CHANGED,
                 payload={"phase": phase, "outcome": outcome, "error_code": error_code},
+            )
+
+    def build_writer_snapshot(self, job_id: UUID, verifier_run_id: UUID) -> WriterSnapshot:
+        """Build the Writer's compact view without Excerpt or Document body text."""
+        with self.engine.connect() as conn:
+            brief = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT b.question, b.brief_text, b.output_format, b.language, b.effort
+                        FROM app.briefs b JOIN app.jobs j ON j.brief_id=b.id
+                        WHERE j.id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            verifier = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT gaps FROM app.verifier_runs
+                        WHERE id=:run_id AND job_id=:job_id AND status='completed'
+                          AND release_decision='pass'
+                        """
+                    ),
+                    {"run_id": verifier_run_id, "job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            plans = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT version, decision_round, task_ids
+                        FROM app.plans WHERE job_id=:job_id ORDER BY version
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            ]
+            tasks = {
+                str(row["id"]): dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT id, question, research_stage, research_mode, expected_evidence,
+                               status, stop_reason, finish_reason
+                        FROM app.tasks WHERE job_id=:job_id ORDER BY created_at, id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            }
+            unusable = self._effective_unusable_assertion_ids(conn, job_id)
+            assertion_rows = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT id, statement, excerpt_ids
+                        FROM app.assertions WHERE job_id=:job_id ORDER BY created_at, id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+                if UUID(str(row["id"])) not in unusable
+            ]
+            excerpt_rows = {
+                str(row["excerpt_id"]): dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT e.id AS excerpt_id, d.source_uri, d.version AS document_version,
+                               d.source_meta->>'title' AS title,
+                               d.source_meta->>'author' AS author,
+                               d.source_meta->>'published_at' AS published_at
+                        FROM app.excerpts e JOIN app.documents d ON d.id=e.doc_id
+                        WHERE e.job_id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            }
+            conflict_rows = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT conflict_key, disputed_point, excerpt_ids, decision,
+                               winning_excerpt_ids, rationale
+                        FROM app.conflict_resolutions
+                        WHERE verifier_run_id=:run_id ORDER BY conflict_key
+                        """
+                    ),
+                    {"run_id": verifier_run_id},
+                ).mappings()
+            ]
+
+        plan_summary = []
+        for plan in plans:
+            plan_summary.append(
+                {
+                    "version": int(plan["version"]),
+                    "decision_round": int(plan["decision_round"]),
+                    "tasks": [tasks[str(task_id)] for task_id in plan["task_ids"]],
+                }
+            )
+
+        cards = []
+        for assertion in assertion_rows:
+            assertion_excerpt_ids = {str(value) for value in assertion["excerpt_ids"]}
+            excerpts = [excerpt_rows[value] for value in assertion_excerpt_ids]
+            cards.append(
+                {
+                    "assertion_id": assertion["id"],
+                    "assertion_statement": assertion["statement"],
+                    "excerpts": [
+                        {
+                            "excerpt_id": item["excerpt_id"],
+                            "source": {
+                                "title": item["title"],
+                                "author": item["author"],
+                                "published_at": item["published_at"],
+                                "source_uri": item["source_uri"],
+                                "document_version": item["document_version"],
+                            },
+                        }
+                        for item in excerpts
+                    ],
+                }
+            )
+        if not cards:
+            raise RuntimeError("Report Writer requires at least one usable Assertion")
+
+        minor_gaps = [gap for gap in (verifier["gaps"] or []) if gap.get("severity") == "minor"]
+        return WriterSnapshot.model_validate(
+            {
+                "job_id": job_id,
+                "brief": dict(brief),
+                "final_plan_summary": plan_summary,
+                "evidence_cards": cards,
+                "conflicts": conflict_rows,
+                "minor_gaps": minor_gaps,
+            }
+        )
+
+    def get_report_revision(self, job_id: UUID) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT r.id AS report_id, r.verifier_run_id, r.status AS report_status,
+                               rr.revision, rr.full_prompt, rr.raw_output, rr.draft,
+                               rr.status AS revision_status, r.markdown_ref, r.json_ref
+                        FROM app.reports r
+                        JOIN app.report_revisions rr
+                          ON rr.report_id=r.id AND rr.revision=r.current_revision
+                        WHERE r.job_id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        if result["draft"] is not None:
+            result["draft"] = ReportDraft.model_validate(result["draft"])
+        return result
+
+    def begin_report_revision(
+        self,
+        job_id: UUID,
+        verifier_run_id: UUID,
+        full_prompt: list[dict[str, str]],
+    ) -> UUID:
+        report_id = uuid4()
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.reports
+                      (id, job_id, verifier_run_id, current_revision, status,
+                       created_at, updated_at)
+                    VALUES (:id, :job_id, :run_id, 1, 'writing', :now, :now)
+                    ON CONFLICT (job_id) DO NOTHING
+                    """
+                ),
+                {"id": report_id, "job_id": job_id, "run_id": verifier_run_id, "now": now},
+            )
+            report = (
+                conn.execute(
+                    text("SELECT id, verifier_run_id FROM app.reports WHERE job_id=:job_id"),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            if UUID(str(report["verifier_run_id"])) != verifier_run_id:
+                raise RuntimeError("Report replayed against a different Verifier run")
+            report_id = UUID(str(report["id"]))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.report_revisions
+                      (report_id, revision, full_prompt, status, created_at)
+                    VALUES (:report_id, 1, CAST(:prompt AS JSONB), 'prompted', :now)
+                    ON CONFLICT (report_id, revision) DO NOTHING
+                    """
+                ),
+                {"report_id": report_id, "prompt": _json(full_prompt), "now": now},
+            )
+            stored_prompt = conn.execute(
+                text(
+                    """
+                    SELECT full_prompt FROM app.report_revisions
+                    WHERE report_id=:report_id AND revision=1
+                    """
+                ),
+                {"report_id": report_id},
+            ).scalar_one()
+            if stored_prompt != full_prompt:
+                raise RuntimeError("Report Writer replayed with a different prompt")
+        return report_id
+
+    def complete_report_revision(
+        self,
+        report_id: UUID,
+        draft: ReportDraft,
+        raw_output: object,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE app.report_revisions
+                    SET raw_output=CAST(:raw AS JSONB), draft=CAST(:draft AS JSONB),
+                        body_char_count=:chars, status='generated', completed_at=:now
+                    WHERE report_id=:report_id AND revision=1 AND status='prompted'
+                    """
+                ),
+                {
+                    "raw": _json(raw_output),
+                    "draft": _json(draft.model_dump(mode="json")),
+                    "chars": draft.body_char_count(),
+                    "now": now,
+                    "report_id": report_id,
+                },
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("Report revision is missing or already generated")
+            statement_order = 0
+            paragraph_groups = [
+                (section.section_id, section.paragraphs) for section in draft.sections
+            ] + [("sec_conclusion", draft.conclusion)]
+            for section_id, paragraphs in paragraph_groups:
+                for paragraph in paragraphs:
+                    for statement in paragraph.statements:
+                        statement_order += 1
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO app.report_statements
+                                  (report_id, revision, statement_id, section_id, paragraph_id,
+                                   statement_order, kind, text, candidate_excerpt_ids,
+                                   premise_statement_ids, created_at)
+                                VALUES
+                                  (:report_id, 1, :statement_id, :section_id, :paragraph_id,
+                                   :statement_order, :kind, :text, CAST(:excerpt_ids AS JSONB),
+                                   CAST(:premise_ids AS JSONB), :now)
+                                """
+                            ),
+                            {
+                                "report_id": report_id,
+                                "statement_id": statement.statement_id,
+                                "section_id": section_id,
+                                "paragraph_id": paragraph.paragraph_id,
+                                "statement_order": statement_order,
+                                "kind": statement.kind,
+                                "text": statement.text,
+                                "excerpt_ids": _json(
+                                    [str(value) for value in statement.candidate_excerpt_ids]
+                                ),
+                                "premise_ids": _json(statement.premise_statement_ids),
+                                "now": now,
+                            },
+                        )
+
+    def complete_report_render(
+        self,
+        job_id: UUID,
+        report_id: UUID,
+        *,
+        markdown_ref: str,
+        markdown_hash: str,
+        json_ref: str,
+        json_hash: str,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.report_revisions SET status='rendered'
+                    WHERE report_id=:report_id AND revision=1 AND status='generated'
+                    """
+                ),
+                {"report_id": report_id},
+            )
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE app.reports
+                    SET status='draft_rendered', markdown_ref=:markdown_ref,
+                        markdown_hash=:markdown_hash, json_ref=:json_ref,
+                        json_hash=:json_hash, updated_at=:now
+                    WHERE id=:report_id AND job_id=:job_id AND status='writing'
+                    """
+                ),
+                {
+                    "report_id": report_id,
+                    "job_id": job_id,
+                    "markdown_ref": markdown_ref,
+                    "markdown_hash": markdown_hash,
+                    "json_ref": json_ref,
+                    "json_hash": json_hash,
+                    "now": now,
+                },
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("Report is missing or already rendered")
+            self._event(
+                conn,
+                job_id=job_id,
+                event_type=EventType.REPORT_DRAFT_RENDERED,
+                payload={
+                    "report_id": str(report_id),
+                    "revision": 1,
+                    "verification_status": "pending",
+                    "markdown_ref": markdown_ref,
+                    "json_ref": json_ref,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.jobs SET outcome='draft_rendered', error_code=NULL, updated_at=:now
+                    WHERE id=:job_id
+                    """
+                ),
+                {"job_id": job_id, "now": now},
+            )
+            self._event(
+                conn,
+                job_id=job_id,
+                event_type=EventType.JOB_PHASE_CHANGED,
+                payload={
+                    "phase": "draft_rendered",
+                    "outcome": "draft_rendered",
+                    "error_code": None,
+                },
             )
 
     def record_phase_changed(

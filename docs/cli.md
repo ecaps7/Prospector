@@ -2,7 +2,7 @@
 
 - **版本**：v1.2
 - **日期**：2026-07-14
-- **状态**：M1 目标合同；当前本地入口已实现 Brief 生成、interactive HITL、Planner-Worker 与 PG 事件时间线
+- **状态**：M1 目标合同；当前本地入口已实现到 Report Writer 草稿渲染
 - **关联文档**：[系统设计](./design.md)、[M1 实现设计](./implementations/m1.md)
 
 ---
@@ -11,7 +11,10 @@
 
 M1 的产品 CLI 名为 `prospector`，是单进程 API 的瘦客户端：只负责提交、Brief 交互、SSE 展示和报告下载，不在客户端实现 Planner、Worker 或质量门。
 
-当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成、`c/e/i/q` 确认、Planner-Worker 与 Research Verifier/Replan。冻结 Brief 后，同一个进程运行研究图并实时显示 PG 事件时间线；Verifier 放行后停在 `outline_pending`，重大缺口且无 Planner 决策轮时直接失败退出。
+当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成、
+`c/e/i/q` 确认、Planner-Worker、Research Verifier/Replan 与 Report Writer。
+Verifier 放行后生成结构化长篇草稿并渲染 Markdown/JSON，主图停在 `draft_rendered`；
+该产物明确标为 `verification_pending`，不是正式报告。
 
 职责边界：
 

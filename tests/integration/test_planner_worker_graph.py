@@ -16,7 +16,9 @@ from alembic.config import Config
 from sqlalchemy import text
 
 from prospector.agents.planner import PlannerModelResult, PlannerOutputError
+from prospector.agents.prompts.report_writer import report_writer_messages
 from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.report_writer import ReportWriterResult
 from prospector.agents.research_verifier import VerifierModelResult
 from prospector.agents.research_worker import (
     ResearchWorker,
@@ -30,6 +32,7 @@ from prospector.flow.research_graph import (
     _initialize_node,
     _planner_node,
     _run_one_worker,
+    _writer_node,
     build_research_graph,
     thread_config,
 )
@@ -38,6 +41,7 @@ from prospector.runtime.timeline import ResearchTimelineRenderer, drain_timeline
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.evidence import Assertion
+from prospector.schemas.report import ReportDraft, WriterSnapshot
 from prospector.schemas.verifier import AssertionDisposition, VerifierDecision, VerifierGap
 from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
 from prospector.store.jobs import create_job
@@ -167,6 +171,76 @@ class CredibilityGapVerifier:
             full_prompt=research_verifier_messages(snapshot),
             raw_output=decision.model_dump(mode="json"),
             decision=decision,
+        )
+
+
+class PassingWriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:
+        self.calls += 1
+        excerpt_id = snapshot.evidence_cards[0].excerpts[0].excerpt_id
+        fact = "研究材料显示了一个可核对的年度事实。" * 120
+        analysis = "综合现有材料，这一事实需要结合相反信号与适用边界理解。" * 100
+        draft = ReportDraft.model_validate(
+            {
+                "title": "并行研究测试报告",
+                "introduction": "现有材料支持一个需要结合反例理解的核心判断。",
+                "sections": [
+                    {
+                        "section_id": "sec_answer",
+                        "title": "核心判断",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": "p_answer",
+                                "statements": [
+                                    {
+                                        "statement_id": "s_fact",
+                                        "text": fact,
+                                        "kind": "evidence",
+                                        "candidate_excerpt_ids": [str(excerpt_id)],
+                                        "premise_statement_ids": [],
+                                    },
+                                    {
+                                        "statement_id": "s_analysis",
+                                        "text": analysis,
+                                        "kind": "derived",
+                                        "candidate_excerpt_ids": [],
+                                        "premise_statement_ids": ["s_fact"],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                "conclusion": [
+                    {
+                        "paragraph_id": "p_conclusion",
+                        "statements": [
+                            {
+                                "statement_id": "s_conclusion_1",
+                                "text": "综合来看，现有材料支持上述有边界的判断。",
+                                "kind": "derived",
+                                "candidate_excerpt_ids": [],
+                                "premise_statement_ids": ["s_fact", "s_analysis"],
+                            },
+                            {
+                                "statement_id": "s_conclusion_2",
+                                "text": "最终结论不应超出这些事实与分析的范围。",
+                                "kind": "derived",
+                                "candidate_excerpt_ids": [],
+                                "premise_statement_ids": ["s_conclusion_1"],
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        return ReportWriterResult(
+            full_prompt=report_writer_messages(snapshot),
+            raw_output=draft.model_dump(mode="json"),
+            draft=draft,
         )
 
 
@@ -362,7 +436,14 @@ def _services(
         model,
     )
     return (
-        ResearchGraphServices(repository, planner, worker, verifier or PassingVerifier()),
+        ResearchGraphServices(
+            repository,
+            planner,
+            worker,
+            verifier or PassingVerifier(),
+            PassingWriter(),
+            object_store,
+        ),
         exa,
         model,
     )
@@ -603,8 +684,13 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
 
         assert result["decision_round"] == 4
         assert result["plan_version"] == 1
-        assert result["outcome"] == "ready_for_outline"
+        assert result["outcome"] == "draft_rendered"
         assert exa.max_active >= 2
+        writer = cast(PassingWriter, services.writer)
+        assert writer.calls == 1
+        replay = _writer_node(services)(cast(Any, result))
+        assert replay["outcome"] == "draft_rendered"
+        assert writer.calls == 1
 
         events = repository.list_events(job_id)
         event_types = [row["event_type"] for row in events]
@@ -643,12 +729,12 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
             f"Worker 决策轮预算 {verify_budget.max_worker_rounds} 轮" in line
             for line in timeline_lines
         )
-        verifier_lines = [
-            "[核验] Plan v1 通过（重大缺口 0，冲突裁决 0，废证 0）",
-            "[核验] 收工：测试证据足以履行 Plan。",
-            "[研究] 研究阶段结束，等待 Outline",
-        ]
-        assert timeline_lines[-3:] == verifier_lines
+        assert "[核验] Plan v1 通过（重大缺口 0，冲突裁决 0，废证 0）" in timeline_lines
+        assert "[核验] 收工：测试证据足以履行 Plan。" in timeline_lines
+        assert "[成文] Research Verifier 已放行，等待 Writer" in timeline_lines
+        assert "[成文] Writer 正在组织深度研究报告" in timeline_lines
+        assert any(line.startswith("[成文] 草稿已生成") for line in timeline_lines)
+        assert timeline_lines[-1] == "[成文] 草稿渲染完成，等待逐句验证"
         assert any(
             line.startswith("[研究] 研究阶段结束，等待核验（Plan v1，触发：")
             for line in timeline_lines
@@ -679,9 +765,34 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
                 text("SELECT decision_reason FROM app.verifier_runs WHERE job_id=:job_id"),
                 {"job_id": job_id},
             ).scalar_one()
+            report_row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT r.status, rr.full_prompt, rr.body_char_count,
+                               r.markdown_ref, r.json_ref,
+                               (SELECT COUNT(*) FROM app.report_statements rs
+                                WHERE rs.report_id=r.id) AS statement_count
+                        FROM app.reports r JOIN app.report_revisions rr ON rr.report_id=r.id
+                        WHERE r.job_id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
         assert len(prompts) == 4
         assert len(assertions) == 2
         assert verifier_reason == "测试证据足以履行 Plan。"
+        assert report_row["status"] == "draft_rendered"
+        assert int(report_row["body_char_count"]) > 0
+        assert int(report_row["statement_count"]) == 4
+        assert str(report_row["markdown_ref"]).endswith("/report.md")
+        assert str(report_row["json_ref"]).endswith("/report.json")
+        assert "2026 年公开了可核对事实" not in json.dumps(
+            report_row["full_prompt"], ensure_ascii=False
+        )
         assert all(str(row["task_id"]) == row["produced_by"]["task_id"] for row in assertions)
         assert "document_view" not in json.dumps(prompts, ensure_ascii=False, default=str)
         assert "你的输出不合法" in json.dumps(
@@ -759,7 +870,7 @@ def test_unusable_disposition_filters_assertions_and_replans() -> None:
                 initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
                 thread_config(str(job_id)),
             )
-        assert result["outcome"] == "ready_for_outline"
+        assert result["outcome"] == "draft_rendered"
         assert verifier.calls == 2
         events = repository.list_events(job_id)
         gap_feedback = next(

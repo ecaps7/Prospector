@@ -199,6 +199,19 @@ def ask(
             f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
             err=True,
         )
+        if result.get("report_markdown_ref"):
+            typer.echo(f"REPORT_DRAFT: {result['report_markdown_ref']}", err=True)
+        if result.get("report_json_ref"):
+            typer.echo(f"REPORT_DRAFT_JSON: {result['report_json_ref']}", err=True)
+        if result.get("report_markdown_ref"):
+            _output_separator()
+            store = ObjectStore()
+            ref = result["report_markdown_ref"]
+            # Parse s3://bucket/key
+            assert ref.startswith("s3://"), f"expected s3:// URI, got {ref}"
+            _, key = ref[len("s3://"):].split("/", 1)
+            markdown_bytes = store.get_bytes(key)
+            typer.echo(markdown_bytes.decode("utf-8"))
     except BriefConfirmAborted as exc:
         log.info("brief.confirm", result="aborted", reason=str(exc))
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)

@@ -514,16 +514,17 @@ def _services(repository: _FakeRepository, verifier: _FakeVerifier) -> ResearchG
     )
 
 
-def test_verifier_node_passes_to_outline_pending() -> None:
+def test_verifier_node_passes_to_composition_pending() -> None:
     repository = _FakeRepository()
     verifier = _FakeVerifier(_decision())
 
     result = _verifier_node(_services(repository, verifier))(cast(Any, _state()))
 
-    assert result["phase"] == "outline_pending"
-    assert result["outcome"] == "ready_for_outline"
+    assert result["phase"] == "composition_pending"
+    assert result["outcome"] == "ready_for_writer"
+    assert result["route"] == "writer"
     assert repository.completed is not None
-    assert repository.outcomes[-1]["phase"] == "outline_pending"
+    assert repository.outcomes[-1]["phase"] == "composition_pending"
 
 
 def test_verifier_node_logs_decision_reason_after_persistence(
@@ -595,7 +596,7 @@ def test_verifier_node_reuses_completed_run_without_model_call() -> None:
 
     result = _verifier_node(_services(repository, verifier))(cast(Any, _state()))
 
-    assert result["phase"] == "outline_pending"
+    assert result["phase"] == "composition_pending"
     assert verifier.calls == 0
     assert repository.begin_count == 0
 
@@ -684,9 +685,9 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
         {
             "event_type": "job.phase_changed",
             "payload": {
-                "phase": "outline_pending",
-                "outcome": "ready_for_outline",
+                "phase": "composition_pending",
+                "outcome": "ready_for_writer",
                 "error_code": None,
             },
         }
-    ) == ["[研究] 研究阶段结束，等待 Outline"]
+    ) == ["[成文] Research Verifier 已放行，等待 Writer"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -23,15 +24,21 @@ from prospector.agents.planner import (
     initial_planner_messages,
 )
 from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.report_writer import (
+    OpenAIReportWriter,
+    ReportWriterModel,
+    ReportWriterOutputError,
+)
 from prospector.agents.research_verifier import OpenAIResearchVerifier, VerifierModel
 from prospector.agents.research_worker import ResearchWorker
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.gates import dispatch_rejection, finish_rejection
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
+from prospector.reporting.render import render_report_draft
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.verifier import VerifierDecision
-from prospector.store.object_store import ObjectStore
+from prospector.store.object_store import ObjectStore, workspace_key
 from prospector.store.repositories import ResearchRepository
 from prospector.tools.save_findings import SaveFindingsTool
 from prospector.tools.web_fetch import WebFetchTool
@@ -47,6 +54,8 @@ class ResearchGraphServices:
     planner: PlannerModel
     worker: ResearchWorker
     verifier: VerifierModel
+    writer: ReportWriterModel | None = None
+    object_store: ObjectStore | None = None
 
 
 class VerifierMajorGapError(RuntimeError):
@@ -67,6 +76,8 @@ def default_research_services() -> ResearchGraphServices:
         planner=OpenAIPlannerModel(),
         worker=ResearchWorker(repository, tools),
         verifier=OpenAIResearchVerifier(),
+        writer=OpenAIReportWriter(),
+        object_store=object_store,
     )
 
 
@@ -295,6 +306,9 @@ def _planner_node(services: ResearchGraphServices):
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
                     "last_verifier_run_id": None,
+                    "report_id": None,
+                    "report_markdown_ref": None,
+                    "report_json_ref": None,
                     "route": "workers",
                 }
 
@@ -577,17 +591,17 @@ def _verifier_node(services: ResearchGraphServices):
         if decision.release_decision == "pass":
             services.repository.set_research_outcome(
                 job_id,
-                outcome="ready_for_outline",
+                outcome="ready_for_writer",
                 error_code=None,
-                phase="outline_pending",
+                phase="composition_pending",
             )
             return {
-                "phase": "outline_pending",
-                "outcome": "ready_for_outline",
+                "phase": "composition_pending",
+                "outcome": "ready_for_writer",
                 "error_code": None,
                 "last_verifier_run_id": str(run_id),
                 "verifier_trigger": None,
-                "route": "end",
+                "route": "writer",
             }
 
         rounds_remaining = int(state["decision_round_limit"]) - decision_round
@@ -635,6 +649,130 @@ def _verifier_node(services: ResearchGraphServices):
     return verifier
 
 
+def _writer_node(services: ResearchGraphServices):
+    def writer(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        raw_run_id = state.get("last_verifier_run_id")
+        if raw_run_id is None:
+            raise RuntimeError("Report Writer entered without a completed Verifier run")
+        verifier_run_id = UUID(raw_run_id)
+        if services.writer is None or services.object_store is None:
+            raise RuntimeError("Report Writer services are not configured")
+        services.repository.record_phase_changed(job_id, "writing")
+
+        try:
+            snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+            stored = services.repository.get_report_revision(job_id)
+            if stored is not None and stored["report_status"] == "draft_rendered":
+                return {
+                    "phase": "draft_rendered",
+                    "outcome": "draft_rendered",
+                    "error_code": None,
+                    "report_id": str(stored["report_id"]),
+                    "report_markdown_ref": stored["markdown_ref"],
+                    "report_json_ref": stored["json_ref"],
+                    "route": "end",
+                }
+
+            if stored is not None and stored["revision_status"] in {"generated", "rendered"}:
+                report_id = UUID(str(stored["report_id"]))
+                draft = stored["draft"]
+            else:
+                from prospector.agents.prompts.report_writer import report_writer_messages
+
+                full_prompt = report_writer_messages(snapshot)
+                report_id = services.repository.begin_report_revision(
+                    job_id,
+                    verifier_run_id,
+                    full_prompt,
+                )
+                with tracer.start_as_current_span(
+                    "llm.call",
+                    attributes={
+                        "prospector.job_id": str(job_id),
+                        "prospector.agent": "report_writer",
+                    },
+                ):
+                    result = services.writer.write(snapshot)
+                if result.full_prompt[: len(full_prompt)] != full_prompt:
+                    raise RuntimeError("Report Writer used a different prompt than persisted")
+                draft = result.draft
+                services.repository.complete_report_revision(
+                    report_id,
+                    draft,
+                    result.raw_output,
+                )
+        except (ReportWriterOutputError, ValueError) as exc:
+            services.repository.set_research_outcome(
+                job_id,
+                outcome="failed",
+                error_code="writer_contract_error",
+                phase="failed",
+            )
+            log.error("writer.contract_error", job_id=str(job_id), message=str(exc))
+            return {
+                "phase": "failed",
+                "outcome": "failed",
+                "error_code": "writer_contract_error",
+                "route": "end",
+            }
+
+        try:
+            rendered = render_report_draft(snapshot, draft)
+            base_key = workspace_key(
+                services.repository.settings.workspace_id,
+                "reports",
+                str(job_id),
+                "1",
+            )
+            markdown_bytes = rendered.markdown.encode("utf-8")
+            json_bytes = rendered.json_text.encode("utf-8")
+            markdown_ref = services.object_store.put_bytes(
+                f"{base_key}/report.md",
+                markdown_bytes,
+                content_type="text/markdown; charset=utf-8",
+            )
+            json_ref = services.object_store.put_bytes(
+                f"{base_key}/report.json",
+                json_bytes,
+                content_type="application/json; charset=utf-8",
+            )
+            services.repository.complete_report_render(
+                job_id,
+                report_id,
+                markdown_ref=markdown_ref.as_uri(),
+                markdown_hash="sha256:" + hashlib.sha256(markdown_bytes).hexdigest(),
+                json_ref=json_ref.as_uri(),
+                json_hash="sha256:" + hashlib.sha256(json_bytes).hexdigest(),
+            )
+        except Exception as exc:
+            services.repository.set_research_outcome(
+                job_id,
+                outcome="failed",
+                error_code="draft_render_error",
+                phase="failed",
+            )
+            log.error("writer.render_error", job_id=str(job_id), message=str(exc))
+            return {
+                "phase": "failed",
+                "outcome": "failed",
+                "error_code": "draft_render_error",
+                "report_id": str(report_id),
+                "route": "end",
+            }
+        return {
+            "phase": "draft_rendered",
+            "outcome": "draft_rendered",
+            "error_code": None,
+            "report_id": str(report_id),
+            "report_markdown_ref": markdown_ref.as_uri(),
+            "report_json_ref": json_ref.as_uri(),
+            "route": "end",
+        }
+
+    return writer
+
+
 def _route(state: ResearchState) -> str:
     return state["route"]
 
@@ -649,6 +787,7 @@ def build_research_graph(
     graph.add_node("planner", _planner_node(runtime))
     graph.add_node("workers", _workers_node(runtime))
     graph.add_node("verifier", _verifier_node(runtime))
+    graph.add_node("writer", _writer_node(runtime))
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
     graph.add_conditional_edges(
@@ -658,6 +797,7 @@ def build_research_graph(
             "planner": "planner",
             "workers": "workers",
             "verifier": "verifier",
+            "writer": "writer",
             "end": END,
         },
     )
@@ -665,8 +805,9 @@ def build_research_graph(
     graph.add_conditional_edges(
         "verifier",
         _route,
-        {"planner": "planner", "end": END},
+        {"planner": "planner", "writer": "writer", "end": END},
     )
+    graph.add_edge("writer", END)
     return graph.compile(checkpointer=checkpointer)
 
 
