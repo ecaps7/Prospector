@@ -661,7 +661,7 @@ flowchart TD
 3. **可信度**：结合 URL、标题、author、发布时间、Excerpt 原文与独立佐证，直接判断关键结论是否过度依赖不可靠来源（见 §4.3）。若断言本身不可采信，须同时写入 AssertionDisposition（`unusable`）；实质影响结论时再开 `source_credibility` 重大缺口并 Replan——**缺口负责补查，废证负责取消资格**，二者不可互相替代；
 4. **缺口**：生成结构化 gap list（建议的补查子课题说明、已尝试路径、为何不足），转化为定向补派并生成新 Plan 版本交回 Planner。补搜建议优先**换取证角度 / 来源类型**，避免对同一死指标同义重搜。
 
-Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入成文，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。当前已实现 Report Writer 草稿与确定性预览渲染，Report Verifier、partial report 与 gap artifact 仍待接入。决策轮上限与预算一样，只停止研究，不放行质量门（§7）。
+Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入成文，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。当前已实现 Report Writer、Report Verifier、最多两次句级修订与验证后确定性引用渲染；实现暂以 `draft_rendered` 收口，修订触顶后的失败句以 `partial` 保留且不附已验证引用，正式 `completed` 出口、确定性删除/降格、partial report 与 gap artifact 仍待接入。决策轮上限与预算一样，只停止研究，不放行质量门（§7）。
 
 ### 5.4 Phase 4–5：成文与逐句验证（prose-first）
 

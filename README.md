@@ -43,11 +43,11 @@ flowchart TD
     subgraph 成文层
         RW[Report Writer<br/>结构化正文 + 稳定 statement id] --> RV[Report Verifier<br/>逐句分型验证]
         RV -- 句级修订 --> RW
-        RV -- 触顶删句/降格 --> CR
+        RV -- 修订触顶，标记 partial --> CR
         RV -- 全部通过 --> CR[确定性渲染<br/>引用 / 表格 / 图表]
     end
 
-    CR --> F[最终报告<br/>Markdown + JSON]
+    CR --> F[验证后产物 draft_rendered<br/>Markdown + JSON]
 
     CP[(PostgreSQL Checkpoint)] -.- P
     CP -.- SCH
@@ -93,8 +93,9 @@ uv run --env-file .env prospector-local ask "研究一个需要多侧面检索�
 ```
 
 `ask` 当前执行：问题输入 → 最多一轮澄清 → Brief 生成 → `c/e/i/q` 确认 →
-Planner-Worker 研究 → Research Verifier → Report Writer → 草稿渲染。终端会显示研究与成文时间线，
-并在 `draft_rendered` 后输出 Markdown/JSON 的对象存储地址。
+Planner-Worker 研究 → Research Verifier → Report Writer → Report Verifier → 必要时句级修订 →
+验证后确定性渲染。终端会显示研究与成文时间线，并在 `draft_rendered` 后输出 Markdown/JSON
+的对象存储地址。
 
 已创建的 Job 可随时回放或继续跟随同一条人类可读时间线：
 
@@ -128,7 +129,7 @@ M0 的 checkpoint kill/resume 能力由集成测试验证，不作为空流程�
 
 ```
 src/prospector/
-├── agents/          # LLM 智能体（Planner、Worker、Verifier、Report Writer）
+├── agents/          # LLM 智能体（Planner、Worker、Research/Report Verifier、Report Writer）
 │   └── prompts/     # 各智能体的提示词模板
 ├── deterministic/   # 确定性逻辑（预算注入、质量门守卫）
 ├── flow/            # LangGraph 状态图定义与 ResearchState
@@ -143,7 +144,7 @@ src/prospector/
 ## 实现状态
 
 - **M0 工程基座**已完成：PostgreSQL checkpointer、Alembic、MinIO、日志、trace 与 CI。
-- **M1 已完成** Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan，以及 Report Writer 草稿与确定性预览渲染。
-- 当前主图在 Verifier 放行后生成结构化长篇草稿，落库并渲染 Markdown/JSON，停在 `draft_rendered`。Report Verifier 与正式报告出口尚未实现。
+- **M1 已实现到成文质量门**：Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan、Report Writer、Report Verifier、最多两次句级修订，以及验证后确定性引用渲染。
+- 当前每个 revision 都会全量逐句验证。修订用尽后仍失败的句子以 `partial` 标记保留且不附已验证引用；渲染后主图停在 `draft_rendered`，正式 `completed` 报告出口尚未实现。
 
 详细设计文档见 [docs/design.md](docs/design.md)，M1 实现合同见 [docs/implementations/m1.md](docs/implementations/m1.md)。

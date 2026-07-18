@@ -1,8 +1,8 @@
 # Prospector CLI 设计
 
-- **版本**：v1.2
-- **日期**：2026-07-14
-- **状态**：M1 目标合同；当前本地入口已实现到 Report Writer 草稿渲染
+- **版本**：v1.3
+- **日期**：2026-07-18
+- **状态**：M1 目标合同；当前本地入口已实现到 Report Verifier、Writer 句级修订与验证后渲染
 - **关联文档**：[系统设计](./design.md)、[M1 实现设计](./implementations/m1.md)
 
 ---
@@ -12,9 +12,10 @@
 M1 的产品 CLI 名为 `prospector`，是单进程 API 的瘦客户端：只负责提交、Brief 交互、SSE 展示和报告下载，不在客户端实现 Planner、Worker 或质量门。
 
 当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成、
-`c/e/i/q` 确认、Planner-Worker、Research Verifier/Replan 与 Report Writer。
-Verifier 放行后生成结构化长篇草稿并渲染 Markdown/JSON，主图停在 `draft_rendered`；
-该产物明确标为 `verification_pending`，不是正式报告。
+`c/e/i/q` 确认、Planner-Worker、Research Verifier/Replan、Report Writer 与 Report Verifier。
+Research Verifier 放行后生成结构化长篇草稿；Report Verifier 逐句核验，失败时最多触发两次
+Writer 句级修订，再按已通过的 support 关系确定性渲染 Markdown/JSON。主图仍停在
+`draft_rendered`：产物会标为 `verified` 或 `partial`，但尚未进入正式 `completed` 出口。
 
 职责边界：
 
