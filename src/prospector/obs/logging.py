@@ -29,6 +29,7 @@ _STAGE_ICONS: dict[str, str] = {
     "scope.brief": "B",
     "brief.confirm": "✔",
     "llm.call": "~",
+    "report_verifier.completed": "✓",
     "done": "✓",
     "error": "✗",
 }
@@ -53,6 +54,7 @@ _STAGE_COLORS: dict[str, str] = {
     "scope.brief": _BLUE,
     "brief.confirm": _GREEN,
     "llm.call": _DIM,
+    "report_verifier.completed": _GREEN,
     "done": _GREEN,
     "error": _RED,
 }

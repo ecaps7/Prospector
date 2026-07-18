@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from textwrap import dedent
 
-from prospector.schemas.report import WriterSnapshot, excerpt_alias_map
+from prospector.schemas.claims import ReportVerifierFindings
+from prospector.schemas.report import ReportDraft, WriterSnapshot, excerpt_alias_map
 
 
 def _aliased_material(snapshot: WriterSnapshot) -> str:
@@ -111,3 +112,57 @@ def retry_message(error: str, last_accepted: str) -> str:
         f"已接受的最后一条记录是：{last_accepted}，其之前的内容已全部保存。"
         "请从该记录之后继续输出，修正上述问题，不要重复任何已接受的记录。"
     )
+
+
+def report_writer_revision_messages(
+    snapshot: WriterSnapshot,
+    draft: ReportDraft,
+    findings: ReportVerifierFindings,
+) -> list[dict[str, str]]:
+    material = _aliased_material(snapshot)
+    aliases = {
+        str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()
+    }
+
+    def replace(value: object) -> object:
+        if isinstance(value, str):
+            return aliases.get(value, value)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    aliased_draft = replace(draft.model_dump(mode="json"))
+    failure_ids = [item.statement_id for item in findings.failures]
+    system = dedent(
+        """
+        你是研究报告的修订写作者。审稿人指出了若干未通过句子。你只能输出补丁，不得重写全文。
+
+        ## 硬约束
+        1. 只输出 findings 中列出的 statement_id 的替换；未点名句子一个字都不能改。
+        2. 不得新增 statement_id，不得改 title / introduction / section 标题 / 段落结构。
+        3. 换证只能使用材料中已有的 excerpt_id 短编号（如 e_01）；禁止暗示去搜新来源。
+        4. 每行一个 JSON；全部补丁结束后输出 {"record":"end"}。
+
+        ## 补丁记录
+        {
+          "record": "patch_statement",
+          "statement_id": "s_...",
+          "text": "...",
+          "kind": "evidence" | "derived" | "elaboration" | "limitation",
+          "candidate_excerpt_ids": [],
+          "premise_statement_ids": []
+        }
+        kind 约束与初稿相同：evidence 必须带候选 excerpt；derived 必须带前文 premise；
+        elaboration / limitation 两者皆空。
+        """
+    ).strip()
+    user = (
+        "请根据审稿意见，只输出需要替换的句子补丁。\n\n"
+        f"需要修订的 statement_id：{json.dumps(failure_ids, ensure_ascii=False)}\n\n"
+        f"审稿 findings：\n{json.dumps(findings.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+        f"当前草稿：\n{json.dumps(aliased_draft, ensure_ascii=False)}\n\n"
+        f"可用研究材料：\n{material}"
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]

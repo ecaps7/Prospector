@@ -217,10 +217,7 @@ class ResearchTimelineRenderer:
             ]
 
         if event_type == "report.draft_rendered":
-            return [
-                "[成文] 草稿已生成（引用待逐句验证）："
-                + str(payload.get("markdown_ref") or "")
-            ]
+            return ["[成文] 报告已渲染：" + str(payload.get("markdown_ref") or "")]
 
         task_id = payload.get("task_id") or event.get("task_id")
         if task_id is None:
@@ -370,8 +367,14 @@ class ResearchTimelineRenderer:
             return ["[成文] Research Verifier 已放行，等待 Writer"]
         if phase == "writing":
             return ["[成文] Writer 正在组织深度研究报告"]
+        if phase == "verifying":
+            return ["[成文] Report Verifier 正在逐句验证"]
+        if phase == "revising":
+            return ["[成文] 存在未通过语句，Writer 正在修订"]
+        if phase == "verified":
+            return ["[成文] 逐句验证通过"]
         if phase == "draft_rendered":
-            return ["[成文] 草稿渲染完成，等待逐句验证"]
+            return ["[成文] 报告渲染完成"]
         if phase == "failed":
             error_code = str(payload.get("error_code") or "unknown_error")
             if error_code == "research_budget_exhausted_without_evidence":

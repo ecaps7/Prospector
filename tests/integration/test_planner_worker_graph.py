@@ -174,6 +174,69 @@ class CredibilityGapVerifier:
         )
 
 
+class PassingReportVerifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def verify(self, snapshot: Any) -> Any:
+        from prospector.agents.report_verifier import (
+            ReportVerifierModelResult,
+            materialize_findings,
+        )
+        from prospector.schemas.claims import (
+            BridgeStatementDecision,
+            DerivedStatementDecision,
+            EvidenceStatementDecision,
+        )
+
+        self.calls += 1
+        decisions: list[Any] = []
+        for item in snapshot.statements:
+            if item.kind == "evidence":
+                decisions.append(
+                    EvidenceStatementDecision(
+                        statement_id=item.statement_id,
+                        claim_type="fact",
+                        pairs=[
+                            {
+                                "excerpt_id": excerpt["excerpt_id"],
+                                "relation": "support",
+                            }
+                            for excerpt in item.candidate_excerpts
+                        ],
+                        status="pass",
+                        reason="测试放行：候选片段支持该事实句",
+                    )
+                )
+            elif item.kind == "derived":
+                decisions.append(
+                    DerivedStatementDecision(
+                        statement_id=item.statement_id,
+                        inference_note="测试推理",
+                        status="pass",
+                        reason="测试放行：推理合理",
+                    )
+                )
+            else:
+                decisions.append(
+                    BridgeStatementDecision(
+                        statement_id=item.statement_id,
+                        kind=item.kind,
+                        contains_factual_claim=False,
+                        reason="测试放行：无夹带事实",
+                    )
+                )
+        findings = materialize_findings(
+            revision=snapshot.revision,
+            round_number=snapshot.round,
+            decisions=decisions,
+            allowed_excerpt_ids=list(snapshot.allowed_excerpt_ids),
+        )
+        return ReportVerifierModelResult(
+            findings=findings, decisions=decisions, raw_outputs={}
+        )
+
+
 class PassingWriter:
     def __init__(self) -> None:
         self.calls = 0
@@ -239,6 +302,21 @@ class PassingWriter:
         )
         return ReportWriterResult(
             full_prompt=report_writer_messages(snapshot),
+            raw_output=draft.model_dump(mode="json"),
+            draft=draft,
+        )
+
+    def revise(
+        self,
+        snapshot: WriterSnapshot,
+        draft: ReportDraft,
+        findings: Any,
+    ) -> ReportWriterResult:
+        self.calls += 1
+        from prospector.agents.prompts.report_writer import report_writer_revision_messages
+
+        return ReportWriterResult(
+            full_prompt=report_writer_revision_messages(snapshot, draft, findings),
             raw_output=draft.model_dump(mode="json"),
             draft=draft,
         )
@@ -437,12 +515,13 @@ def _services(
     )
     return (
         ResearchGraphServices(
-            repository,
-            planner,
-            worker,
-            verifier or PassingVerifier(),
-            PassingWriter(),
-            object_store,
+            repository=repository,
+            planner=planner,
+            worker=worker,
+            verifier=verifier or PassingVerifier(),
+            writer=PassingWriter(),
+            report_verifier=PassingReportVerifier(),
+            object_store=object_store,
         ),
         exa,
         model,
@@ -733,8 +812,8 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert "[核验] 收工：测试证据足以履行 Plan。" in timeline_lines
         assert "[成文] Research Verifier 已放行，等待 Writer" in timeline_lines
         assert "[成文] Writer 正在组织深度研究报告" in timeline_lines
-        assert any(line.startswith("[成文] 草稿已生成") for line in timeline_lines)
-        assert timeline_lines[-1] == "[成文] 草稿渲染完成，等待逐句验证"
+        assert any(line.startswith("[成文] 报告已渲染") for line in timeline_lines)
+        assert timeline_lines[-1] == "[成文] 报告渲染完成"
         assert any(
             line.startswith("[研究] 研究阶段结束，等待核验（Plan v1，触发：")
             for line in timeline_lines

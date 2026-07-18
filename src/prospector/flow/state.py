@@ -26,7 +26,15 @@ class ResearchState(TypedDict):
     error_code: str | None
     planner_messages: list[dict[str, Any]]
     verifier_trigger: Literal["planner_finish", "budget_exhausted"] | None
-    route: Literal["planner", "workers", "verifier", "writer", "end"]
+    route: Literal[
+        "planner",
+        "workers",
+        "verifier",
+        "writer",
+        "report_verifier",
+        "render",
+        "end",
+    ]
 
 
 def research_state_roundtrip(state: ResearchState) -> ResearchState:

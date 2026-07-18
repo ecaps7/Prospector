@@ -70,7 +70,7 @@ def test_planner_cannot_author_runtime_budget() -> None:
     assert "task_id" not in schema["properties"]
 
     task = inject_task_budget(_draft(), "standard")
-    assert task.budget.max_worker_rounds == 17
+    assert task.budget.max_worker_rounds == 18
     assert task.allowed_tools == ["web_search", "web_fetch", "save_findings"]
 
 
@@ -88,8 +88,8 @@ def test_task_budget_is_stage_differentiated() -> None:
         "standard",
     )
 
-    assert scout_task.budget.max_worker_rounds == 21
-    assert deep_task.budget.max_worker_rounds == 49
+    assert scout_task.budget.max_worker_rounds == 24
+    assert deep_task.budget.max_worker_rounds == 64
     assert scout_task.budget.max_worker_rounds < deep_task.budget.max_worker_rounds
 
 
@@ -167,15 +167,15 @@ def test_effort_maps_round_limit_and_stage_budgets() -> None:
     assert (
         standard["scout"].max_concurrency,
         standard["scout"].max_worker_rounds,
-    ) == (6, 21)
+    ) == (6, 24)
     assert (
         standard["deep_dive"].max_concurrency,
         standard["deep_dive"].max_worker_rounds,
-    ) == (3, 49)
+    ) == (3, 64)
     assert (
         standard["verify"].max_concurrency,
         standard["verify"].max_worker_rounds,
-    ) == (3, 17)
+    ) == (3, 18)
 
 
 def test_hard_gates_are_deterministic() -> None:

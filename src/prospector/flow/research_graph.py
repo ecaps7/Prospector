@@ -24,6 +24,11 @@ from prospector.agents.planner import (
     initial_planner_messages,
 )
 from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.report_verifier import (
+    OpenAIReportVerifier,
+    ReportVerifierModel,
+    ReportVerifierOutputError,
+)
 from prospector.agents.report_writer import (
     OpenAIReportWriter,
     ReportWriterModel,
@@ -32,11 +37,13 @@ from prospector.agents.report_writer import (
 from prospector.agents.research_verifier import OpenAIResearchVerifier, VerifierModel
 from prospector.agents.research_worker import ResearchWorker
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
+from prospector.deterministic.citation_render import render_verified_report
+from prospector.deterministic.dirty_propagation import can_revise_again, dirty_statement_ids
 from prospector.deterministic.gates import dispatch_rejection, finish_rejection
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
-from prospector.reporting.render import render_report_draft
 from prospector.schemas.decisions import PlannerDecision
+from prospector.schemas.report import ReportDraft
 from prospector.schemas.verifier import VerifierDecision
 from prospector.store.object_store import ObjectStore, workspace_key
 from prospector.store.repositories import ResearchRepository
@@ -55,6 +62,7 @@ class ResearchGraphServices:
     worker: ResearchWorker
     verifier: VerifierModel
     writer: ReportWriterModel | None = None
+    report_verifier: ReportVerifierModel | None = None
     object_store: ObjectStore | None = None
 
 
@@ -77,6 +85,7 @@ def default_research_services() -> ResearchGraphServices:
         worker=ResearchWorker(repository, tools),
         verifier=OpenAIResearchVerifier(),
         writer=OpenAIReportWriter(),
+        report_verifier=OpenAIReportVerifier(),
         object_store=object_store,
     )
 
@@ -656,7 +665,7 @@ def _writer_node(services: ResearchGraphServices):
         if raw_run_id is None:
             raise RuntimeError("Report Writer entered without a completed Verifier run")
         verifier_run_id = UUID(raw_run_id)
-        if services.writer is None or services.object_store is None:
+        if services.writer is None:
             raise RuntimeError("Report Writer services are not configured")
         services.repository.record_phase_changed(job_id, "writing")
 
@@ -674,34 +683,103 @@ def _writer_node(services: ResearchGraphServices):
                     "route": "end",
                 }
 
-            if stored is not None and stored["revision_status"] in {"generated", "rendered"}:
+            # Resume: draft already generated for current revision → verify next.
+            if (
+                stored is not None
+                and stored["report_status"] in {"verifying", "writing"}
+                and stored["revision_status"] == "generated"
+            ):
+                return {
+                    "phase": "verifying",
+                    "outcome": None,
+                    "error_code": None,
+                    "report_id": str(stored["report_id"]),
+                    "route": "report_verifier",
+                }
+
+            # Sentence-level revision after Report Verifier findings.
+            if stored is not None and stored["report_status"] == "revising":
+                from prospector.agents.prompts.report_writer import (
+                    report_writer_revision_messages,
+                )
+
                 report_id = UUID(str(stored["report_id"]))
                 draft = stored["draft"]
-            else:
-                from prospector.agents.prompts.report_writer import report_writer_messages
-
-                full_prompt = report_writer_messages(snapshot)
-                report_id = services.repository.begin_report_revision(
+                assert isinstance(draft, ReportDraft)
+                latest = services.repository.get_latest_report_verifier_run(report_id)
+                if latest is None or latest["status"] != "completed" or latest["findings"] is None:
+                    raise RuntimeError("Revision requested without completed findings")
+                findings = latest["findings"]
+                full_prompt = report_writer_revision_messages(snapshot, draft, findings)
+                report_id, revision = services.repository.begin_report_revision(
                     job_id,
                     verifier_run_id,
                     full_prompt,
+                    bump=True,
                 )
                 with tracer.start_as_current_span(
                     "llm.call",
                     attributes={
                         "prospector.job_id": str(job_id),
                         "prospector.agent": "report_writer",
+                        "prospector.mode": "revise",
                     },
                 ):
-                    result = services.writer.write(snapshot)
+                    result = services.writer.revise(snapshot, draft, findings)
                 if result.full_prompt[: len(full_prompt)] != full_prompt:
-                    raise RuntimeError("Report Writer used a different prompt than persisted")
-                draft = result.draft
+                    raise RuntimeError("Report Writer revise used a different prompt than persisted")
                 services.repository.complete_report_revision(
                     report_id,
-                    draft,
+                    result.draft,
                     result.raw_output,
+                    revision=revision,
                 )
+                return {
+                    "phase": "verifying",
+                    "outcome": None,
+                    "error_code": None,
+                    "report_id": str(report_id),
+                    "route": "report_verifier",
+                }
+
+            from prospector.agents.prompts.report_writer import report_writer_messages
+
+            full_prompt = report_writer_messages(snapshot)
+            report_id, revision = services.repository.begin_report_revision(
+                job_id,
+                verifier_run_id,
+                full_prompt,
+            )
+            # Replay: revision already prompted/generated.
+            stored_after = services.repository.get_report_revision(job_id)
+            if (
+                stored_after is not None
+                and stored_after["revision_status"] == "generated"
+                and stored_after["draft"] is not None
+            ):
+                return {
+                    "phase": "verifying",
+                    "outcome": None,
+                    "error_code": None,
+                    "report_id": str(report_id),
+                    "route": "report_verifier",
+                }
+            with tracer.start_as_current_span(
+                "llm.call",
+                attributes={
+                    "prospector.job_id": str(job_id),
+                    "prospector.agent": "report_writer",
+                },
+            ):
+                result = services.writer.write(snapshot)
+            if result.full_prompt[: len(full_prompt)] != full_prompt:
+                raise RuntimeError("Report Writer used a different prompt than persisted")
+            services.repository.complete_report_revision(
+                report_id,
+                result.draft,
+                result.raw_output,
+                revision=revision,
+            )
         except (ReportWriterOutputError, ValueError) as exc:
             services.repository.set_research_outcome(
                 job_id,
@@ -717,13 +795,230 @@ def _writer_node(services: ResearchGraphServices):
                 "route": "end",
             }
 
+        return {
+            "phase": "verifying",
+            "outcome": None,
+            "error_code": None,
+            "report_id": str(report_id),
+            "route": "report_verifier",
+        }
+
+    return writer
+
+
+def _report_verifier_node(services: ResearchGraphServices):
+    def report_verifier(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        if services.report_verifier is None:
+            raise RuntimeError("Report Verifier services are not configured")
+        stored = services.repository.get_report_revision(job_id)
+        if stored is None or stored["draft"] is None:
+            raise RuntimeError("Report Verifier entered without a generated draft")
+        if stored["report_status"] == "draft_rendered":
+            return {
+                "phase": "draft_rendered",
+                "outcome": "draft_rendered",
+                "error_code": None,
+                "report_id": str(stored["report_id"]),
+                "report_markdown_ref": stored["markdown_ref"],
+                "report_json_ref": stored["json_ref"],
+                "route": "end",
+            }
+        if stored["report_status"] == "verified":
+            return {
+                "phase": "verified",
+                "outcome": None,
+                "error_code": None,
+                "report_id": str(stored["report_id"]),
+                "route": "render",
+            }
+
+        report_id = UUID(str(stored["report_id"]))
+        revision = int(stored["revision"])
+        draft = stored["draft"]
+        assert isinstance(draft, ReportDraft)
+
+        latest = services.repository.get_latest_report_verifier_run(report_id)
+        if (
+            latest is not None
+            and int(latest["revision"]) == revision
+            and latest["status"] == "completed"
+            and latest["findings"] is not None
+        ):
+            findings = latest["findings"]
+            if findings.all_passed or not can_revise_again(revision):
+                services.repository.set_report_status(report_id, "verified")
+                return {
+                    "phase": "verified",
+                    "outcome": None,
+                    "error_code": None,
+                    "report_id": str(report_id),
+                    "route": "render",
+                }
+            services.repository.set_report_status(report_id, "revising")
+            return {
+                "phase": "revising",
+                "outcome": None,
+                "error_code": None,
+                "report_id": str(report_id),
+                "route": "writer",
+            }
+
+        round_number = 1
+        # Each revision is verified in full. Incremental dirty propagation is used
+        # inside unit tests and can be wired for same-revision multi-round later.
+        dirty = dirty_statement_ids(draft)
+
+        run = services.repository.get_report_verifier_run(
+            report_id, revision=revision, round_number=round_number
+        )
+        if run is not None and run["status"] == "completed" and run["findings"] is not None:
+            findings = run["findings"]
+        else:
+            run_id = services.repository.begin_report_verifier_run(
+                report_id,
+                revision=revision,
+                round_number=round_number,
+                dirty_statement_ids=sorted(dirty),
+            )
+            run = services.repository.get_report_verifier_run(
+                report_id, revision=revision, round_number=round_number
+            )
+            if run is not None and run["status"] == "completed" and run["findings"] is not None:
+                findings = run["findings"]
+            else:
+                try:
+                    rv_snapshot = services.repository.build_report_verifier_snapshot(
+                        job_id,
+                        report_id,
+                        revision=revision,
+                        round_number=round_number,
+                        dirty_statement_ids=dirty,
+                        draft=draft,
+                    )
+                    with tracer.start_as_current_span(
+                        "llm.call",
+                        attributes={
+                            "prospector.job_id": str(job_id),
+                            "prospector.agent": "report_verifier",
+                        },
+                    ):
+                        result = services.report_verifier.verify(rv_snapshot)
+                except (ReportVerifierOutputError, ValueError) as exc:
+                    services.repository.set_research_outcome(
+                        job_id,
+                        outcome="failed",
+                        error_code="report_verifier_contract_error",
+                        phase="failed",
+                    )
+                    log.error(
+                        "report_verifier.contract_error",
+                        job_id=str(job_id),
+                        message=str(exc),
+                    )
+                    return {
+                        "phase": "failed",
+                        "outcome": "failed",
+                        "error_code": "report_verifier_contract_error",
+                        "report_id": str(report_id),
+                        "route": "end",
+                    }
+                findings = result.findings
+                next_status = (
+                    "verified"
+                    if findings.all_passed or not can_revise_again(revision)
+                    else "revising"
+                )
+                log.info(
+                    "report_verifier.completed",
+                    revision=revision,
+                    round=round_number,
+                    passed=len(findings.passed_statement_ids),
+                    failed=len(findings.failures),
+                    next=next_status,
+                )
+                services.repository.complete_report_verifier_run(
+                    run_id,
+                    findings=findings,
+                    statement_checks=[
+                        decision.model_dump(mode="json") for decision in result.decisions
+                    ],
+                    decisions=result.decisions,
+                    draft=draft,
+                    report_id=report_id,
+                    revision=revision,
+                    next_status=next_status,
+                )
+
+        if findings.all_passed or not can_revise_again(revision):
+            return {
+                "phase": "verified",
+                "outcome": None,
+                "error_code": None,
+                "report_id": str(report_id),
+                "route": "render",
+            }
+        return {
+            "phase": "revising",
+            "outcome": None,
+            "error_code": None,
+            "report_id": str(report_id),
+            "route": "writer",
+        }
+
+    return report_verifier
+
+
+def _render_node(services: ResearchGraphServices):
+    def render(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        raw_run_id = state.get("last_verifier_run_id")
+        if raw_run_id is None:
+            raise RuntimeError("Render entered without a completed Research Verifier run")
+        if services.object_store is None:
+            raise RuntimeError("Object store is not configured")
+        stored = services.repository.get_report_revision(job_id)
+        if stored is None or stored["draft"] is None:
+            raise RuntimeError("Render entered without a generated draft")
+        if stored["report_status"] == "draft_rendered":
+            return {
+                "phase": "draft_rendered",
+                "outcome": "draft_rendered",
+                "error_code": None,
+                "report_id": str(stored["report_id"]),
+                "report_markdown_ref": stored["markdown_ref"],
+                "report_json_ref": stored["json_ref"],
+                "route": "end",
+            }
+
+        report_id = UUID(str(stored["report_id"]))
+        revision = int(stored["revision"])
+        draft = stored["draft"]
+        assert isinstance(draft, ReportDraft)
+        snapshot = services.repository.build_writer_snapshot(job_id, UUID(raw_run_id))
+        citation_map = services.repository.get_verified_citation_map(
+            report_id, revision=revision
+        )
+        latest = services.repository.get_latest_report_verifier_run(report_id)
+        failed_ids: list[str] = []
+        verification_status: str = "verified"
+        if latest is not None and latest["findings"] is not None:
+            failed_ids = [item.statement_id for item in latest["findings"].failures]
+            verification_status = "partial" if failed_ids else "verified"
+
         try:
-            rendered = render_report_draft(snapshot, draft)
+            rendered = render_verified_report(
+                snapshot,
+                draft,
+                citation_map=citation_map,
+                verification_status=verification_status,  # type: ignore[arg-type]
+                failed_statement_ids=failed_ids,
+            )
             base_key = workspace_key(
                 services.repository.settings.workspace_id,
                 "reports",
                 str(job_id),
-                "1",
+                str(revision),
             )
             markdown_bytes = rendered.markdown.encode("utf-8")
             json_bytes = rendered.json_text.encode("utf-8")
@@ -744,6 +1039,7 @@ def _writer_node(services: ResearchGraphServices):
                 markdown_hash="sha256:" + hashlib.sha256(markdown_bytes).hexdigest(),
                 json_ref=json_ref.as_uri(),
                 json_hash="sha256:" + hashlib.sha256(json_bytes).hexdigest(),
+                verification_status=verification_status,
             )
         except Exception as exc:
             services.repository.set_research_outcome(
@@ -752,7 +1048,7 @@ def _writer_node(services: ResearchGraphServices):
                 error_code="draft_render_error",
                 phase="failed",
             )
-            log.error("writer.render_error", job_id=str(job_id), message=str(exc))
+            log.error("render.error", job_id=str(job_id), message=str(exc))
             return {
                 "phase": "failed",
                 "outcome": "failed",
@@ -770,7 +1066,7 @@ def _writer_node(services: ResearchGraphServices):
             "route": "end",
         }
 
-    return writer
+    return render
 
 
 def _route(state: ResearchState) -> str:
@@ -788,6 +1084,8 @@ def build_research_graph(
     graph.add_node("workers", _workers_node(runtime))
     graph.add_node("verifier", _verifier_node(runtime))
     graph.add_node("writer", _writer_node(runtime))
+    graph.add_node("report_verifier", _report_verifier_node(runtime))
+    graph.add_node("render", _render_node(runtime))
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
     graph.add_conditional_edges(
@@ -807,7 +1105,21 @@ def build_research_graph(
         _route,
         {"planner": "planner", "writer": "writer", "end": END},
     )
-    graph.add_edge("writer", END)
+    graph.add_conditional_edges(
+        "writer",
+        _route,
+        {"report_verifier": "report_verifier", "end": END},
+    )
+    graph.add_conditional_edges(
+        "report_verifier",
+        _route,
+        {"writer": "writer", "render": "render", "end": END},
+    )
+    graph.add_conditional_edges(
+        "render",
+        _route,
+        {"end": END},
+    )
     return graph.compile(checkpointer=checkpointer)
 
 

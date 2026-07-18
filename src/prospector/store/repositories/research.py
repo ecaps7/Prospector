@@ -25,6 +25,14 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
+from prospector.schemas.claims import (
+    BridgeStatementDecision,
+    DerivedStatementDecision,
+    EvidenceStatementDecision,
+    ReportVerifierFindings,
+    ReportVerifierSnapshot,
+    ReportVerifierStatementInput,
+)
 from prospector.schemas.report import ReportDraft, WriterSnapshot
 from prospector.schemas.verifier import (
     AssertionDisposition,
@@ -1781,7 +1789,14 @@ class ResearchRepository:
         job_id: UUID,
         verifier_run_id: UUID,
         full_prompt: list[dict[str, str]],
-    ) -> UUID:
+        *,
+        bump: bool = False,
+    ) -> tuple[UUID, int]:
+        """Start a Writer revision. ``bump=False`` creates/reuses revision 1;
+
+        ``bump=True`` increments ``current_revision`` for a sentence-level rewrite.
+        Returns ``(report_id, revision)``.
+        """
         report_id = uuid4()
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
@@ -1799,7 +1814,12 @@ class ResearchRepository:
             )
             report = (
                 conn.execute(
-                    text("SELECT id, verifier_run_id FROM app.reports WHERE job_id=:job_id"),
+                    text(
+                        """
+                        SELECT id, verifier_run_id, current_revision, status
+                        FROM app.reports WHERE job_id=:job_id
+                        """
+                    ),
                     {"job_id": job_id},
                 )
                 .mappings()
@@ -1808,45 +1828,86 @@ class ResearchRepository:
             if UUID(str(report["verifier_run_id"])) != verifier_run_id:
                 raise RuntimeError("Report replayed against a different Verifier run")
             report_id = UUID(str(report["id"]))
+            revision = int(report["current_revision"])
+            if bump:
+                if report["status"] not in {"revising", "verifying", "writing"}:
+                    raise RuntimeError(
+                        f"Cannot bump report revision from status={report['status']}"
+                    )
+                revision = revision + 1
+                conn.execute(
+                    text(
+                        """
+                        UPDATE app.reports
+                        SET current_revision=:revision, status='writing', updated_at=:now
+                        WHERE id=:report_id
+                        """
+                    ),
+                    {"report_id": report_id, "revision": revision, "now": now},
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE app.reports SET status='writing', updated_at=:now
+                        WHERE id=:report_id AND status IN ('writing','revising')
+                        """
+                    ),
+                    {"report_id": report_id, "now": now},
+                )
             conn.execute(
                 text(
                     """
                     INSERT INTO app.report_revisions
                       (report_id, revision, full_prompt, status, created_at)
-                    VALUES (:report_id, 1, CAST(:prompt AS JSONB), 'prompted', :now)
+                    VALUES (:report_id, :revision, CAST(:prompt AS JSONB), 'prompted', :now)
                     ON CONFLICT (report_id, revision) DO NOTHING
                     """
                 ),
-                {"report_id": report_id, "prompt": _json(full_prompt), "now": now},
+                {
+                    "report_id": report_id,
+                    "revision": revision,
+                    "prompt": _json(full_prompt),
+                    "now": now,
+                },
             )
             stored_prompt = conn.execute(
                 text(
                     """
                     SELECT full_prompt FROM app.report_revisions
-                    WHERE report_id=:report_id AND revision=1
+                    WHERE report_id=:report_id AND revision=:revision
                     """
                 ),
-                {"report_id": report_id},
+                {"report_id": report_id, "revision": revision},
             ).scalar_one()
             if stored_prompt != full_prompt:
                 raise RuntimeError("Report Writer replayed with a different prompt")
-        return report_id
+        return report_id, revision
 
     def complete_report_revision(
         self,
         report_id: UUID,
         draft: ReportDraft,
         raw_output: object,
+        *,
+        revision: int | None = None,
     ) -> None:
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
+            if revision is None:
+                revision = int(
+                    conn.execute(
+                        text("SELECT current_revision FROM app.reports WHERE id=:report_id"),
+                        {"report_id": report_id},
+                    ).scalar_one()
+                )
             updated = conn.execute(
                 text(
                     """
                     UPDATE app.report_revisions
                     SET raw_output=CAST(:raw AS JSONB), draft=CAST(:draft AS JSONB),
                         body_char_count=:chars, status='generated', completed_at=:now
-                    WHERE report_id=:report_id AND revision=1 AND status='prompted'
+                    WHERE report_id=:report_id AND revision=:revision AND status='prompted'
                     """
                 ),
                 {
@@ -1855,10 +1916,20 @@ class ResearchRepository:
                     "chars": draft.body_char_count(),
                     "now": now,
                     "report_id": report_id,
+                    "revision": revision,
                 },
             ).rowcount
             if updated != 1:
                 raise RuntimeError("Report revision is missing or already generated")
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.reports SET status='verifying', updated_at=:now
+                    WHERE id=:report_id
+                    """
+                ),
+                {"report_id": report_id, "now": now},
+            )
             statement_order = 0
             paragraph_groups = [
                 (section.section_id, section.paragraphs) for section in draft.sections
@@ -1875,13 +1946,15 @@ class ResearchRepository:
                                    statement_order, kind, text, candidate_excerpt_ids,
                                    premise_statement_ids, created_at)
                                 VALUES
-                                  (:report_id, 1, :statement_id, :section_id, :paragraph_id,
-                                   :statement_order, :kind, :text, CAST(:excerpt_ids AS JSONB),
-                                   CAST(:premise_ids AS JSONB), :now)
+                                  (:report_id, :revision, :statement_id, :section_id,
+                                   :paragraph_id, :statement_order, :kind, :text,
+                                   CAST(:excerpt_ids AS JSONB), CAST(:premise_ids AS JSONB),
+                                   :now)
                                 """
                             ),
                             {
                                 "report_id": report_id,
+                                "revision": revision,
                                 "statement_id": statement.statement_id,
                                 "section_id": section_id,
                                 "paragraph_id": paragraph.paragraph_id,
@@ -1896,6 +1969,551 @@ class ResearchRepository:
                             },
                         )
 
+    def set_report_status(self, report_id: UUID, status: str) -> None:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE app.reports SET status=:status, updated_at=:now
+                    WHERE id=:report_id
+                    """
+                ),
+                {"report_id": report_id, "status": status, "now": now},
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("Report is missing")
+
+    def begin_report_verifier_run(
+        self,
+        report_id: UUID,
+        *,
+        revision: int,
+        round_number: int,
+        dirty_statement_ids: list[str],
+    ) -> UUID:
+        run_id = uuid4()
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id, status FROM app.report_verifier_runs
+                    WHERE report_id=:report_id AND revision=:revision AND round=:round
+                    """
+                ),
+                {"report_id": report_id, "revision": revision, "round": round_number},
+            ).mappings().first()
+            if existing is not None:
+                return UUID(str(existing["id"]))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.report_verifier_runs
+                      (id, report_id, revision, round, status, dirty_statement_ids,
+                       created_at)
+                    VALUES
+                      (:id, :report_id, :revision, :round, 'running',
+                       CAST(:dirty AS JSONB), :now)
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "report_id": report_id,
+                    "revision": revision,
+                    "round": round_number,
+                    "dirty": _json(dirty_statement_ids),
+                    "now": now,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.reports SET status='verifying', updated_at=:now
+                    WHERE id=:report_id
+                    """
+                ),
+                {"report_id": report_id, "now": now},
+            )
+        return run_id
+
+    def get_report_verifier_run(
+        self,
+        report_id: UUID,
+        *,
+        revision: int,
+        round_number: int,
+    ) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, report_id, revision, round, status, dirty_statement_ids,
+                               findings, statement_checks, created_at, completed_at
+                        FROM app.report_verifier_runs
+                        WHERE report_id=:report_id AND revision=:revision AND round=:round
+                        """
+                    ),
+                    {
+                        "report_id": report_id,
+                        "revision": revision,
+                        "round": round_number,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        if result["findings"] is not None:
+            result["findings"] = ReportVerifierFindings.model_validate(result["findings"])
+        return result
+
+    def get_latest_report_verifier_run(self, report_id: UUID) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, report_id, revision, round, status, dirty_statement_ids,
+                               findings, statement_checks, created_at, completed_at
+                        FROM app.report_verifier_runs
+                        WHERE report_id=:report_id
+                        ORDER BY revision DESC, round DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"report_id": report_id},
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        if result["findings"] is not None:
+            result["findings"] = ReportVerifierFindings.model_validate(result["findings"])
+        return result
+
+    def get_passed_statement_ids(self, report_id: UUID, *, revision: int) -> set[str]:
+        """Union of passed statement ids from completed runs on this revision."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT findings FROM app.report_verifier_runs
+                    WHERE report_id=:report_id AND revision=:revision AND status='completed'
+                    ORDER BY round
+                    """
+                ),
+                {"report_id": report_id, "revision": revision},
+            ).scalars()
+        passed: set[str] = set()
+        for findings in rows:
+            if findings is None:
+                continue
+            model = ReportVerifierFindings.model_validate(findings)
+            passed.update(model.passed_statement_ids)
+            failed = {item.statement_id for item in model.failures}
+            passed -= failed
+        return passed
+
+    def complete_report_verifier_run(
+        self,
+        run_id: UUID,
+        *,
+        findings: ReportVerifierFindings,
+        statement_checks: list[dict[str, Any]],
+        decisions: list[Any],
+        draft: ReportDraft,
+        report_id: UUID,
+        revision: int,
+        next_status: str,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE app.report_verifier_runs
+                    SET status='completed', findings=CAST(:findings AS JSONB),
+                        statement_checks=CAST(:checks AS JSONB), completed_at=:now
+                    WHERE id=:run_id AND status='running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "findings": _json(findings.model_dump(mode="json")),
+                    "checks": _json(statement_checks),
+                    "now": now,
+                },
+            ).rowcount
+            if updated != 1:
+                existing = conn.execute(
+                    text(
+                        """
+                        SELECT status FROM app.report_verifier_runs WHERE id=:run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                ).mappings().one()
+                if existing["status"] != "completed":
+                    raise RuntimeError("Report verifier run is missing or not running")
+                return
+
+            self._persist_claim_decisions(
+                conn,
+                report_id=report_id,
+                revision=revision,
+                run_id=run_id,
+                draft=draft,
+                decisions=decisions,
+                now=now,
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.reports SET status=:status, updated_at=:now
+                    WHERE id=:report_id
+                    """
+                ),
+                {"report_id": report_id, "status": next_status, "now": now},
+            )
+
+    def _persist_claim_decisions(
+        self,
+        conn: Connection,
+        *,
+        report_id: UUID,
+        revision: int,
+        run_id: UUID,
+        draft: ReportDraft,
+        decisions: list[Any],
+        now: datetime,
+    ) -> dict[str, UUID]:
+        statement_by_id = {item.statement_id: item for item in draft.statements()}
+        claim_ids: dict[str, UUID] = {}
+        for decision in decisions:
+            if isinstance(decision, BridgeStatementDecision):
+                continue
+            statement = statement_by_id[decision.statement_id]
+            grounding = "evidence" if isinstance(decision, EvidenceStatementDecision) else "derived"
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id FROM app.claims
+                    WHERE report_id=:report_id AND revision=:revision
+                      AND statement_id=:statement_id
+                    """
+                ),
+                {
+                    "report_id": report_id,
+                    "revision": revision,
+                    "statement_id": decision.statement_id,
+                },
+            ).scalar_one_or_none()
+            claim_id = UUID(str(existing)) if existing is not None else uuid4()
+            if existing is None:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO app.claims
+                          (id, report_id, revision, statement_id, text, claim_type,
+                           grounding, report_section, produced_by, created_at)
+                        VALUES
+                          (:id, :report_id, :revision, :statement_id, :text, :claim_type,
+                           :grounding, NULL, 'report_verifier', :now)
+                        """
+                    ),
+                    {
+                        "id": claim_id,
+                        "report_id": report_id,
+                        "revision": revision,
+                        "statement_id": decision.statement_id,
+                        "text": statement.text,
+                        "claim_type": decision.claim_type,
+                        "grounding": grounding,
+                        "now": now,
+                    },
+                )
+            claim_ids[decision.statement_id] = claim_id
+
+            if isinstance(decision, EvidenceStatementDecision):
+                for pair in decision.pairs:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO app.claim_evidence
+                              (claim_id, excerpt_id, relation, verifier_run_id, created_at)
+                            VALUES (:claim_id, :excerpt_id, :relation, :run_id, :now)
+                            ON CONFLICT DO NOTHING
+                            """
+                        ),
+                        {
+                            "claim_id": claim_id,
+                            "excerpt_id": pair.excerpt_id,
+                            "relation": pair.relation,
+                            "run_id": run_id,
+                            "now": now,
+                        },
+                    )
+            elif isinstance(decision, DerivedStatementDecision):
+                premise_claim_ids = [
+                    str(claim_ids[premise_id])
+                    for premise_id in statement.premise_statement_ids
+                    if premise_id in claim_ids
+                ]
+                # Load previously persisted premise claim ids for clean premises.
+                for premise_id in statement.premise_statement_ids:
+                    if premise_id in claim_ids:
+                        continue
+                    prior = conn.execute(
+                        text(
+                            """
+                            SELECT id FROM app.claims
+                            WHERE report_id=:report_id AND revision=:revision
+                              AND statement_id=:statement_id
+                            """
+                        ),
+                        {
+                            "report_id": report_id,
+                            "revision": revision,
+                            "statement_id": premise_id,
+                        },
+                    ).scalar_one_or_none()
+                    if prior is not None:
+                        premise_claim_ids.append(str(prior))
+                        claim_ids[premise_id] = UUID(str(prior))
+                depth = min(
+                    1
+                    + max(
+                        (
+                            self._claim_depth(conn, UUID(value))
+                            for value in premise_claim_ids
+                        ),
+                        default=0,
+                    ),
+                    2,
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO app.claim_premises
+                          (claim_id, premise_claim_ids, inference_note, depth,
+                           verifier_run_id, created_at)
+                        VALUES
+                          (:claim_id, CAST(:premises AS JSONB), :note, :depth,
+                           :run_id, :now)
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        "claim_id": claim_id,
+                        "premises": _json(premise_claim_ids),
+                        "note": decision.inference_note,
+                        "depth": depth,
+                        "run_id": run_id,
+                        "now": now,
+                    },
+                )
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.claim_verdicts
+                      (claim_id, verifier_run_id, status, reason, created_at)
+                    VALUES (:claim_id, :run_id, :status, :reason, :now)
+                    ON CONFLICT DO NOTHING
+                    """
+                ),
+                {
+                    "claim_id": claim_id,
+                    "run_id": run_id,
+                    "status": decision.status,
+                    "reason": decision.reason,
+                    "now": now,
+                },
+            )
+        return claim_ids
+
+    def _claim_depth(self, conn: Connection, claim_id: UUID) -> int:
+        depth = conn.execute(
+            text(
+                """
+                SELECT depth FROM app.claim_premises
+                WHERE claim_id=:claim_id
+                ORDER BY created_at DESC LIMIT 1
+                """
+            ),
+            {"claim_id": claim_id},
+        ).scalar_one_or_none()
+        return int(depth) if depth is not None else 0
+
+    def build_report_verifier_snapshot(
+        self,
+        job_id: UUID,
+        report_id: UUID,
+        *,
+        revision: int,
+        round_number: int,
+        dirty_statement_ids: set[str],
+        draft: ReportDraft,
+    ) -> ReportVerifierSnapshot:
+        with self.engine.connect() as conn:
+            brief_question = conn.execute(
+                text(
+                    """
+                    SELECT b.question FROM app.briefs b
+                    JOIN app.jobs j ON j.brief_id=b.id
+                    WHERE j.id=:job_id
+                    """
+                ),
+                {"job_id": job_id},
+            ).scalar_one()
+            excerpts = {
+                UUID(str(row["excerpt_id"])): dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT e.id AS excerpt_id, e.text, e.doc_version,
+                               d.source_uri AS url,
+                               d.source_meta->>'title' AS title
+                        FROM app.excerpts e JOIN app.documents d ON d.id=e.doc_id
+                        WHERE e.job_id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+            }
+            passed_ids = self.get_passed_statement_ids(report_id, revision=revision)
+
+        statement_map = {item.statement_id: item for item in draft.statements()}
+        # Depth for derived premises: evidence leaves = 0.
+        depth_cache: dict[str, int] = {}
+
+        def statement_depth(statement_id: str) -> int:
+            if statement_id in depth_cache:
+                return depth_cache[statement_id]
+            statement = statement_map[statement_id]
+            if statement.kind != "derived":
+                depth_cache[statement_id] = 0
+                return 0
+            value = 1 + max(
+                (statement_depth(premise) for premise in statement.premise_statement_ids),
+                default=0,
+            )
+            depth_cache[statement_id] = min(value, 2)
+            return depth_cache[statement_id]
+
+        inputs: list[ReportVerifierStatementInput] = []
+        allowed_excerpt_ids: list[UUID] = []
+        for statement in draft.statements():
+            if statement.statement_id not in dirty_statement_ids:
+                continue
+            candidate_excerpts = []
+            for excerpt_id in statement.candidate_excerpt_ids:
+                row = excerpts.get(excerpt_id)
+                if row is None:
+                    continue
+                candidate_excerpts.append(
+                    {
+                        "excerpt_id": str(excerpt_id),
+                        "text": row["text"],
+                        "url": row["url"],
+                        "title": row["title"],
+                        "document_version": row["doc_version"],
+                    }
+                )
+                if excerpt_id not in allowed_excerpt_ids:
+                    allowed_excerpt_ids.append(excerpt_id)
+            premises = []
+            premises_all_passed = all(
+                premise_id in passed_ids or premise_id in dirty_statement_ids
+                for premise_id in statement.premise_statement_ids
+            )
+            # Dirty premises are resolved in earlier topological waves inside the
+            # verifier; the snapshot marks them tentatively passable so the hard
+            # gate does not fire before those waves run.
+            for premise_id in statement.premise_statement_ids:
+                premise = statement_map[premise_id]
+                premises.append(
+                    {
+                        "statement_id": premise_id,
+                        "text": premise.text,
+                        "kind": premise.kind,
+                        "passed": premise_id in passed_ids,
+                    }
+                )
+            inputs.append(
+                ReportVerifierStatementInput(
+                    statement_id=statement.statement_id,
+                    text=statement.text,
+                    kind=statement.kind,
+                    candidate_excerpts=candidate_excerpts,
+                    premises=premises,
+                    premises_all_passed=premises_all_passed,
+                    premise_depth=statement_depth(statement.statement_id),
+                )
+            )
+        if not inputs:
+            raise RuntimeError("Report verifier snapshot has no dirty statements")
+        return ReportVerifierSnapshot(
+            job_id=job_id,
+            report_id=report_id,
+            revision=revision,
+            round=round_number,
+            brief_question=str(brief_question),
+            statements=inputs,
+            allowed_excerpt_ids=allowed_excerpt_ids,
+        )
+
+    def get_verified_citation_map(
+        self, report_id: UUID, *, revision: int
+    ) -> dict[str, list[UUID]]:
+        """Map statement_id → support excerpt ids from the latest completed run."""
+        with self.engine.connect() as conn:
+            run = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id FROM app.report_verifier_runs
+                        WHERE report_id=:report_id AND revision=:revision
+                          AND status='completed'
+                        ORDER BY round DESC LIMIT 1
+                        """
+                    ),
+                    {"report_id": report_id, "revision": revision},
+                )
+                .mappings()
+                .first()
+            )
+            if run is None:
+                return {}
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT c.statement_id, ce.excerpt_id
+                    FROM app.claim_verdicts cv
+                    JOIN app.claims c ON c.id=cv.claim_id
+                    JOIN app.claim_evidence ce
+                      ON ce.claim_id=c.id AND ce.verifier_run_id=cv.verifier_run_id
+                    WHERE cv.verifier_run_id=:run_id
+                      AND cv.status='pass'
+                      AND ce.relation='support'
+                    ORDER BY c.statement_id, ce.excerpt_id
+                    """
+                ),
+                {"run_id": run["id"]},
+            ).mappings()
+            citation_map: dict[str, list[UUID]] = {}
+            for row in rows:
+                citation_map.setdefault(str(row["statement_id"]), []).append(
+                    UUID(str(row["excerpt_id"]))
+                )
+            return citation_map
+
     def complete_report_render(
         self,
         job_id: UUID,
@@ -1905,17 +2523,25 @@ class ResearchRepository:
         markdown_hash: str,
         json_ref: str,
         json_hash: str,
+        verification_status: str = "verified",
     ) -> None:
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
+            revision = int(
+                conn.execute(
+                    text("SELECT current_revision FROM app.reports WHERE id=:report_id"),
+                    {"report_id": report_id},
+                ).scalar_one()
+            )
             conn.execute(
                 text(
                     """
                     UPDATE app.report_revisions SET status='rendered'
-                    WHERE report_id=:report_id AND revision=1 AND status='generated'
+                    WHERE report_id=:report_id AND revision=:revision
+                      AND status='generated'
                     """
                 ),
-                {"report_id": report_id},
+                {"report_id": report_id, "revision": revision},
             )
             updated = conn.execute(
                 text(
@@ -1924,7 +2550,8 @@ class ResearchRepository:
                     SET status='draft_rendered', markdown_ref=:markdown_ref,
                         markdown_hash=:markdown_hash, json_ref=:json_ref,
                         json_hash=:json_hash, updated_at=:now
-                    WHERE id=:report_id AND job_id=:job_id AND status='writing'
+                    WHERE id=:report_id AND job_id=:job_id
+                      AND status IN ('writing','verifying','revising','verified')
                     """
                 ),
                 {
@@ -1945,8 +2572,8 @@ class ResearchRepository:
                 event_type=EventType.REPORT_DRAFT_RENDERED,
                 payload={
                     "report_id": str(report_id),
-                    "revision": 1,
-                    "verification_status": "pending",
+                    "revision": revision,
+                    "verification_status": verification_status,
                     "markdown_ref": markdown_ref,
                     "json_ref": json_ref,
                 },
