@@ -1,271 +1,201 @@
 # Prospector CLI 设计
 
-- **版本**：v1.3
-- **日期**：2026-07-18
-- **状态**：M1 目标合同；当前本地入口已实现到 Report Verifier、Writer 句级修订与验证后渲染
+- **版本**：v2.0（推倒 v1.3 重来）
+- **日期**：2026-07-19
+- **状态**：设计已确认，待实施
 - **关联文档**：[系统设计](./design.md)、[M1 实现设计](./implementations/m1.md)
 
 ---
 
-## 1. 定位
+## 1. 定位与约束
 
-M1 的产品 CLI 名为 `prospector`，是单进程 API 的瘦客户端：只负责提交、Brief 交互、SSE 展示和报告下载，不在客户端实现 Planner、Worker 或质量门。
+产品 CLI 名为 `prospector`，是**单进程 API 服务端的瘦客户端**：只负责提交问题、Brief 本地交互、SSE 事件展示与报告下载，不在客户端实现 Planner、Worker 或质量门。研究图跑在服务端进程内。
 
-当前开发入口 `prospector-local ask` 已实现问题输入、最多一轮澄清、Brief 生成、
-`c/e/i/q` 确认、Planner-Worker、Research Verifier/Replan、Report Writer 与 Report Verifier。
-Research Verifier 放行后生成结构化长篇草稿；Report Verifier 逐句核验，失败时最多触发两次
-Writer 句级修订，再按已通过的 support 关系确定性渲染 Markdown/JSON。主图仍停在
-`draft_rendered`：产物会标为 `verified` 或 `partial`，但尚未进入正式 `completed` 出口。
+设计约束（已确认的决策）：
 
-职责边界：
+| 决策点 | 结论 |
+|--------|------|
+| 架构姿态 | 先建服务端（FastAPI），CLI 为瘦客户端；一份设计覆盖两端 |
+| 部署假设 | 本机单用户：服务端与 docker compose 跑在同一台机器，无认证、无多租户 |
+| 通信方案 | SSE 推送事件 + REST 式 HITL（Brief 确认完全在客户端完成） |
+| 进度展示 | Rich Live TUI；`--plain` 与非 TTY 降级为逐行时间线 |
+| prospector-local | 保留，定位为不起服务端的调试与集成测试入口，行为不变 |
 
-1. Scope 负责把问题具体化并展开研究空间。
-2. 用户确认的是系统对问题的理解与研究输入快照。
-3. Planner 才负责收敛实际研究范围，并以版本化 Plan 形成执行合同。
-4. CLI 展示服务端事实，不自行推断任务状态、预算或研究结果。
+职责边界沿用系统设计：Scope 具体化问题并展开研究空间；用户确认的是研究输入快照；Planner 收敛实际范围并形成版本化 Plan；CLI 展示服务端事实，不自行推断状态、预算或结果。
 
 ---
 
-## 2. M1 命令
+## 2. 命令面
 
 ```text
 prospector
-├── ask <question> [--effort quick|standard|deep] [--language <code>] [--detach] [--plain]
+├── serve                        # 前台启动 API 服务端（uvicorn 单进程）
+│     [--port 7620] [--init]    # --init: 首次运行时建 checkpointer 表 + MinIO bucket
+├── ask <question>               # 核心命令：Scope → Brief 确认 → 创建 job → attach
+│     [--effort quick|standard|deep] [--language zh|en|...]
+│     [--detach]                 # Brief 冻结、job 创建后打印 job_id 即退出
+│     [--plain]                  # 禁用 TUI，逐行时间线（非 TTY 时自动降级）
 ├── job
-│   ├── list
-│   ├── status <job_id>
-│   ├── attach <job_id>
-│   └── events <job_id> [--since <event_id>] [--follow]
-├── report
-│   ├── show <job_id>
-│   └── export <job_id> --format md|json|html [-o <path>]
-├── usage [--job <job_id>]
-├── login
-└── config [get|set <key> [value]]
+│   ├── list                     # 各 job 的状态 / 阶段 / 开始时间
+│   ├── status <job_id>          # 单个 job 快照：阶段、Plan 版本、任务表、用量
+│   └── attach <job_id>          # 重新接上 TUI/时间线（SSE + Last-Event-ID 回放）
+└── report
+    ├── show <job_id>            # 终端渲染报告 Markdown
+    └── export <job_id> [--format md|json] [-o <path>]
 ```
 
-M1 不提供 `kb`、Data Worker、沙箱计算、`followup`、跨进程 pause/resume 或 job debug 命令。
+有意不做的（YAGNI）：
+
+- **`login` / `config`**：本机单用户无认证；服务端地址用环境变量 `PROSPECTOR_SERVER`（默认 `http://127.0.0.1:7620`）。
+- **`usage` 命令**：用量直接显示在 TUI 底栏与 `job status` 中。
+- **`job events`**：与 `attach` 是同一条事件流的两种渲染，合并为 `attach`（TTY 下 TUI，`--plain` 下逐行）。
+- **`report export --format html`**：渲染器只产 md/json，不承诺不存在的能力。
+
+`ask` 必须运行在交互终端（Brief 确认不可跳过）；非 TTY 运行 `ask` 报用法错误退出。
 
 ---
 
-## 3. `prospector ask`
+## 3. API 契约（服务端）
 
-### 3.1 参数
-
-| 参数 | 说明 |
-|------|------|
-| `<question>` | 自然语言研究问题 |
-| `--effort` | `quick` / `standard` / `deep`，默认 `standard` |
-| `--language` | 报告语言，默认 `zh` |
-| `--detach` | Brief 冻结并创建任务后打印 job_id 退出 |
-| `--plain` | 使用逐行事件展示，不启动 Live TUI |
-
-`ask` 必须运行在交互终端，因为 Brief 确认不可跳过。brief-direct 是 API 与评测入口，不作为人类 CLI 参数暴露。
-
-### 3.2 effort
-
-运行时根据冻结 Brief 的 `effort` 与任务 `research_stage` 注入三类硬限制：Planner 决策轮、分阶段并发、分阶段 Worker 决策轮。
-
-| effort | Planner 决策轮 | scout（并发 / Worker 轮） | deep_dive（并发 / Worker 轮） | verify（并发 / Worker 轮） |
-|--------|---------------:|----------------------------:|--------------------------------:|---------------------------:|
-| quick | 8 | 6 / 13 | 3 / 25 | 3 / 13 |
-| standard | 12 | 6 / 21 | 3 / 49 | 3 / 17 |
-| deep | 24 | 8 / 25 | 5 / 73 | 5 / 21 |
-
-Worker 工具调用总数不设上限；每个 Worker 决策轮最多并行 8 个独立工具调用。Replan 消耗 Planner 决策轮，不存在独立 replan 上限；Plan 不设独立最大任务数。token 和累计工具调用只展示与计量，不驱动停止。`deep` 卡片提示研究可能持续数小时，单次 LLM 与抓取仍受调用超时约束。
-
-### 3.3 交互流程
-
-```mermaid
-flowchart TD
-    Q["提交问题"] --> S["Scope 展开问题"]
-    S --> C{"需要澄清？"}
-    C -->|是| A["用户回答一次"]
-    A --> S2["Scope 生成 Brief"]
-    C -->|否| B["生成 Brief"]
-    S2 --> H["Brief 确认卡片"]
-    B --> H
-    H -->|c| F["原样冻结"]
-    H -->|e| E["编辑 YAML 后回到卡片"]
-    E --> H
-    H -->|i| I["按一条指令改写一轮并直接冻结"]
-    H -->|q| X["放弃，不创建研究任务"]
-    F --> P["进入 Planner"]
-    I --> P
-    P --> T["默认 attach；--detach 则退出"]
-```
-
-### 3.4 Brief 卡片
+FastAPI 单进程。代码位于 `src/prospector/runtime/entrypoints/server.py` + 新增 `src/prospector/api/` 模块（路由、请求/响应 schema）。研究图在服务端后台任务中执行（asyncio 任务经线程池包装现有同步 `graph.invoke`）。**一次只允许一个 job 处于运行态**——单用户本机串行足够；第二个提交排队并在响应中说明。
 
 ```text
-┌─ Research Brief（确认后作为本次研究输入快照）───────────────┐
-│ question       评估竞品 2025–2026 年在亚太区的经营态势       │
-│ effort         standard                                      │
-│ language       zh                                            │
-│ output_format  report_with_citations                         │
-│                                                              │
-│ brief_text:                                                  │
-│   为区域投入决策提供依据，研究竞争格局、经营证据、反例……   │
-└──────────────────────────────────────────────────────────────┘
-  [c] 确认  [e] 直接编辑  [i] 指令修订一轮并定稿  [q] 放弃
+POST /scope                      # Scope 展开问题（同步，数十秒）
+  body: { question, effort, language, clarification_question?, clarification_answer? }
+  resp: { kind: "clarify", clarification_question }
+      | { kind: "brief_pending", brief: {...} }
+
+POST /scope/revise               # 对应 Brief 卡片的 [i]：一条修订指令改写一轮
+  body: { question, previous_brief, revision_note, effort, language }
+  resp: { brief }
+
+POST /jobs                       # 冻结 Brief 并启动研究
+  body: { brief }                # brief 由客户端提交；[e] 本地编辑后的结果也走这里
+  resp: { job_id, brief_id }     # schema 校验失败返回 422
+
+GET  /jobs                       # job list
+GET  /jobs/{id}                  # job status 快照
+GET  /jobs/{id}/events           # SSE；支持 Last-Event-ID 从 PG 事件表回放
+GET  /jobs/{id}/report?format=md|json   # 服务端从对象存储代理返回报告字节流
+GET  /healthz                    # serve 启动自检 + CLI 连接探测
 ```
 
-- `c`：原样冻结。
-- `e`：用 `$EDITOR` 编辑 YAML；schema 校验通过后回到卡片。
-- `i`：输入一条修订意向，Scope 改写恰好一轮并直接冻结。
-- `q`：退出，不创建研究任务。
+关键决定：
 
-Brief 冻结后不可修改。需求变化必须创建新任务。
+- **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/scope` 与 `/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
+- **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
+- **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
+- **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`；CLI 按 `error_code` 决定退出码，不解析 message 文本。
 
 ---
 
-## 4. 进度展示
-
-### 4.1 Live TUI
+## 4. `ask` 交互流程
 
 ```text
- job_20260714_042  评估 2025–2026 年亚太区竞品经营态势      [研究中]
- 阶段  Brief ✔ → 规划 ✔ → 搜集 ● → 验证 ○ → 声明 ○ → 成文 ○
- 计划  Plan v2（v1→v2：Verifier 检出商业化证据缺口）
- ┌────┬──────────────────────────────┬──────────────┬────────┐
- │ ID │ ResearchTask                 │ mode         │ 状态   │
- ├────┼──────────────────────────────┼──────────────┼────────┤
- │t_01│ 主要厂商区域收入与客户证据   │ factual      │ ✔ 完成 │
- │t_02│ 技术路线与产品差异           │ comparison   │ ● 运行 │
- │t_03│ 商业化数据的反方证据         │ counterargu… │ ○ 等待 │
- └────┴──────────────────────────────┴──────────────┴────────┘
- 限额  planner 3/12 rounds · deep_dive concurrency 2/3 · worker rounds t_02 7/49
- 用量  tokens 0.41M · tool_calls 38（只计量）
- 事件  11:42:03  t_01 保存 2 条 Excerpt、3 条 Assertion
-       11:43:05  Verifier 检出重大缺口 → 请求 Planner 决策
-       11:43:40  Plan v2 派发 t_03
-──────────────────────────────────────────────────────────────
- [q] 离开（任务继续）  [o] 完成后打开报告
+prospector ask "问题"
+  → POST /scope（spinner："Scope 正在展开问题…"）
+  → 若 clarify：打印澄清问题，prompt 用户回答一次，带答案重新 /scope
+  → Brief 卡片（CLI 本地渲染）：
+      [c] 确认      → POST /jobs
+      [e] 编辑      → $EDITOR 打开 Brief YAML；schema 校验失败打印字段级错误并
+                      重开编辑器（临时文件保留，不丢弃编辑内容），通过后回到卡片
+      [i] 指令修订  → prompt 一条修订意向 → POST /scope/revise → 新 Brief 直接 POST /jobs
+      [q] 放弃      → 退出，不创建 job
+  → JOB_CREATED: <job_id>（始终打印，attach 中断也能找回）
+  → --detach 则到此退出；否则进入 attach
 ```
 
-限额区显示 Planner 决策轮、当前阶段并发与当前 Worker 决策轮。Plan 版本和 Replan 原因必须可见；Replan 统一消耗 Planner 决策轮。
+`c/e/i/q` 语义沿用现有 `confirm_brief` 实现，仅将 revise 从进程内调用换为 HTTP。Brief 冻结后不可修改，需求变化必须创建新任务。
 
-### 4.2 Plain 模式
+---
+
+## 5. TUI
+
+Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
 
 ```text
-11:40:12  plan.created        Plan v1 派发 3 个任务
-11:42:03  evidence.persisted  t_01 保存 2 excerpts / 3 assertions
-11:43:05  verifier.gap        商业化证据存在重大缺口
-11:43:40  plan.created        Plan v2 派发补搜任务 t_03
-12:02:31  job.completed       报告已生成
+╭─ Prospector ─────────────────────────────────────────────────────────────────╮
+│  ◉ 研究中   a1b2c3d4   评估 2025–2026 年亚太区竞品经营态势        deep · zh  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  Brief ─── 规划 ─── 搜集 ─── 验证 ─── 成文 ─── 句级验证 ─── 渲染
+   ✔        ✔       ◉
+
+╭─ Plan v2 ────────────────────────────╮ ╭─ 限额与用量 ──────────────────────╮
+│ Replan：商业化证据缺口                │ │ planner   ▰▰▰▱▱▱▱▱▱▱▱▱  3/12     │
+│                                      │ │ 并发      ▰▰▱             2/3     │
+│ t_01 区域收入与客户证据    factual ✔ │ │ tokens    0.41M                   │
+│ t_02 技术路线与产品差异 comparison ◉ │ │ 工具调用  38                      │
+│      └ worker rounds ▰▰▰▱▱▱  7/49    │ │ 已运行    12:41                   │
+│ t_03 商业化数据反方证据  counter…  ○ │ ╰───────────────────────────────────╯
+╰──────────────────────────────────────╯
+
+╭─ 时间线 ─────────────────────────────────────────────────────────────────────╮
+│ 11:42:03  t_01  保存 2 excerpts · 3 assertions                               │
+│ 11:43:05  verifier  ⚠ 检出重大缺口 → 请求 Planner 决策                       │
+│ 11:43:40  plan  Plan v2 派发 t_03                                            │
+│ 11:44:12  t_02  web_search "APAC revenue breakdown …"                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  Ctrl-C 离开（任务继续）                                  prospector · v0.1.0
 ```
 
-`ask` 在 Brief 确认后直接输出该逐行时间线；`job events --follow` 使用同一渲染器回放并继续跟随 PG 事件。
+视觉规范：
 
-### 4.3 状态来源
+- **顶部状态胶囊**：状态点 + job 短 ID + 问题 + effort/语言；状态点带 spinner 呼吸动画——研究中青色 ◉、完成绿 ✔、失败红 ✘、SSE 重连中黄色。
+- **阶段轨道**：带连接线的站点图，当前站高亮挂 spinner；站点对应主图真实 phase（含成文与句级验证）。
+- **双栏中段**：左侧 Plan 面板用缩进列表，当前运行任务内嵌 worker rounds 迷你进度条；右侧限额面板统一 `▰▱` 条形图。窄终端（<100 列）双栏降为上下堆叠。
+- **时间线语义着色**：evidence 常规色、verifier 缺口黄、replan 品红、工具调用暗灰（视觉退后）、时间戳暗色；滚动保留最后 8 条。
+- **底部状态栏**：左退出提示、右版本号。
+- 配色只用 Rich 默认 256 色安全集（cyan/green/yellow/magenta/dim），不依赖真彩终端。
 
-| 界面信息 | 服务端事实 |
-|----------|------------|
-| 阶段 | job phase 事件 |
-| Plan 与任务 | `plans` / `tasks` 及对应事件 |
-| Planner 轮次 | `decision_round` 与上限 |
-| Worker 决策轮 | Task budget 与已执行的模型动作 |
-| 工具调用计数 | `task.finished` 事件与 PG usage；只观测，不驱动停止 |
-| 缺口、冲突与废证 | verifier run / gap artifact / ConflictResolution / AssertionDisposition |
-| 用量 | PG usage |
+架构要求：**TUI 是事件流的纯投影**。CLI 内部维护由事件折叠出的 `JobView` 状态（阶段、Plan、任务表、计数），Live 面板只渲染该结构；`--plain` 模式消费同一条流逐行打印。CLI 不根据事件文本重新计算状态。
 
-CLI 不根据事件文本重新计算状态。
+**Ctrl-C 语义**：attach 期间 Ctrl-C 只断开展示，研究在服务端继续，打印
+`已离开，任务继续运行：prospector job attach <id>`。这与 prospector-local（Ctrl-C 即杀研究）是刻意的行为差异。
 
----
-
-## 5. 终态
-
-### 5.1 完成
+**终态**：收到 `job.stopped` 后退出 Live，打印终态摘要卡片；成功时自动下载一次报告并打印本地路径，不自动倾倒全文：
 
 ```text
-✔ 完成（22 分 14 秒）
-  报告：~/.prospector/reports/job_20260714_042/report.md
-  引用：96 条
-  信息局限：3 处，已在报告中披露
+╭─ ✔ 研究完成 · 22 分 14 秒 ───────────────────────────────╮
+│  报告    ~/.prospector/reports/a1b2c3d4/report.md        │
+│  引用    96 条    信息局限 3 处（已在报告中披露）         │
+│  查看    prospector report show a1b2c3d4                 │
+╰──────────────────────────────────────────────────────────╯
 ```
 
-只有 Verifier 放行、事实 Claim 全部通过验证、冲突已处置且 no-new-facts 审计通过时才能完成。
+---
 
-### 5.2 失败
+## 6. 错误处理与退出码
 
-```text
-✘ 失败：Planner 决策轮耗尽后仍存在不可接受的重大缺口
-  已保存 partial report 与 gap artifact
-```
+| 码 | 含义 |
+|----|------|
+| 0 | 成功完成；或用户主动离开 attach（任务仍在跑）；或 `q` 放弃 Brief |
+| 1 | 平台错误：服务端连不上、LLM 未配置、服务端 5xx |
+| 2 | 用法错误：参数非法、非 TTY 跑 `ask`、job_id 不存在 |
+| 3 | 研究质量失败：Verifier 重大缺口等；partial 产物已保存 |
+| 130 | Ctrl-C 在 Brief 冻结前中断（未创建 job） |
 
-失败原因包括：
+关键错误场景：
 
-- 决策轮耗尽且零 Excerpt；
-- 仍存在不可接受的重大缺口；
-- 存在未通过 Claim 验证的事实；
-- 高优先级冲突没有处置记录；
-- 平台错误导致任务失败。
-
-可披露的信息局限不等于重大缺口，可以随已验证报告完成。预算耗尽只停止继续研究，不改变质量判定。
+- **服务端未启动**：所有命令先探测 `/healthz`，失败时给可执行提示（`服务端未运行，先执行: prospector serve`），不吐 connection traceback。
+- **SSE 断线**：attach 自动重连（指数退避，上限 30s），带 `Last-Event-ID` 续传；TUI 状态点变黄提示重连中。重连期间研究不受影响（事实源在 PG）。
+- **`ask` 中断恢复**：job_id 创建时立刻打印；任何后续失败（含 CLI 崩溃）都可 `job attach` 找回。
 
 ---
 
-## 6. Job 与报告
+## 7. 测试策略
 
-| 命令 | 行为 |
-|------|------|
-| `job list` | 列出任务状态、阶段、开始时间和用量 |
-| `job status <id>` | 查看阶段、Plan 版本、任务表、三项限制和最近事件 |
-| `job attach <id>` | 通过 SSE 跟踪；Last-Event-ID 从 PG events 回放 |
-| `job events <id>` | 输出人类可读的业务事件时间线；支持 `--follow` |
-| `report show <id>` | 拉取并终端显示报告 |
-| `report export <id>` | 导出 Markdown、JSON 或 HTML |
-| `usage --job <id>` | 展示 token、工具调用和成本，不参与终止判断 |
-
-报告缓存目录：
-
-```text
-~/.prospector/reports/<job_id>/
-├── report.md
-├── report.json
-├── meta.json
-└── gaps.json        # 仅失败时存在
-```
-
-服务端产物是权威源，本地目录只是下载结果。
+- **单测**：Brief 卡片状态机（c/e/i/q）、事件折叠 `JobView` 的逻辑、SSE 客户端重连/续传（mock 流）、退出码映射；TUI 渲染用 Rich console capture 做快照测试。
+- **集成**：FastAPI `TestClient` 覆盖 `/scope → /jobs → /events` 全链路（LLM mock）；一条 `live` 标记的端到端用真实 LLM 走通 `ask --plain --detach` + `attach`。
+- 现有 `prospector-local` 测试不动，保证开发入口回归安全。
 
 ---
 
-## 7. 退出码
+## 8. 实施分期
 
-| 退出码 | 含义 |
-|--------|------|
-| 0 | 任务完成，或用户离开仍在运行的 attach |
-| 1 | CLI、网络、认证或服务端平台错误 |
-| 2 | 参数错误，或非 TTY 运行 `ask` |
-| 3 | 任务因重大缺口或零证据失败；partial/gap 已保存 |
-| 4 | 用户取消任务 |
-| 5 | 任务因 Claim/冲突/审计质量门失败 |
-| 130 | Brief 冻结前被 Ctrl-C 中断，未创建研究任务 |
+各期独立可交付：
 
----
-
-## 8. 服务端映射
-
-| CLI | M1 服务端 |
-|-----|-----------|
-| `ask` | 创建 interactive job；Scope/HITL 冻结后进入研究图 |
-| Brief `c/e/i/q` | LangGraph interrupt/resume 合同 |
-| `job status` | `GET /jobs/{id}` |
-| `job attach/events` | `GET /jobs/{id}/events`，PG events + Last-Event-ID |
-| `report show/export` | 报告与产物接口 |
-| `usage` | PG usage 查询 |
-
----
-
-## 9. 后续里程碑命令
-
-这些命令不属于 M1，只有对应服务端能力实现后才进入 CLI：
-
-| 里程碑 | 命令 |
-|--------|------|
-| M2 | `ask --file`、`ask --kb`、`kb list/add/docs/ingest-status` |
-| 后续研究能力 | `followup <job_id> <question>` |
-| M4 | `job pause/resume/cancel`、跨副本 attach、`debug on/off` |
-
-未来命令不得出现在 M1 的帮助文本、TUI 示例或验收清单中。
+1. `api/` 模块 + `serve`：/scope、/jobs、SSE、报告代理（复用现有 store/agents/flow，纯新增）。
+2. `prospector` CLI 骨架 + `--plain` 全流程（先逐行时间线，验证契约）。
+3. Rich TUI（`JobView` 投影 + Live 面板）。
+4. `job list/status`、`report show/export`、错误打磨。
