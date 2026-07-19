@@ -145,6 +145,6 @@ src/prospector/
 
 - **M0 工程基座**已完成：PostgreSQL checkpointer、Alembic、MinIO、日志、trace 与 CI。
 - **M1 已实现到成文质量门**：Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan、Report Writer、Report Verifier、最多两次句级修订，以及验证后确定性引用渲染。
-- 当前每个 revision 都会全量逐句验证。修订用尽后仍失败的句子以 `partial` 标记保留且不附已验证引用；渲染后主图停在 `draft_rendered`，正式 `completed` 报告出口尚未实现。
+- 当前每个 revision 都会全量逐句验证。修订用尽后仍失败的句子以 `partial` 标记保留且不附已验证引用；渲染后主图以 `draft_rendered` 结束。
 
 详细设计文档见 [docs/design.md](docs/design.md)，M1 实现合同见 [docs/implementations/m1.md](docs/implementations/m1.md)。

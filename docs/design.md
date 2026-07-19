@@ -1,7 +1,8 @@
 # 深度研究智能体（Deep Research Agent）设计文档
 
-- **版本**：v4.15（草案）
-- **v4.15 变更**：成文链重构为 **prose-first**（§5.4 / D5 / §3.1 / §3.3）：Report Writer 以 Brief 核心问题为纲直接产出带稳定 statement id 的结构化正文，Report Verifier 逐句分型验证**这份正文本身**——被验证对象与交付对象合一；Claim 表体系保留但生产方向反转（claim 是从最终正文提取的验证记录，`produced_by: report_verifier`）；Writer↔Verifier 修订环句级、增量重验、硬上限轮数，触顶未过句由代码确定性删除或降格；成文期不开搜索（换证仅限既有 Excerpt 池）；Outline Builder / Claim Drafter / Narrative Composer / no-new-facts 审计四个模块取消
+- **版本**：v4.16（草案）
+- **v4.16 变更**：成文链按当前实现收口：每个 revision 全量逐句验证，Writer 最多修订两轮；修订触顶后仍未通过的句子保留在正文中，报告标记为 `partial`，这些句子不生成已验证引用角标；验证后产物以 `draft_rendered` 结束。
+- **v4.15 变更**：成文链重构为 **prose-first**（§5.4 / D5 / §3.1 / §3.3）：Report Writer 以 Brief 核心问题为纲直接产出带稳定 statement id 的结构化正文，Report Verifier 逐句分型验证**这份正文本身**——被验证对象与交付对象合一；Claim 表体系保留但生产方向反转（claim 是从最终正文提取的验证记录，`produced_by: report_verifier`）；Writer↔Verifier 修订环句级、全量重验并设硬上限轮数；成文期不开搜索（换证仅限既有 Excerpt 池）；Outline Builder / Claim Drafter / Narrative Composer / no-new-facts 审计四个模块取消
 - **v4.14 变更**：新增 AssertionDisposition（§4.13）：Research Verifier 可将不可信断言标为 unusable（存储不删）；覆盖判断与成文投影只认 usable 断言；冲突侧 LLM 只点 assertion_id、代码绑定 excerpt（与实现对齐）
 - **v4.13 变更**：与 Planner-Worker 实现对齐：ResearchTask 增加 `subjects`；同批任务只能属于一个研究阶段；`effort` 映射全局 Planner 决策轮和分阶段并发/Worker 决策轮；取消 Worker 工具调用总数上限，单轮并行工具调用固定限 8；联网证据统一通过任务级 DocumentView 中的 Exa highlights 落库
 - **v4.12 变更**：ResearchTask 增加必填 `research_stage`（scout / deep_dive / verify），与 `research_mode`、`source_policy` 正交；跨任务综合仍由 Planner 基于断言投影完成，不设 synthesize Worker；任务目标与局部完成判断统一由 `expected_evidence` 承担
@@ -10,7 +11,7 @@
 - **v4.9 变更**：明确 interactive Brief HITL 交互合同（§5.1 / §4.1 / FR-2）：用户可原样确认、直接编辑 Brief，或发送**一条**修订指令由 Scope 改写一轮后即定稿（不再二次确认、不允许多轮模型修订）；确认结果仍是交给 Planner 的输入快照，不是执行合同
 - **v4.8 变更**：纠正 Scope / Brief / Planner 的职责边界：Research Brief 不再被定义为段落合同，而是把用户问题具体化并主动展开研究空间的中间产物；Scope 负责澄清问题、提出候选维度、竞争假设、反例、边界条件与多条证据路径，Planner 负责从中选择实际研究方向并以版本化 Research Plan 形成执行合同。Brief 的用户确认只确认系统对问题的理解与展开方向，不把所有候选角度冻结成必达项；Verifier 以 Planner 已形成的执行合同判断覆盖度，并以 Brief 检查是否偏离原始问题（§4.1 / §4.2 / §5.1 / §5.2 / §5.3 / D4）
 - **v4.6 及更早**：见 git 历史
-- **日期**：2026-07-16
+- **日期**：2026-07-19
 - **状态**：待评审
 - **适用项目**：Prospector v2（多智能体深度研究系统）
 
@@ -26,7 +27,7 @@
 
 ### 1.2 设计目标
 
-1. **正确性优先**：报告中每一条事实性声明（claim）必须可回溯到具体证据来源，不允许模型凭空引入信息。
+1. **验证状态透明**：报告逐句记录验证结果；通过验证的事实性声明（claim）必须可回溯到具体证据来源，未通过句保留时必须显式标记 `partial` 且不得生成已验证引用角标。
 2. **广度与深度可扩展**：通过并行子智能体扩展信息搜集广度，通过 Verify-Replan 回路保证深度。
 3. **成本可控**：研究档位与停止条件显式化，防止编排失控（过度并行、无限决策轮、无限循环搜索）；token 用量可观测，护栏以**Planner 决策轮、分阶段并发 Worker 数、分阶段 Worker 决策轮**为主。
 4. **工程可观测**：全链路 tracing、成本统计、事件流，支持离线评估与回归测试。
@@ -53,10 +54,10 @@
 | FR-5 | 证据统一入库（Evidence Store），分层保存文档快照、精确片段与结构化断言，全链路血缘可追溯 | P0 |
 | FR-6 | 覆盖度/矛盾/缺口检查，缺口触发定向补充检索（Replan 回路） | P0 |
 | FR-7 | 报告正文由单一 Report Writer 以 Brief 核心问题为纲直接写成**带稳定 statement id 的结构化正文**；引用编号、角标与表格/图表由确定性代码渲染——图表经声明式 spec 绑定已验证陈述或 Computation（§5.5）；输出含表格、图表与结构化 JSON | P0 |
-| FR-8 | 最终正文在交付前**逐句**通过 Report Verifier 分型验证（验证对象即交付文本）；每句验证产生落库的 claim 记录与权威链；未通过且修订环触顶的句子由代码确定性删除或降格，**不存在未经验证的事实句进入报告的通道** | P0 |
+| FR-8 | 最终正文在交付前由 Report Verifier **逐句分型验证**（验证对象即交付文本），每句验证产生落库的 claim 记录；Writer 最多修订两轮，每个 revision 全量重验。触顶后仍未通过的句子保留，产物标记为 `partial`，失败句不生成已验证引用角标 | P0 |
 | FR-9 | 支持中途取消、暂停、断点恢复 | P1 |
 | FR-10 | 支持研究过程的 SSE 流式推送（步骤可视化） | P1 |
-| FR-11 | 支持追问式的后续研究（复用已有 Evidence Store 与失败任务的结构化 gap artifact） | P2 |
+| FR-11 | 支持追问式的后续研究（复用已有 Evidence Store） | P2 |
 | FR-12 | 多用户并发提交与多任务并行运行：任务生命周期与连接解耦、跨设备进度流重连、按用户计量 token 用量 | P1 |
 
 ### 2.2 非功能需求
@@ -119,10 +120,8 @@ flowchart TD
     V -- 放行成文 --> W[Report Writer<br/>以 Brief 为纲写结构化正文<br/>句带稳定 statement id]
     W --> RV[Report Verifier<br/>逐句分型验证正文本身<br/>验证记录落库为 claim]
     RV -- findings：句级修订<br/>（池内换证 · 不补搜 · 硬上限轮数） --> W
-    RV -- 触顶未过句 --> PR[确定性删句 / 降格]
-    RV -- 全部通过 --> CR[确定性呈现渲染<br/>引用 · 表格 · 图表]
-    PR --> CR
-    CR --> F[最终报告<br/>引用、表格、图表、结构化 JSON]
+    RV -- 全部通过或修订触顶 --> CR[确定性呈现渲染<br/>引用 · 表格 · 图表]
+    CR --> F[验证后产物 draft_rendered<br/>verified / partial · Markdown / JSON]
 
     CP[(Checkpoint / 状态持久化)] -.- P
     CP -.- SCH
@@ -447,7 +446,7 @@ derived 型 Claim 的支撑关系表——与 ClaimEvidence 平行：evidence �
 
 ### 4.9 ClaimVerdict（claim 级判定，版本化）
 
-每次 Verifier 运行对每条 claim 产出一行**整体判定**，与 pair 级的关系行分离。质量门（§7）与出口判定读取的是本表的最新 run。
+每次 Verifier 运行对每条 claim 产出一行**整体判定**，与 pair 级的关系行分离。确定性渲染读取最新 run：通过句生成引用，失败句进入 `partial` 状态记录且不生成已验证引用角标。
 
 ```json
 {
@@ -661,7 +660,7 @@ flowchart TD
 3. **可信度**：结合 URL、标题、author、发布时间、Excerpt 原文与独立佐证，直接判断关键结论是否过度依赖不可靠来源（见 §4.3）。若断言本身不可采信，须同时写入 AssertionDisposition（`unusable`）；实质影响结论时再开 `source_credibility` 重大缺口并 Replan——**缺口负责补查，废证负责取消资格**，二者不可互相替代；
 4. **缺口**：生成结构化 gap list（建议的补查子课题说明、已尝试路径、为何不足），转化为定向补派并生成新 Plan 版本交回 Planner。补搜建议优先**换取证角度 / 来源类型**，避免对同一死指标同义重搜。
 
-Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入成文，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。当前已实现 Report Writer、Report Verifier、最多两次句级修订与验证后确定性引用渲染；实现暂以 `draft_rendered` 收口，修订触顶后的失败句以 `partial` 保留且不附已验证引用，正式 `completed` 出口、确定性删除/降格、partial report 与 gap artifact 仍待接入。决策轮上限与预算一样，只停止研究，不放行质量门（§7）。
+Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入成文，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。Report Writer、Report Verifier、最多两次句级修订与验证后确定性引用渲染均已接入；成文链以 `draft_rendered` 收口，修订触顶后的失败句以 `partial` 保留且不附已验证引用。决策轮上限与预算一样，只停止研究，不绕过 Research Verifier（§7）。
 
 ### 5.4 Phase 4–5：成文与逐句验证（prose-first）
 
@@ -686,8 +685,8 @@ flowchart TD
 ```
 
   每句验证的产物**落库为 claim 记录**（§4.6，`produced_by: report_verifier`，锚定 `statement_id`）：evidence 句只看"句子 + 候选 Excerpt"（最小上下文，天然可并行分片、用中档模型），关系行写入直连 Excerpt 的版本化 ClaimEvidence，判定写 ClaimVerdict（§4.9）；derived 句关系写 ClaimPremise（§4.8），前提审查①是机器可查的硬闸门，②③是 LLM 软判断——典型要拦的是"相关性前提推出因果结论""个例推出普遍规律"这类跳跃，以及"多家媒体报道"被写成"确凿事实"这类校准失当；computed 句的复现与忠实检查（§4.11）关系写 ClaimComputation。衔接句免建 claim 行，但必须通过"无事实内容"核对——**没有任何句子存在免检通道**，这一逐句核对使旧方案的末端 no-new-facts 审计不再需要。**必须诚实承认：推理合理性验证的可靠性天然低于事实核对，这是引入推理能力的代价**，靠深度上限与人工抽检兜底。
-- **句级修订环（有限轮）**：存在未通过句时，Verifier 输出结构化 findings（statement_id、失败类型、原因）打回 Writer。三条纪律：(a) **修订是句级的**——只改被点名的句子及其直接连带（前提句被删或被改写时，依赖它的 derived 句同步收窄或复核）；换证仅限**既有 Excerpt 池**，池内无支撑则删句或降格为显式标注的推测，不补搜；(b) **重验是增量的，脏标记沿前提边传播**——"脏"不只按 statement_id diff 定义为"自身文本变了"，还包括"所声明的前提集合变了，或任一前提句的文本变了"：前提句被改写（如确定表述降格为转述）后，依赖它的 derived 句即使自身未动，其上一轮 pass 也已失效——②③ 软判断（校准与前提强度相称）正是要拦这种情形。脏传播沿句子声明的前提关系由代码确定性完成，不新增 LLM 调用面；只有脏句进入下一轮验证，干净句不重跑；(c) **轮数硬上限（默认 2）**——触顶后仍未通过的事实句由**确定性代码删除或降格**，不再交给 LLM，环由此保证终止。若删句/降格导致 Brief 核心问题失去回答，质量门按重大缺口走失败出口（§7）。
-- **Deterministic Presentation Render**：全部句子通过后正文文本**冻结**。渲染器按 statement_id 解析每句的证据链：evidence 句插引用角标、生成文末来源列表；derived 句渲染为"基于上述数据，我们认为……"式显式分析标记，附前提索引而非引用编号；computed 句标注计算口径，角标解析到 Computation 记录，来源列表展示其 `input_bindings` 锚定 Excerpt 的原始来源。读者一眼可分"查到的"与"推出来的"——这本身是报告质量的一部分。引用编号、角标与来源列表全由**确定性代码**渲染，LLM 完全退出引用格式化——消灭"引用格式幻觉"这一整类问题。表格与图表同属本层：经声明式 FigureSpec 绑定后确定性渲染（§5.5）。
+- **句级修订环（有限轮）**：存在未通过句时，Verifier 输出结构化 findings（statement_id、失败类型、原因）打回 Writer。修订只替换被点名的句子，换证仅限**既有 Excerpt 池**，成文期不补搜。每个新 revision 都对全部 statement 重新验证，最多允许两次修订，因此最多验证 revision 1–3。触顶后仍未通过的句子保留原文，报告标记为 `partial`，渲染器不给这些句子生成已验证引用角标；通过句仍按 ClaimEvidence 渲染引用。该硬上限保证修订环终止。
+- **Deterministic Presentation Render**：全部句子通过或修订轮次触顶后，正文文本**冻结**。渲染器按 statement_id 解析每句的验证状态与证据链：通过的 evidence 句插引用角标并生成文末来源列表；失败句保留但不生成已验证引用角标，报告整体标记为 `partial`；derived 句渲染为"基于上述数据，我们认为……"式显式分析标记，附前提索引而非引用编号；computed 句标注计算口径，角标解析到 Computation 记录，来源列表展示其 `input_bindings` 锚定 Excerpt 的原始来源。读者一眼可分"查到的"与"推出来的"——这本身是报告质量的一部分。引用编号、角标与来源列表全由**确定性代码**渲染，LLM 完全退出引用格式化——消灭"引用格式幻觉"这一整类问题。表格与图表同属本层：经声明式 FigureSpec 绑定后确定性渲染（§5.5）。
 
 ### 5.5 表格与图表：声明式绑定与确定性渲染
 
@@ -776,11 +775,11 @@ flowchart TD
 
 ### 6.5 D5：最终正文是验证对象（prose-first 成文）+ 单一 Report Writer
 
-**决策**：验证对象是**交付给读者的最终正文**，逐句进行；Report Writer 直接写出带稳定 statement id 的结构化正文，Report Verifier 分型验证每一句并把验证记录落库为 claim；句级修订环有限轮、增量重验、触顶由代码确定性删句/降格；引用由确定性代码渲染。正文由单一智能体完成，不做"多 agent 分章节写作再拼接"。
+**决策**：验证对象是**交付给读者的最终正文**，逐句进行；Report Writer 直接写出带稳定 statement id 的结构化正文，Report Verifier 分型验证每一句并把验证记录落库为 claim；句级修订环有限轮，每个 revision 全量重验，触顶失败句保留并标记 `partial`；引用由确定性代码渲染，失败句不生成已验证引用角标。正文由单一智能体完成，不做"多 agent 分章节写作再拼接"。
 
 **演化路径（三个版本的教训）**：v1.0 采用"先成文后核对"，核对对象是段落，错误被放大成段落后才拦截，修订被迫整段重写。v4.x 曾把验证前移到成文之前：起草原子 Claim → 验证 → Composer 组稿 → no-new-facts 审计。它修正了粒度问题，但引入了一个结构性缺陷——**被验证的对象（claim）和交付的对象（Composer 改写后的散文）不是同一份文本**：改写就是语义漂移的通道，末端必须再设审计去追这个漂移，等于同一内容验证两遍，且 Outline/Drafter/Composer/审计四个浅模块的接口开销接近其实现本身。v4.15 的 prose-first 吸收两者：保留句级粒度（对 v1.0 的修正），把验证对象换回最终文本（消灭 claim→散文的漂移缝隙）——**验证的就是交付的**，零漂移是构造性的，不再依赖末端审计检测。
 
-**代价与对策（必须诚实面对）**：(a) 修订环放回了流程中央——对策是句级修订、带前提脏传播的增量重验（§5.4）、硬上限轮数、触顶确定性删句，环有界且必然终止；(b) 若正文主干论点验证失败，句级修订救不了——但 Writer 的原料是研究期 Verifier 筛过的 usable 断言，句级验证抓的主要是转述失真与推理越界这类局部错误，整体性失败由质量门按重大缺口走失败出口兜底；(c) 审计产物不能丢——claim 表体系原样保留，只是生产方向反转：claim 从"成文前起草的中间产物"变为"从最终正文提取的验证记录"，权威链与 FR-8 的机器可校验性一分不少。
+**代价与对策（必须诚实面对）**：(a) 修订环放回了流程中央——采用句级修订和硬上限轮数保证终止，每个 revision 全量重验以保持实现直接；(b) 若正文主干论点验证失败，句级修订可能无法修复，触顶后报告会以 `partial` 交付并显式记录失败 statement，调用方必须据此识别未验证内容；(c) claim 表体系原样保留，只是生产方向反转：claim 从"成文前起草的中间产物"变为"从最终正文提取的验证记录"，通过句仍保留完整权威链。
 
 **推理型陈述的处理**：研究报告必然包含超出单条证据的分析与综合，硬性要求"每句必须挂 Excerpt"会把系统逼成事实罗列器。因此约束的准确表述是"每句必须有据可依"：evidence 句锚定 Excerpt，derived 句锚定前提句（推理链叶子仍必须落地到证据，深度上限 2），computed 句锚定可复现的 Computation 记录（§4.10/§4.11/§5.4）。"不得引入新事实"的边界随之精确化——正文不得包含**未通过逐句验证**的事实性陈述，无论它是查来的还是推出来的；每句必须声明自己的性质，衔接句也要通过"无事实内容"核对，不存在免检通道。
 
@@ -878,16 +877,16 @@ flowchart TD
     Stop1 --> G[质量门]
 ```
 
-**核心语义：这些闸只负责停止继续研究，不能绕过质量门。** 收工后的出口由缺口与验证状态决定：
+**核心语义：这些闸只负责停止继续研究，不能绕过 Research Verifier。** 收工后的出口由研究覆盖与成文验证状态决定：
 
 | 收工时的状态 | 出口 |
 |--------------|------|
-| Verifier 软覆盖可放行（可披露局限），且正文全部事实句通过逐句验证 | **完成**，报告显式展示信息局限（若有） |
-| 存在不可接受的重大缺口（含修订环删句/降格后 Brief 核心问题失去回答） | **失败**，保存 partial report + 结构化 gap artifact |
-| 存在未通过验证且未被确定性删除/降格的事实句 | **失败**——验证失败不能因轮次用尽转为成功 |
-| 决策轮耗尽且 Evidence Store 零 Excerpt | **失败**（不进入 Verifier）：partial report 为空，gap artifact 记录零证据与已尝试路径（§5.2 空手守卫） |
+| Verifier 软覆盖可放行（可披露局限），且正文全部 statement 通过逐句验证 | 渲染 `verified` 产物，Job 以 `draft_rendered` 结束 |
+| Verifier 软覆盖可放行，但正文修订触顶后仍有失败句 | 渲染 `partial` 产物；失败句保留且不生成已验证引用角标，Job 以 `draft_rendered` 结束 |
+| 存在不可接受的重大缺口 | **失败**，记录失败原因与 Verifier 结果 |
+| 决策轮耗尽且 Evidence Store 零 Excerpt | **失败**（不进入 Verifier，§5.2 空手守卫） |
 
-失败不是丢弃：partial report 保留已验证部分，gap artifact 结构化记录缺什么、试过什么、为什么没拿到，两者共同构成 FR-11 续研的入口。所有停止原因与出口判定写入事件流。
+所有停止原因与出口判定写入事件流；追问式后续研究直接复用已有 Evidence Store。
 ---
 
 ## 8. 失败模式与对策
@@ -899,9 +898,9 @@ flowchart TD
 | 全文灌进 Worker | 为「提效」把网页全文塞进上下文 | D12 硬规则；`web_fetch` 只返回持久化的任务级来源视图 |
 | 未经 view 落证 | Worker 提交未见过的 source_ref 或任意文本 | 运行时先校验 source_ref 属于当前 Worker，再由 `save_findings` 校验 view 的 Job、Task、Document version 与 source_ids |
 | 证据污染 | 低质量来源支撑关键结论 | Verifier 结合来源元数据、Excerpt 原文与独立佐证直接判断；来源身份不替代逐条验证（§4.3） |
-| 陈述无证据支撑 | 正文事实句与 Excerpt 不符 | 正文逐句验证（§5.4），未过句打回句级修订，触顶确定性删除/降格；验证失败不受预算豁免（§7） |
+| 陈述无证据支撑 | 正文事实句与 Excerpt 不符 | 正文逐句验证（§5.4），未过句打回句级修订；触顶后报告标记 `partial`，失败句不生成已验证引用角标 |
 | 衔接句夹带新事实 | 声明为"衔接"的句子实含事实性表达 | 每句必须声明性质、Report Verifier 逐句核对，无免检通道；夹带即验证失败打回 |
-| 修订环不收敛 | Writer 反复改写、验证反复打回 | 句级修订 + statement id 增量重验 + 轮数硬上限（默认 2），触顶由代码确定性删句/降格，环必然终止 |
+| 修订环不收敛 | Writer 反复改写、验证反复打回 | 句级修订 + 每个 revision 全量重验 + 轮数硬上限（默认 2）；触顶后生成 `partial` 产物，环必然终止 |
 | 推理过度延伸 | derived 句结论强于前提所能支撑 | 前提链审查（硬查前提有效性 + 软查推理跳跃与校准）+ 推理链深度上限 2 + 呈现层显式标记为分析结论 |
 | 上下文截断 | 长任务中途丢失计划 | 状态外化（D7），Plan 版本先落库再执行 |
 | worker 单点失败 | 某子任务工具报错 | Task 级重试（1 次）→ 标记 failed → Verifier 软覆盖判断是否构成重大缺口（§5.3） |
@@ -909,7 +908,7 @@ flowchart TD
 | 决策轮空转 | 反复反思或反复超并发被拒 | 凡决策皆计数，空转同样烧轮次（空手 `finish` 被拒亦计），触顶后进入质量门（§5.2 / §7） |
 | 决策形态漂移 | Planner 以自然语言替代结构化决策（如用散文宣布研究结束） | 每轮强制三选一 schema 输出（§5.2 决策输出合同），无结构输出按格式错误回环并计轮；`finish` 是结束研究环的唯一入口且受空手守卫拦截 |
 | 决策上下文膨胀 | 跨轮消息史随轮数与并发线性增长，挤占 Planner 判断质量 | 线程准入封闭 + 硬上界（§5.2 决策上下文合同）：只允许断言投影摘要与运行时反馈追加，worker 原始轨迹 / 联网来源视图 / Document 正文不入线程；决策轮上限与限长摘要给出规模硬上界 |
-| 软覆盖误判 | Verifier 过早放行或过严卡死 | 覆盖 rationale 落库可审计；重大缺口走失败 + gap artifact；Claim 硬链兜住事实正确性；评测集跟踪人工不一致率 |
+| 软覆盖误判 | Verifier 过早放行或过严卡死 | 覆盖 rationale 落库可审计；重大缺口失败；Claim 验证记录暴露逐句结果；评测集跟踪人工不一致率 |
 ---
 
 ## 9. 可观测性与评估
@@ -1087,7 +1086,7 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 | 阶段 | 范围 | 验收标准 |
 |------|------|----------|
 | M0（1 周） | 工程基座：repo 骨架与 CI、PostgreSQL + 迁移框架、LangGraph + PG checkpointer 启用、structlog JSON 日志 + 基础 OTel、对象存储接入 | 空流程 job 的状态迁移跑通并落 checkpoint，kill 进程后恢复续跑；日志自动关联 trace/span |
-| M1（7 周） | **深研智能体核心 + CLI**：Research Brief 输入快照；Planner `dispatch/reflect/finish` 决策环；版本化 Plan；并行通用 Research Worker；Document/Excerpt/Assertion 证据链；Verifier/Replan；ConflictResolution；Report Writer 结构化正文 + 逐句验证（evidence/derived）+ 句级修订环；确定性引用渲染；单进程 API、PG 事件 SSE 与 CLI 闭环 | 端到端产出带引用报告；权威链机器校验 100%；并行不串号；预埋缺口形成新 Plan 版本；空手 finish 和零证据耗尽正确失败；重大缺口产生 partial report + gap artifact；未通过逐句验证的事实句不进入报告（触顶确定性删除/降格）；预算耗尽不绕过质量门；CLI 完成提交、跟踪和报告导出 |
+| M1（7 周） | **深研智能体核心 + CLI**：Research Brief 输入快照；Planner `dispatch/reflect/finish` 决策环；版本化 Plan；并行通用 Research Worker；Document/Excerpt/Assertion 证据链；Verifier/Replan；ConflictResolution；Report Writer 结构化正文 + 逐句验证（evidence/derived）+ 句级修订环；确定性引用渲染；单进程 API、PG 事件 SSE 与 CLI 闭环 | 端到端产出带引用报告；通过句的权威链机器校验 100%；并行不串号；预埋缺口形成新 Plan 版本；空手 finish 和零证据耗尽正确失败；每个 revision 全量逐句验证；修订触顶后生成 `partial` 产物并列出失败 statement，失败句不生成已验证引用角标；CLI 完成提交、跟踪和报告导出 |
 | M2（2 周） | 扩展能力——计算与本地文档（两条相互独立的战役，可按人力并行或对调）：(a) Data Worker 沙箱 + Computation（内容寻址、输入血缘）+ ClaimComputation 复现/忠实检查 + computed 呈现规范；(b) PageIndex 入库建树 + `kb_*` 三原语 + 私库落证；FigureSpec 表格/图表确定性渲染（§5.5，依赖 computed 与 number claim 齐备） | 无 Excerpt 血缘的输入被拒绝进入计算；复现检查跑通（重跑输出值比对）；本地文档经三原语落 Excerpt 且 locator 完整；FigureSpec 仅含绑定字段且渲染前 claim pass 校验生效 |
 | M3（2 周） | 评测基建：题库首版（每类 ≥ 10 题，含冲突/无解陷阱题；经 M1 已交付的 brief-direct 入口提交）+ 录制-回放磁带 + eval_run 表 + 四门禁接入回归流程 + 评估看板。**本里程碑是 M4 多用户化的前置门** | 同一改动可在回放模式跑出可比的 eval_run；四门禁可执行，忠实率以人工真值集度量（评测文档 §6）；SSE 断线重连按 Last-Event-ID 回放（单实例） |
 | M4（2–3 周） | 多用户运行时（第 13 章）：三进程三队列、任务表即 outbox、幂等消费、SSE 跨副本、跨 PG/MQ 遥测传播与 job debug | 两用户并发深研互不饿死；kill 任意 worker 任务被接管；kill Orchestrator 后恢复续跑；SSE 断线重连回放完整；API→Dispatcher→Worker→Orchestrator span link、Tempo↔Loki 跳转与限时 debug 负载指针通过测试 |

@@ -12,10 +12,12 @@ from pydantic import BaseModel
 
 class EventType(StrEnum):
     JOB_PHASE_CHANGED = "job.phase_changed"
+    JOB_STOPPED = "job.stopped"
     BRIEF_CONFIRMED = "brief.confirmed"
     PLANNER_DECIDED = "planner.decided"
     PLANNER_REJECTED = "planner.rejected"
     TASK_STARTED = "task.started"
+    TASK_ROUND_ADVANCED = "task.round_advanced"
     TASK_TOOL_USED = "task.tool_used"
     TASK_EVIDENCE_SAVED = "task.evidence_saved"
     TASK_FINISHED = "task.finished"

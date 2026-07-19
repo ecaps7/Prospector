@@ -7,12 +7,11 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 from uuid import UUID
 
 from prospector.deterministic.budget import ResearchLimits
-from prospector.schemas.plan import ResearchTask
 
 POLL_INTERVAL_SECONDS = 0.2
 TERMINAL_PHASES = {"draft_rendered", "failed"}
@@ -97,9 +96,16 @@ def emit_timeline_line(line: str) -> None:
     print(colorize_timeline_line(line), flush=True)
 
 
-class TimelineRepository(Protocol):
-    def get_task(self, task_id: UUID) -> ResearchTask: ...
+class TimelineTask(Protocol):
+    @property
+    def question(self) -> str: ...
 
+
+class TimelineRenderRepository(Protocol):
+    def get_task(self, task_id: UUID) -> TimelineTask: ...
+
+
+class TimelineRepository(TimelineRenderRepository, Protocol):
     def list_events_after(self, job_id: UUID, after_id: int) -> list[dict[str, Any]]: ...
 
 
@@ -171,7 +177,7 @@ def _short_id(value: object) -> str:
 class ResearchTimelineRenderer:
     """Render the append-only event ledger into stable per-task progress lines."""
 
-    def __init__(self, repository: TimelineRepository, limits: ResearchLimits) -> None:
+    def __init__(self, repository: TimelineRenderRepository, limits: ResearchLimits) -> None:
         self.repository = repository
         self.limits = limits
         self._task_labels: dict[str, str] = {}
@@ -183,6 +189,11 @@ class ResearchTimelineRenderer:
             label = f"T{len(self._task_labels) + 1}"
             self._task_labels[key] = label
         return label
+
+    def register_tasks(self, task_ids: Iterable[object]) -> None:
+        """Bind task labels in the same stable order used by the task snapshot."""
+        for task_id in task_ids:
+            self._task_label(task_id)
 
     def _remaining_rounds(self, decision_round: int) -> int:
         return max(0, self.limits.decision_round_limit - decision_round)
@@ -306,13 +317,11 @@ class ResearchTimelineRenderer:
             lines.append(f"[核验] 冲突处理：{points}")
         if remaining == 0:
             lines.append(
-                "[核验] 失败：重大缺口且 Planner 决策轮已耗尽"
-                + (f"：{reason}" if reason else "")
+                "[核验] 失败：重大缺口且 Planner 决策轮已耗尽" + (f"：{reason}" if reason else "")
             )
         else:
             lines.append(
-                f"[核验] 返回 Planner 补查（余 {remaining} 轮）"
-                + (f"：{reason}" if reason else "")
+                f"[核验] 返回 Planner 补查（余 {remaining} 轮）" + (f"：{reason}" if reason else "")
             )
         return lines
 
@@ -327,9 +336,7 @@ class ResearchTimelineRenderer:
             severity = _GAP_SEVERITY_LABELS.get(
                 str(item.get("severity") or ""), str(item.get("severity") or "")
             )
-            kind = _GAP_KIND_LABELS.get(
-                str(item.get("kind") or ""), str(item.get("kind") or "")
-            )
+            kind = _GAP_KIND_LABELS.get(str(item.get("kind") or ""), str(item.get("kind") or ""))
             description = _first_line(item.get("description"))
             lines.append(f"  {branch} {severity}·{kind}：{description}")
             recommendation = _first_line(item.get("recommended_research"))

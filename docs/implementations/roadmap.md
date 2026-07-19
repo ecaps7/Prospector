@@ -39,7 +39,7 @@ M1 是一个整体里程碑。工程上可以按依赖顺序推进，但不存�
 1. **先锁定不可逆数据，再接控制流**：首次抓取起就保存 Document 快照和精确 Excerpt；checkpoint 从 M0 起常开。
 2. **研究主图一次成形**：M1 合并主干只接受 Planner 决策环、并行 Worker、Verifier/Replan、Claim 验证和成文审计组成的完整图。
 3. **执行承诺只来自 Plan**：Brief 负责展开研究空间；Planner 负责取舍并形成版本化 Plan；Verifier 对照 Plan 检查履约，并以 Brief 检查偏题。
-4. **预算与质量分离**：`effort` 映射 Planner 决策轮，以及各研究阶段的并发数与 Worker 决策轮；工具调用总数、token 和累计工具调用只计量。停止研究不能绕过质量门。
+4. **预算与验证分离**：`effort` 映射 Planner 决策轮，以及各研究阶段的并发数与 Worker 决策轮；工具调用总数、token 和累计工具调用只计量。停止研究不能绕过 Research Verifier。
 5. **验收必须可度量**：M1–M2 使用机器检查和行为测试；M3 建成人工真值集后才启用定量质量门禁。
 6. **运行时后置**：先验证单机研究逻辑，再在 M4 引入多进程、队列和多用户调度。
 
@@ -102,7 +102,7 @@ runtime / cli
 
 实现设计：[m1.md](./m1.md)
 
-当前已完成 Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan、ConflictResolution、Report Writer、Report Verifier、Writer 句级修订与验证后确定性引用渲染。研究图可从冻结 Brief 运行到 `draft_rendered`，并产出 `verified` 或 `partial` 的 Markdown/JSON；正式 `completed` 出口、partial report / gap artifact 与产品 API/CLI 闭环仍待实现。M1 最终交付仍按完整主图统一验收。
+当前已完成 Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan、ConflictResolution、Report Writer、Report Verifier、Writer 句级修订与验证后确定性引用渲染。研究图可从冻结 Brief 运行到终态 `draft_rendered`，并产出 `verified` 或 `partial` 的 Markdown/JSON；产品 API/CLI 闭环仍待实现。M1 最终交付仍按完整主图统一验收。
 
 交付：
 
@@ -121,7 +121,7 @@ runtime / cli
 4. 并行通用 Research Worker 只使用 `web_search`、`web_fetch`、`save_findings`；所有联网来源统一使用持久化 Exa highlights。
 5. Document 快照、Excerpt、Assertion、Plan、Verifier run、Claim 与报告产物全链路落库。
 6. Verifier 检查 Plan 承诺、Brief 偏题、缺口与冲突；可补缺口在仍有决策预算时回到 Planner 形成新 Plan 版本。
-7. Claim 验证、冲突处置、no-new-facts 审计和确定性引用渲染共同构成质量门。
+7. Claim 验证记录逐句结果；每个 revision 全量重验，修订触顶后失败句保留在 `partial` 产物中且不生成已验证引用角标。
 8. 单进程 API、PG 事件 SSE、usage/span 和 CLI `ask → attach → report` 闭环。
 
 依赖顺序：
@@ -139,12 +139,12 @@ flowchart LR
 
 完成标准：
 
-- 端到端产出带引用报告，Claim→ClaimEvidence→Excerpt→Document 权威链机器校验 100%。
+- 端到端产出带引用报告，通过句的 Claim→ClaimEvidence→Excerpt→Document 权威链机器校验 100%。
 - 多 Worker 并行不串号；预埋缺口产生 Plan 新版本并补搜。
 - Planner 空手 `finish` 被拒绝；决策轮耗尽且零 Excerpt 直接失败。
 - Worker 按目标满足、连续两轮无新证据、主动声明证据不可得/受范围限制或决策轮耗尽停止；工具错误回到上下文，不单独触发提前收工。
-- 重大缺口进入失败出口并保存 partial report 与 gap artifact；可披露的信息局限进入报告。
-- 未通过 Claim 验证的事实不进入成文；预算耗尽不改变该规则。
+- 重大缺口进入失败出口；可披露的信息局限进入报告。
+- 每个 revision 全量逐句验证；修订触顶后产出 `partial` 报告并显式列出失败 statement。
 - CLI 可以提交、跟踪并查看或导出报告。
 
 ### M2：计算与本地文档

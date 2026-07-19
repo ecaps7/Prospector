@@ -26,6 +26,7 @@ from prospector.agents.research_worker import (
     WorkerModelAction,
     WorkerToolCall,
 )
+from prospector.flow.cancellation import JobCancelledError
 from prospector.schemas.evidence import Assertion
 from prospector.schemas.plan import ResearchTask, TaskBudget
 from prospector.store.repositories import ResearchRepository
@@ -35,7 +36,19 @@ from prospector.tools.base import ToolContext
 class FakeRepository:
     def __init__(self) -> None:
         self.tool_events: list[dict[str, Any]] = []
+        self.round_events: list[tuple[int, int]] = []
         self.assertions: list[Assertion] = []
+
+    def record_worker_round(
+        self,
+        job_id: UUID,
+        task_id: UUID,
+        *,
+        rounds_used: int,
+        rounds_limit: int,
+    ) -> None:
+        del job_id, task_id
+        self.round_events.append((rounds_used, rounds_limit))
 
     def has_task_tool_error_event(self, task_id: UUID, tool_call_id: str) -> bool:
         del task_id
@@ -747,10 +760,38 @@ async def test_worker_executes_independent_calls_concurrently_within_round_budge
     assert tracker["max_active"] == 2
     assert feedback.tool_calls_used == 2
     assert feedback.worker_rounds_used == 2
+    assert repository.round_events == [(1, 5), (2, 5)]
     assert feedback.stop_reason == "no_public_evidence"
     assert "已使用决策轮：0" in model.runtime_messages[0]
     assert "已使用决策轮：1" in model.runtime_messages[1]
     assert "单轮并行工具调用上限" in model.runtime_messages[0]
+
+
+async def test_worker_stops_after_persisting_current_round_when_cancelled() -> None:
+    class CancellingRepository(FakeRepository):
+        cancelled = False
+
+        def record_worker_round(self, *args: Any, **kwargs: Any) -> None:
+            super().record_worker_round(*args, **kwargs)
+            self.cancelled = True
+
+    repository = CancellingRepository()
+    tracker = {"active": 0, "max_active": 0}
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [
+            ConcurrentTool("web_search", tracker),
+            ConcurrentTool("web_fetch", tracker),
+            ConcurrentTool("save_findings", tracker),
+        ],
+        ParallelWorkerModel(),
+        cancel_requested=lambda _job_id: repository.cancelled,
+    )
+
+    with pytest.raises(JobCancelledError):
+        await worker.run(uuid4(), _task(), worker_id="rw_cancel")
+    assert repository.round_events == [(1, 5)]
+    assert tracker["max_active"] == 0
 
 
 class OverParallelModel:

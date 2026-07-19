@@ -22,6 +22,7 @@ from prospector.agents.prompts.report_writer import (
     report_writer_revision_messages,
     retry_message,
 )
+from prospector.agents.usage import record_usage_value
 from prospector.deterministic.statement_patches import apply_statement_patches
 from prospector.schemas.claims import ReportVerifierFindings
 from prospector.schemas.report import ReportDraft, WriterSnapshot, validate_writer_draft
@@ -70,14 +71,19 @@ class OpenAIReportWriter:
             temperature=0.2,
             messages=messages,  # type: ignore[arg-type]
             stream=True,
+            stream_options={"include_usage": True},
             extra_body={"enable_thinking": True},
         )
         parts: list[str] = []
+        usage = None
         for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
             if chunk.choices:
                 text = getattr(chunk.choices[0].delta, "content", None)
                 if text:
                     parts.append(text)
+        record_usage_value(usage, self.model)
         return "".join(parts)
 
     def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:

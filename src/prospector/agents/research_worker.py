@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID, uuid4
@@ -29,7 +30,9 @@ from prospector.agents.prompts.research_worker import (
     worker_system_prompt,
     worker_task_message,
 )
+from prospector.agents.usage import record_response_usage
 from prospector.deterministic.gates import InformationGainCounter
+from prospector.flow.cancellation import JobCancelledError
 from prospector.obs.logging import get_logger
 from prospector.schemas.evidence import Assertion, FindingInput
 from prospector.schemas.plan import ResearchTask
@@ -380,6 +383,7 @@ class OpenAIWorkerModel:
         last_exc: EmptyLLMResponseError | None = None
         for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
             response = await self.client.chat.completions.create(**kwargs)
+            record_response_usage(response, self.model)
             try:
                 return _require_first_choice(response, label=label)
             except EmptyLLMResponseError as exc:
@@ -535,12 +539,14 @@ class ResearchWorker:
         repository: ResearchRepository,
         tools: list[WorkerTool],
         model: WorkerModel | None = None,
+        cancel_requested: Callable[[UUID], bool] | None = None,
     ) -> None:
         self.repository = repository
         self.tools = {tool.name: tool for tool in tools}
         if set(self.tools) != {"web_search", "web_fetch", "save_findings"}:
             raise ValueError("Research Worker must expose exactly the three research tools")
         self.model = model or OpenAIWorkerModel()
+        self.cancel_requested = cancel_requested or (lambda _job_id: False)
 
     async def run(self, job_id: UUID, task: ResearchTask, *, worker_id: str) -> WorkerFeedback:
         messages: list[dict[str, Any]] = [
@@ -620,7 +626,12 @@ class ResearchWorker:
                     )
                 return ToolExecution(call=call, error=exc)
 
+        async def raise_if_cancelled() -> None:
+            if await asyncio.to_thread(self.cancel_requested, job_id):
+                raise JobCancelledError(f"Job {job_id} was cancelled")
+
         while True:
+            await raise_if_cancelled()
             remaining_worker_rounds = task.budget.max_worker_rounds - worker_rounds_used
             if remaining_worker_rounds == 0:
                 stop_reason = "worker_rounds_exhausted"
@@ -642,6 +653,14 @@ class ResearchWorker:
             with tracer.start_as_current_span("llm.call", attributes=span_attributes):
                 action = await self.model.next_action(messages)
             worker_rounds_used += 1
+            await asyncio.to_thread(
+                self.repository.record_worker_round,
+                job_id,
+                task.task_id,
+                rounds_used=worker_rounds_used,
+                rounds_limit=task.budget.max_worker_rounds,
+            )
+            await raise_if_cancelled()
             messages.append(action.assistant_message)
             if action.finish is not None:
                 goal_met = action.finish.goal_met
@@ -663,6 +682,7 @@ class ResearchWorker:
                 raise ValueError(f"Worker selected unavailable tools: {unavailable}")
 
             executions = await asyncio.gather(*(execute_tool(call) for call in calls))
+            await raise_if_cancelled()
             tool_calls_used += sum(1 for execution in executions if execution.error is None)
             round_executions = list(executions)
 
@@ -734,8 +754,10 @@ class ResearchWorker:
                 break
 
         assertions = await asyncio.to_thread(self.repository.list_assertions, task.task_id)
+        await raise_if_cancelled()
         with tracer.start_as_current_span("llm.call", attributes=span_attributes):
             summary_texts = await self.model.summarize(assertions)
+        await raise_if_cancelled()
         if len(summary_texts) != len(assertions):
             raise ValueError("Worker summary must return one text per task assertion")
         summary = WorkerSummary(

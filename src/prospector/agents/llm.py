@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 from openai import AsyncOpenAI, OpenAI
 
 from prospector.config import Settings, get_settings
@@ -9,6 +10,14 @@ from prospector.config import Settings, get_settings
 
 class LlmNotConfiguredError(RuntimeError):
     """Raised when LLM base URL or API key is missing."""
+
+
+LLM_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=600.0,
+    write=120.0,
+    pool=120.0,
+)
 
 
 def require_llm_settings(settings: Settings | None = None) -> Settings:
@@ -25,7 +34,7 @@ def get_openai_client(settings: Settings | None = None) -> OpenAI:
     return OpenAI(
         base_url=cfg.prospector_llm_base_url.rstrip("/"),
         api_key=cfg.prospector_llm_api_key,
-        timeout=120.0,
+        timeout=LLM_TIMEOUT,
     )
 
 
@@ -34,7 +43,7 @@ def get_async_openai_client(settings: Settings | None = None) -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=cfg.prospector_llm_base_url.rstrip("/"),
         api_key=cfg.prospector_llm_api_key,
-        timeout=120.0,
+        timeout=LLM_TIMEOUT,
     )
 
 

@@ -2,7 +2,7 @@
 
 - **版本**：v2.0（推倒 v1.3 重来）
 - **日期**：2026-07-19
-- **状态**：设计已确认，待实施
+- **状态**：已实施
 - **关联文档**：[系统设计](./design.md)、[M1 实现设计](./implementations/m1.md)
 
 ---
@@ -29,15 +29,14 @@
 
 ```text
 prospector
+├── [--effort quick|standard|deep] [--language zh|en|...] [--plain]
+│                                  # 打开持久交互界面，循环输入研究问题
 ├── serve                        # 前台启动 API 服务端（uvicorn 单进程）
 │     [--port 7620] [--init]    # --init: 首次运行时建 checkpointer 表 + MinIO bucket
-├── ask <question>               # 核心命令：Scope → Brief 确认 → 创建 job → attach
-│     [--effort quick|standard|deep] [--language zh|en|...]
-│     [--detach]                 # Brief 冻结、job 创建后打印 job_id 即退出
-│     [--plain]                  # 禁用 TUI，逐行时间线（非 TTY 时自动降级）
 ├── job
 │   ├── list                     # 各 job 的状态 / 阶段 / 开始时间
 │   ├── status <job_id>          # 单个 job 快照：阶段、Plan 版本、任务表、用量
+│   ├── cancel <job_id>          # 取消排队或运行中的 job
 │   └── attach <job_id>          # 重新接上 TUI/时间线（SSE + Last-Event-ID 回放）
 └── report
     ├── show <job_id>            # 终端渲染报告 Markdown
@@ -51,7 +50,7 @@ prospector
 - **`job events`**：与 `attach` 是同一条事件流的两种渲染，合并为 `attach`（TTY 下 TUI，`--plain` 下逐行）。
 - **`report export --format html`**：渲染器只产 md/json，不承诺不存在的能力。
 
-`ask` 必须运行在交互终端（Brief 确认不可跳过）；非 TTY 运行 `ask` 报用法错误退出。
+根交互界面必须运行在交互终端（Brief 确认不可跳过）；非 TTY 启动时报用法错误。
 
 ---
 
@@ -73,6 +72,8 @@ POST /jobs                       # 冻结 Brief 并启动研究
   body: { brief }                # brief 由客户端提交；[e] 本地编辑后的结果也走这里
   resp: { job_id, brief_id }     # schema 校验失败返回 422
 
+POST /jobs/{id}/cancel           # queued 立即取消；running 请求协作式停止
+
 GET  /jobs                       # job list
 GET  /jobs/{id}                  # job status 快照
 GET  /jobs/{id}/events           # SSE；支持 Last-Event-ID 从 PG 事件表回放
@@ -84,15 +85,18 @@ GET  /healthz                    # serve 启动自检 + CLI 连接探测
 
 - **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/scope` 与 `/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
 - **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
+- **取消同样持久化**：queued Job 直接进入 `cancelled`；running Job 先进入 `cancelling`，在当前模型或工具调用结束后的安全边界停止，写入 `cancelled` 与唯一 `job.stopped`，服务重启不会恢复。
 - **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
 - **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`；CLI 按 `error_code` 决定退出码，不解析 message 文本。
 
 ---
 
-## 4. `ask` 交互流程
+## 4. 根命令交互流程
 
 ```text
-prospector ask "问题"
+prospector
+  → 显示服务连接状态与当前 effort/language
+  → prompt 用户输入研究问题
   → POST /scope（spinner："Scope 正在展开问题…"）
   → 若 clarify：打印澄清问题，prompt 用户回答一次，带答案重新 /scope
   → Brief 卡片（CLI 本地渲染）：
@@ -102,7 +106,8 @@ prospector ask "问题"
       [i] 指令修订  → prompt 一条修订意向 → POST /scope/revise → 新 Brief 直接 POST /jobs
       [q] 放弃      → 退出，不创建 job
   → JOB_CREATED: <job_id>（始终打印，attach 中断也能找回）
-  → --detach 则到此退出；否则进入 attach
+  → 进入 attach
+  → 完成、失败、放弃或离开 attach 后返回问题输入，继续下一次研究
 ```
 
 `c/e/i/q` 语义沿用现有 `confirm_brief` 实现，仅将 revise 从进程内调用换为 HTTP。Brief 冻结后不可修改，需求变化必须创建新任务。
@@ -111,7 +116,7 @@ prospector ask "问题"
 
 ## 5. TUI
 
-Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
+Rich Live 实现；`attach` 与根交互研究流程共用同一渲染组件。
 
 ```text
 ╭─ Prospector ─────────────────────────────────────────────────────────────────╮
@@ -136,7 +141,7 @@ Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
 │ 11:43:40  plan  Plan v2 派发 t_03                                            │
 │ 11:44:12  t_02  web_search "APAC revenue breakdown …"                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  Ctrl-C 离开（任务继续）                                  prospector · v0.1.0
+  Ctrl-C 离开（任务继续）   x 终止 Job                       prospector · v0.1.0
 ```
 
 视觉规范：
@@ -145,13 +150,17 @@ Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
 - **阶段轨道**：带连接线的站点图，当前站高亮挂 spinner；站点对应主图真实 phase（含成文与句级验证）。
 - **双栏中段**：左侧 Plan 面板用缩进列表，当前运行任务内嵌 worker rounds 迷你进度条；右侧限额面板统一 `▰▱` 条形图。窄终端（<100 列）双栏降为上下堆叠。
 - **时间线语义着色**：evidence 常规色、verifier 缺口黄、replan 品红、工具调用暗灰（视觉退后）、时间戳暗色；滚动保留最后 8 条。
-- **底部状态栏**：左退出提示、右版本号。
+- **底部状态栏**：左侧展示离开与终止快捷键、取消请求状态，右侧展示版本号。
 - 配色只用 Rich 默认 256 色安全集（cyan/green/yellow/magenta/dim），不依赖真彩终端。
 
 架构要求：**TUI 是事件流的纯投影**。CLI 内部维护由事件折叠出的 `JobView` 状态（阶段、Plan、任务表、计数），Live 面板只渲染该结构；`--plain` 模式消费同一条流逐行打印。CLI 不根据事件文本重新计算状态。
 
 **Ctrl-C 语义**：attach 期间 Ctrl-C 只断开展示，研究在服务端继续，打印
 `已离开，任务继续运行：prospector job attach <id>`。这与 prospector-local（Ctrl-C 即杀研究）是刻意的行为差异。
+
+**x 语义**：attach 期间按 `x` 请求服务端取消 Job。排队中的 Job 立即取消；运行中的 Job
+在当前模型或工具调用结束后的安全边界停止。TUI 不立即退出，而是继续消费 SSE，直到收到
+`job.stopped(status=cancelled)`。
 
 **终态**：收到 `job.stopped` 后退出 Live，打印终态摘要卡片；成功时自动下载一次报告并打印本地路径，不自动倾倒全文：
 
@@ -171,7 +180,7 @@ Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
 |----|------|
 | 0 | 成功完成；或用户主动离开 attach（任务仍在跑）；或 `q` 放弃 Brief |
 | 1 | 平台错误：服务端连不上、LLM 未配置、服务端 5xx |
-| 2 | 用法错误：参数非法、非 TTY 跑 `ask`、job_id 不存在 |
+| 2 | 用法错误：参数非法、非 TTY 启动交互界面、job_id 不存在 |
 | 3 | 研究质量失败：Verifier 重大缺口等；partial 产物已保存 |
 | 130 | Ctrl-C 在 Brief 冻结前中断（未创建 job） |
 
@@ -179,23 +188,24 @@ Rich Live 实现；`attach` 与 `ask` 共用同一渲染组件。
 
 - **服务端未启动**：所有命令先探测 `/healthz`，失败时给可执行提示（`服务端未运行，先执行: prospector serve`），不吐 connection traceback。
 - **SSE 断线**：attach 自动重连（指数退避，上限 30s），带 `Last-Event-ID` 续传；TUI 状态点变黄提示重连中。重连期间研究不受影响（事实源在 PG）。
-- **`ask` 中断恢复**：job_id 创建时立刻打印；任何后续失败（含 CLI 崩溃）都可 `job attach` 找回。
+- **Worker 轮数**：每轮模型决策完成后写入 `task.round_advanced`，TUI 直接投影 `rounds_used/rounds_limit`，不使用工具调用数推算。
+- **交互中断恢复**：job_id 创建时立刻打印；任何后续失败（含 CLI 崩溃）都可 `job attach` 找回。
 
 ---
 
 ## 7. 测试策略
 
 - **单测**：Brief 卡片状态机（c/e/i/q）、事件折叠 `JobView` 的逻辑、SSE 客户端重连/续传（mock 流）、退出码映射；TUI 渲染用 Rich console capture 做快照测试。
-- **集成**：FastAPI `TestClient` 覆盖 `/scope → /jobs → /events` 全链路（LLM mock）；一条 `live` 标记的端到端用真实 LLM 走通 `ask --plain --detach` + `attach`。
+- **集成**：FastAPI `TestClient` 覆盖 `/scope → /jobs → /events` 全链路（LLM mock）；一条 `live` 标记的端到端用真实 LLM 走通根交互流程与 `attach`。
 - 现有 `prospector-local` 测试不动，保证开发入口回归安全。
 
 ---
 
 ## 8. 实施分期
 
-各期独立可交付：
+各期均已交付：
 
-1. `api/` 模块 + `serve`：/scope、/jobs、SSE、报告代理（复用现有 store/agents/flow，纯新增）。
-2. `prospector` CLI 骨架 + `--plain` 全流程（先逐行时间线，验证契约）。
-3. Rich TUI（`JobView` 投影 + Live 面板）。
-4. `job list/status`、`report show/export`、错误打磨。
+1. [x] `api/` 模块 + `serve`：/scope、/jobs、SSE、报告代理。
+2. [x] `prospector` 持久交互 CLI + `--plain` 全流程。
+3. [x] Rich TUI（`JobView` 投影 + Live 面板）。
+4. [x] `job list/status`、`report show/export`、错误与真实 usage 闭环。

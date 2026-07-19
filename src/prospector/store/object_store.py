@@ -53,6 +53,10 @@ class ObjectStore:
         except Exception:
             self._client.create_bucket(Bucket=self.bucket)
 
+    def check_bucket(self) -> None:
+        """Raise when the configured bucket is unavailable."""
+        self._client.head_bucket(Bucket=self.bucket)
+
     def put_bytes(
         self,
         key: str,

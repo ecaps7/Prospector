@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -36,10 +36,12 @@ from prospector.agents.report_writer import (
 )
 from prospector.agents.research_verifier import OpenAIResearchVerifier, VerifierModel
 from prospector.agents.research_worker import ResearchWorker
+from prospector.agents.usage import collect_usage
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.citation_render import render_verified_report
 from prospector.deterministic.dirty_propagation import can_revise_again, dirty_statement_ids
 from prospector.deterministic.gates import dispatch_rejection, finish_rejection
+from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
 from prospector.schemas.decisions import PlannerDecision
@@ -64,6 +66,7 @@ class ResearchGraphServices:
     writer: ReportWriterModel | None = None
     report_verifier: ReportVerifierModel | None = None
     object_store: ObjectStore | None = None
+    cancel_requested: Callable[[UUID], bool] = lambda _job_id: False
 
 
 class VerifierMajorGapError(RuntimeError):
@@ -82,11 +85,16 @@ def default_research_services() -> ResearchGraphServices:
     return ResearchGraphServices(
         repository=repository,
         planner=OpenAIPlannerModel(),
-        worker=ResearchWorker(repository, tools),
+        worker=ResearchWorker(
+            repository,
+            tools,
+            cancel_requested=repository.job_cancel_requested,
+        ),
         verifier=OpenAIResearchVerifier(),
         writer=OpenAIReportWriter(),
         report_verifier=OpenAIReportVerifier(),
         object_store=object_store,
+        cancel_requested=repository.job_cancel_requested,
     )
 
 
@@ -206,13 +214,16 @@ def _planner_node(services: ResearchGraphServices):
         else:
             services.repository.begin_decision(job_id, decision_round, prompt)
             try:
-                with tracer.start_as_current_span(
-                    "llm.call",
-                    attributes={
-                        "prospector.job_id": str(job_id),
-                        "prospector.decision_round": decision_round,
-                        "prospector.agent": "planner",
-                    },
+                with (
+                    tracer.start_as_current_span(
+                        "llm.call",
+                        attributes={
+                            "prospector.job_id": str(job_id),
+                            "prospector.decision_round": decision_round,
+                            "prospector.agent": "planner",
+                        },
+                    ),
+                    collect_usage(services.repository, job_id, "planner"),
                 ):
                     model_result = services.planner.decide(prompt)
             except PlannerOutputError as exc:
@@ -412,11 +423,17 @@ async def _run_one_worker_body(
 
     await asyncio.to_thread(services.repository.start_task, job_id, task)
     try:
-        feedback = await services.worker.run(
+        with collect_usage(
+            services.repository,
             job_id,
-            task,
-            worker_id=f"rw_{worker_index:02d}",
-        )
+            "research_worker",
+            task_id=task_id,
+        ):
+            feedback = await services.worker.run(
+                job_id,
+                task,
+                worker_id=f"rw_{worker_index:02d}",
+            )
         await asyncio.to_thread(
             services.repository.finish_task,
             job_id,
@@ -438,6 +455,8 @@ async def _run_one_worker_body(
             "goal_met": feedback.goal_met,
             "finish_reason": feedback.finish_reason,
         }
+    except JobCancelledError:
+        raise
     except Exception as exc:
         assertions = await asyncio.to_thread(services.repository.list_assertions, task_id)
         tool_calls_used = await asyncio.to_thread(
@@ -562,13 +581,16 @@ def _verifier_node(services: ResearchGraphServices):
                 trigger=trigger,
                 full_prompt=full_prompt,
             )
-            with tracer.start_as_current_span(
-                "llm.call",
-                attributes={
-                    "prospector.job_id": str(job_id),
-                    "prospector.plan_version": plan_version,
-                    "prospector.agent": "research_verifier",
-                },
+            with (
+                tracer.start_as_current_span(
+                    "llm.call",
+                    attributes={
+                        "prospector.job_id": str(job_id),
+                        "prospector.plan_version": plan_version,
+                        "prospector.agent": "research_verifier",
+                    },
+                ),
+                collect_usage(services.repository, job_id, "research_verifier"),
             ):
                 model_result = services.verifier.verify(snapshot)
             if model_result.full_prompt != full_prompt:
@@ -717,17 +739,22 @@ def _writer_node(services: ResearchGraphServices):
                     full_prompt,
                     bump=True,
                 )
-                with tracer.start_as_current_span(
-                    "llm.call",
-                    attributes={
-                        "prospector.job_id": str(job_id),
-                        "prospector.agent": "report_writer",
-                        "prospector.mode": "revise",
-                    },
+                with (
+                    tracer.start_as_current_span(
+                        "llm.call",
+                        attributes={
+                            "prospector.job_id": str(job_id),
+                            "prospector.agent": "report_writer",
+                            "prospector.mode": "revise",
+                        },
+                    ),
+                    collect_usage(services.repository, job_id, "report_writer"),
                 ):
                     result = services.writer.revise(snapshot, draft, findings)
                 if result.full_prompt[: len(full_prompt)] != full_prompt:
-                    raise RuntimeError("Report Writer revise used a different prompt than persisted")
+                    raise RuntimeError(
+                        "Report Writer revise used a different prompt than persisted"
+                    )
                 services.repository.complete_report_revision(
                     report_id,
                     result.draft,
@@ -764,12 +791,15 @@ def _writer_node(services: ResearchGraphServices):
                     "report_id": str(report_id),
                     "route": "report_verifier",
                 }
-            with tracer.start_as_current_span(
-                "llm.call",
-                attributes={
-                    "prospector.job_id": str(job_id),
-                    "prospector.agent": "report_writer",
-                },
+            with (
+                tracer.start_as_current_span(
+                    "llm.call",
+                    attributes={
+                        "prospector.job_id": str(job_id),
+                        "prospector.agent": "report_writer",
+                    },
+                ),
+                collect_usage(services.repository, job_id, "report_writer"),
             ):
                 result = services.writer.write(snapshot)
             if result.full_prompt[: len(full_prompt)] != full_prompt:
@@ -896,12 +926,19 @@ def _report_verifier_node(services: ResearchGraphServices):
                         dirty_statement_ids=dirty,
                         draft=draft,
                     )
-                    with tracer.start_as_current_span(
-                        "llm.call",
-                        attributes={
-                            "prospector.job_id": str(job_id),
-                            "prospector.agent": "report_verifier",
-                        },
+                    with (
+                        tracer.start_as_current_span(
+                            "llm.call",
+                            attributes={
+                                "prospector.job_id": str(job_id),
+                                "prospector.agent": "report_verifier",
+                            },
+                        ),
+                        collect_usage(
+                            services.repository,
+                            job_id,
+                            "report_verifier",
+                        ),
                     ):
                         result = services.report_verifier.verify(rv_snapshot)
                 except (ReportVerifierOutputError, ValueError) as exc:
@@ -996,9 +1033,7 @@ def _render_node(services: ResearchGraphServices):
         draft = stored["draft"]
         assert isinstance(draft, ReportDraft)
         snapshot = services.repository.build_writer_snapshot(job_id, UUID(raw_run_id))
-        citation_map = services.repository.get_verified_citation_map(
-            report_id, revision=revision
-        )
+        citation_map = services.repository.get_verified_citation_map(report_id, revision=revision)
         latest = services.repository.get_latest_report_verifier_run(report_id)
         failed_ids: list[str] = []
         verification_status: str = "verified"
@@ -1073,19 +1108,38 @@ def _route(state: ResearchState) -> str:
     return state["route"]
 
 
+def _guard_cancelled(
+    node: Callable[[ResearchState], dict[str, Any]],
+    services: ResearchGraphServices,
+) -> Callable[[ResearchState], dict[str, Any]]:
+    def guarded(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        if services.cancel_requested(job_id):
+            raise JobCancelledError(f"Job {job_id} was cancelled")
+        result = node(state)
+        if services.cancel_requested(job_id):
+            raise JobCancelledError(f"Job {job_id} was cancelled")
+        return result
+
+    return guarded
+
+
 def build_research_graph(
     checkpointer: BaseCheckpointSaver,
     services: ResearchGraphServices | None = None,
 ) -> Any:
     runtime = services or default_research_services()
     graph = StateGraph(ResearchState)
-    graph.add_node("initialize", _initialize_node(runtime))
-    graph.add_node("planner", _planner_node(runtime))
-    graph.add_node("workers", _workers_node(runtime))
-    graph.add_node("verifier", _verifier_node(runtime))
-    graph.add_node("writer", _writer_node(runtime))
-    graph.add_node("report_verifier", _report_verifier_node(runtime))
-    graph.add_node("render", _render_node(runtime))
+    graph.add_node("initialize", _guard_cancelled(_initialize_node(runtime), runtime))
+    graph.add_node("planner", _guard_cancelled(_planner_node(runtime), runtime))
+    graph.add_node("workers", _guard_cancelled(_workers_node(runtime), runtime))
+    graph.add_node("verifier", _guard_cancelled(_verifier_node(runtime), runtime))
+    graph.add_node("writer", _guard_cancelled(_writer_node(runtime), runtime))
+    graph.add_node(
+        "report_verifier",
+        _guard_cancelled(_report_verifier_node(runtime), runtime),
+    )
+    graph.add_node("render", _guard_cancelled(_render_node(runtime), runtime))
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
     graph.add_conditional_edges(

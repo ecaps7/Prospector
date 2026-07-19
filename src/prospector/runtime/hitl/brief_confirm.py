@@ -10,6 +10,7 @@ import tempfile
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -29,10 +30,22 @@ _LABEL_WIDTH = 14  # display width of left-hand field labels
 class BriefConfirmAborted(Exception):
     """User abandoned Brief confirmation, or the terminal is non-interactive."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal["user_aborted", "tty_required", "editor_failed"] = "user_aborted",
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 def require_tty() -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        raise BriefConfirmAborted("Brief 确认需要交互终端（TTY）")
+        raise BriefConfirmAborted(
+            "Brief 确认需要交互终端（TTY）",
+            reason="tty_required",
+        )
 
 
 def _display_width(text: str) -> int:
@@ -212,7 +225,10 @@ def _default_open_editor(path: Path) -> None:
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
     result = subprocess.run([editor, str(path)], check=False)
     if result.returncode != 0:
-        raise BriefConfirmAborted(f"editor exited with code {result.returncode}")
+        raise BriefConfirmAborted(
+            f"editor exited with code {result.returncode}",
+            reason="editor_failed",
+        )
 
 
 def edit_brief(
@@ -271,7 +287,7 @@ def confirm_brief(
         if choice == "c":
             return current
         if choice == "q":
-            raise BriefConfirmAborted("用户放弃 Brief 确认")
+            raise BriefConfirmAborted("用户放弃 Brief 确认", reason="user_aborted")
         if choice == "e":
             current = do_edit(current)
             continue

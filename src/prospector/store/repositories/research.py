@@ -14,6 +14,14 @@ from sqlalchemy.engine import Connection, Engine
 
 from prospector.config import Settings, get_settings
 from prospector.schemas.brief import EffortLevel, ResearchBrief
+from prospector.schemas.claims import (
+    BridgeStatementDecision,
+    DerivedStatementDecision,
+    EvidenceStatementDecision,
+    ReportVerifierFindings,
+    ReportVerifierSnapshot,
+    ReportVerifierStatementInput,
+)
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.events import EventType
 from prospector.schemas.evidence import (
@@ -25,14 +33,6 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
-from prospector.schemas.claims import (
-    BridgeStatementDecision,
-    DerivedStatementDecision,
-    EvidenceStatementDecision,
-    ReportVerifierFindings,
-    ReportVerifierSnapshot,
-    ReportVerifierStatementInput,
-)
 from prospector.schemas.report import ReportDraft, WriterSnapshot
 from prospector.schemas.verifier import (
     AssertionDisposition,
@@ -73,7 +73,7 @@ class ResearchRepository:
         task_id: UUID | None = None,
         decision_round: int | None = None,
     ) -> int:
-        return int(
+        event_id = int(
             conn.execute(
                 text(
                     """
@@ -95,6 +95,59 @@ class ResearchRepository:
                 },
             ).scalar_one()
         )
+        if event_type == EventType.TASK_TOOL_USED:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.usage
+                      (job_id, task_id, component, model, input_tokens,
+                       output_tokens, tool_calls, created_at)
+                    VALUES
+                      (:job_id, :task_id, 'research_worker_tools', NULL, 0, 0, 1, :created_at)
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "created_at": datetime.now(UTC),
+                },
+            )
+        return event_id
+
+    def record_usage(
+        self,
+        job_id: UUID,
+        *,
+        component: str,
+        model: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        tool_calls: int = 0,
+        task_id: UUID | None = None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.usage
+                      (job_id, task_id, component, model, input_tokens,
+                       output_tokens, tool_calls, created_at)
+                    VALUES
+                      (:job_id, :task_id, :component, :model, :input_tokens,
+                       :output_tokens, :tool_calls, :created_at)
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "component": component,
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "tool_calls": tool_calls,
+                    "created_at": datetime.now(UTC),
+                },
+            )
 
     def freeze_brief(self, job_id: UUID, brief: ResearchBrief, confirm_mode: str = "c") -> UUID:
         brief_id = uuid4()
@@ -513,6 +566,35 @@ class ResearchRepository:
                     "budget": task.budget.model_dump(),
                 },
             )
+
+    def record_worker_round(
+        self,
+        job_id: UUID,
+        task_id: UUID,
+        *,
+        rounds_used: int,
+        rounds_limit: int,
+    ) -> None:
+        with self.engine.begin() as conn:
+            self._event(
+                conn,
+                job_id=job_id,
+                task_id=task_id,
+                event_type=EventType.TASK_ROUND_ADVANCED,
+                payload={
+                    "task_id": str(task_id),
+                    "rounds_used": rounds_used,
+                    "rounds_limit": rounds_limit,
+                },
+            )
+
+    def job_cancel_requested(self, job_id: UUID) -> bool:
+        with self.engine.connect() as conn:
+            status = conn.execute(
+                text("SELECT status FROM app.jobs WHERE id=:job_id"),
+                {"job_id": job_id},
+            ).scalar_one_or_none()
+        return status in {"cancelling", "cancelled"}
 
     def finish_task(
         self,
@@ -1995,15 +2077,19 @@ class ResearchRepository:
         run_id = uuid4()
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                text(
-                    """
+            existing = (
+                conn.execute(
+                    text(
+                        """
                     SELECT id, status FROM app.report_verifier_runs
                     WHERE report_id=:report_id AND revision=:revision AND round=:round
                     """
-                ),
-                {"report_id": report_id, "revision": revision, "round": round_number},
-            ).mappings().first()
+                    ),
+                    {"report_id": report_id, "revision": revision, "round": round_number},
+                )
+                .mappings()
+                .first()
+            )
             if existing is not None:
                 return UUID(str(existing["id"]))
             conn.execute(
@@ -2151,14 +2237,18 @@ class ResearchRepository:
                 },
             ).rowcount
             if updated != 1:
-                existing = conn.execute(
-                    text(
-                        """
+                existing = (
+                    conn.execute(
+                        text(
+                            """
                         SELECT status FROM app.report_verifier_runs WHERE id=:run_id
                         """
-                    ),
-                    {"run_id": run_id},
-                ).mappings().one()
+                        ),
+                        {"run_id": run_id},
+                    )
+                    .mappings()
+                    .one()
+                )
                 if existing["status"] != "completed":
                     raise RuntimeError("Report verifier run is missing or not running")
                 return
@@ -2289,10 +2379,7 @@ class ResearchRepository:
                 depth = min(
                     1
                     + max(
-                        (
-                            self._claim_depth(conn, UUID(value))
-                            for value in premise_claim_ids
-                        ),
+                        (self._claim_depth(conn, UUID(value)) for value in premise_claim_ids),
                         default=0,
                     ),
                     2,
@@ -2469,9 +2556,7 @@ class ResearchRepository:
             allowed_excerpt_ids=allowed_excerpt_ids,
         )
 
-    def get_verified_citation_map(
-        self, report_id: UUID, *, revision: int
-    ) -> dict[str, list[UUID]]:
+    def get_verified_citation_map(self, report_id: UUID, *, revision: int) -> dict[str, list[UUID]]:
         """Map statement_id → support excerpt ids from the latest completed run."""
         with self.engine.connect() as conn:
             run = (

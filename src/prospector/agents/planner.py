@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from prospector.agents.llm import get_openai_client, mid_model, strong_model
 from prospector.agents.prompts.planner import planner_brief_message, planner_system_prompt
+from prospector.agents.usage import record_response_usage, record_usage_value
 from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
@@ -172,16 +173,21 @@ class OpenAIPlannerModel:
             temperature=0.0,
             messages=messages,  # type: ignore[arg-type]
             stream=True,
+            stream_options={"include_usage": True},
             extra_body={"enable_thinking": True},
         )
         parts: list[str] = []
+        usage = None
         for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             text = getattr(delta, "content", None)
             if text:
                 parts.append(text)
+        record_usage_value(usage, self.model)
         return "".join(parts)
 
     def _repair_content(self, broken_output: str) -> str:
@@ -192,6 +198,7 @@ class OpenAIPlannerModel:
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
+        record_response_usage(response, self.repair_model)
         if not getattr(response, "choices", None):
             return ""
         return response.choices[0].message.content or ""

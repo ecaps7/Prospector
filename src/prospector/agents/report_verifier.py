@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -14,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from prospector.agents.llm import get_openai_client, mid_model
 from prospector.agents.prompts.report_verifier import report_verifier_messages
+from prospector.agents.usage import record_response_usage
 from prospector.schemas.claims import (
     BridgeStatementDecision,
     DerivedStatementDecision,
@@ -83,7 +85,11 @@ def _decode_excerpt_ids(content: str, code_map: dict[str, str]) -> str:
     return content
 
 
-def _repair_prompt(broken_output: str, kind: str, excerpt_code_map: dict[str, str] | None = None) -> str:
+def _repair_prompt(
+    broken_output: str,
+    kind: str,
+    excerpt_code_map: dict[str, str] | None = None,
+) -> str:
     if kind == "evidence":
         schema = json.dumps(EvidenceStatementDecision.model_json_schema(), ensure_ascii=False)
     elif kind == "derived":
@@ -162,6 +168,7 @@ class OpenAIReportVerifier:
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
+        record_response_usage(response, self.model)
         if not getattr(response, "choices", None):
             return ""
         return response.choices[0].message.content or ""
@@ -172,10 +179,16 @@ class OpenAIReportVerifier:
         response = self.client.chat.completions.create(
             model=self.repair_model,
             temperature=0.0,
-            messages=[{"role": "user", "content": _repair_prompt(broken_output, kind, excerpt_code_map)}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": _repair_prompt(broken_output, kind, excerpt_code_map),
+                }
+            ],
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
         )
+        record_response_usage(response, self.repair_model)
         if not getattr(response, "choices", None):
             return ""
         return response.choices[0].message.content or ""
@@ -267,7 +280,10 @@ class OpenAIReportVerifier:
             before = set(remaining)
             workers = min(self.max_workers, max(1, len(payloads)))
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [pool.submit(self._verify_one, payload) for payload in payloads]
+                futures = [
+                    pool.submit(copy_context().run, self._verify_one, payload)
+                    for payload in payloads
+                ]
                 for future in as_completed(futures):
                     try:
                         statement_id, decision, raw = future.result()

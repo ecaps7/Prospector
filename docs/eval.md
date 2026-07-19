@@ -50,7 +50,7 @@ Brief 是研究输入快照，不是覆盖合同。评测不得把 Scope 展开�
 | 检查 | 通过条件 |
 |------|----------|
 | 引用权威链 | Claim→ClaimEvidence→Excerpt→Document version 外键和哈希全部有效 |
-| Claim 成文门 | 未通过验证的事实 Claim 不进入报告 |
+| Claim 验证状态 | 通过验证的事实 Claim 具备完整权威链；未通过句只出现在 `partial` 产物中且不生成已验证引用角标 |
 | Excerpt 精确性 | Excerpt 是对应 Document 快照的确定性切片 |
 | Plan 版本 | 任务只能通过 Planner 决策或 Verifier 触发的 Replan 进入新版本 |
 | 空手结束 | 零 Excerpt 时 `finish` 被拒绝；决策轮耗尽则失败 |
