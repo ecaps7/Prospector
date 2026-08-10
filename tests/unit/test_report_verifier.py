@@ -213,7 +213,7 @@ def test_a_truncated_answer_is_retried_rather_than_sent_to_the_syntax_repairer()
     """Repair cannot recover a length stop: the syntax is fine, the content is missing."""
     completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=1)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
 
     result = verifier.verify(_bridge_snapshot())
 
@@ -226,7 +226,7 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
     """No valid decision means the verifier failed; it does not mean the prose is wrong."""
     completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=99)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
 
     with pytest.raises(ReportVerifierOutputError, match="cut off twice") as raised:
         verifier.verify(_bridge_snapshot())
@@ -241,7 +241,7 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
 def test_unterminated_json_with_stop_reason_is_retried_then_fails_clearly() -> None:
     completions = _MalformedCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
 
     with pytest.raises(ReportVerifierOutputError, match="Unterminated string") as raised:
         verifier.verify(_bridge_snapshot())
@@ -272,7 +272,7 @@ def test_complete_long_reason_is_accepted_without_retry() -> None:
         }
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
 
     result = verifier.verify(
         ReportVerifierSnapshot(
@@ -323,7 +323,7 @@ def test_report_verifier_passes_evidence_and_derived() -> None:
             )
         )
     )
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
     result = verifier.verify(
         ReportVerifierSnapshot(
             job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -384,7 +384,7 @@ def test_derived_with_failed_premises_calls_llm_and_lets_it_decide() -> None:
             )
         )
     )
-    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
     result = verifier.verify(
         ReportVerifierSnapshot(
             job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -456,7 +456,7 @@ def test_patch_assembler_rejects_unlisted_statement() -> None:
 
 
 def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
-    writer = OpenAIReportWriter(client=SimpleNamespace())  # type: ignore[arg-type]
+    writer = OpenAIReportWriter(client=SimpleNamespace(), model="fake-model")  # type: ignore[arg-type]
     lines = [
         json.dumps(
             {

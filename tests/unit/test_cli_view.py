@@ -5,6 +5,7 @@ import pty
 import termios
 import threading
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -195,6 +196,17 @@ def test_tui_cancel_shortcut_requests_cancel_once_and_reports_state() -> None:
     ]
 
 
+# 内核自己维护的 lflag 状态位，不属于 tcsetattr 能恢复的终端设置：
+# macOS 在 cbreak 读取后会置上 PENDIN，与监听器是否正确还原无关。
+_TRANSIENT_LFLAGS = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+
+
+def _settable_attributes(fd: int) -> list[Any]:
+    attributes = termios.tcgetattr(fd)
+    attributes[3] &= ~_TRANSIENT_LFLAGS
+    return attributes
+
+
 def test_terminal_key_listener_reads_one_key_and_restores_terminal() -> None:
     master_fd, slave_fd = pty.openpty()
     received: list[str] = []
@@ -205,12 +217,12 @@ def test_terminal_key_listener_reads_one_key_and_restores_terminal() -> None:
         key_read.set()
 
     try:
-        before = termios.tcgetattr(slave_fd)
+        before = _settable_attributes(slave_fd)
         with os.fdopen(slave_fd, "r") as stream:
             with _TerminalKeyListener(record, stream):
                 os.write(master_fd, b"x")
                 assert key_read.wait(timeout=1)
-            assert termios.tcgetattr(stream.fileno()) == before
+            assert _settable_attributes(stream.fileno()) == before
     finally:
         os.close(master_fd)
 
