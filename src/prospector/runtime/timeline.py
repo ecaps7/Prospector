@@ -398,7 +398,9 @@ class ResearchTimelineRenderer:
         if phase == "revising":
             return ["[成文] 存在未通过语句，Writer 正在修订"]
         if phase == "verified":
-            return ["[成文] 逐句验证通过"]
+            return ["[成文] 逐句验证全部通过"]
+        if phase == "revisions_exhausted":
+            return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"]
         if phase == "draft_rendered":
             return ["[成文] 报告渲染完成"]
         if phase == "failed":

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 StatementKind = Literal["evidence", "derived", "elaboration", "limitation"]
+
+# Longest chain of inference allowed above cited material: evidence → derived → derived.
+# Defined and enforced here because it is a property of the draft's shape; every other
+# layer reads this constant instead of re-deciding the ceiling for itself.
+MAX_PREMISE_DEPTH = 2
 
 
 class WriterSource(BaseModel):
@@ -102,6 +108,41 @@ class ReportStatement(BaseModel):
         return self
 
 
+def premise_depth(
+    statement: ReportStatement,
+    kinds: Mapping[str, StatementKind],
+    depths: Mapping[str, int],
+) -> int:
+    """How many inference steps *statement* sits above cited material.
+
+    ``kinds`` and ``depths`` cover the statements already accepted before this one.
+    Raises ValueError when a premise cannot ground a chain — elaboration and
+    limitation carry no evidence at all, so resting a derived statement on one
+    would let a reasoning chain bottom out in nothing — or when the chain runs
+    deeper than MAX_PREMISE_DEPTH. The wire assembler and the draft validator both
+    call this, so a shape rejected at the end is also rejected as it streams in.
+    """
+    groundless = sorted(
+        premise_id
+        for premise_id in statement.premise_statement_ids
+        if kinds[premise_id] not in {"evidence", "derived"}
+    )
+    if groundless:
+        raise ValueError(
+            f"{statement.statement_id} rests on premises that carry no evidence "
+            f"({', '.join(groundless)}); premises must be evidence or derived statements"
+        )
+    if statement.kind != "derived":
+        return 0
+    depth = 1 + max(depths[premise_id] for premise_id in statement.premise_statement_ids)
+    if depth > MAX_PREMISE_DEPTH:
+        raise ValueError(
+            f"{statement.statement_id} builds a reasoning chain of depth {depth}, "
+            f"deeper than the allowed {MAX_PREMISE_DEPTH}"
+        )
+    return depth
+
+
 class ReportParagraph(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -121,54 +162,64 @@ class ReportDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(..., min_length=1)
-    introduction: str = Field(..., min_length=1)
+    introduction: list[ReportParagraph] = Field(..., min_length=1)
     sections: list[ReportSection] = Field(..., min_length=1)
     conclusion: list[ReportParagraph] = Field(..., min_length=1)
 
     @model_validator(mode="after")
     def _references_are_consistent(self) -> ReportDraft:
         section_ids: set[str] = set()
-        paragraph_ids: set[str] = set()
-        prior_statement_ids: set[str] = set()
         for section in self.sections:
             if section.section_id in section_ids:
                 raise ValueError("section_id values must be unique")
             section_ids.add(section.section_id)
-        paragraphs = [
-            paragraph for section in self.sections for paragraph in section.paragraphs
-        ] + list(self.conclusion)
-        for paragraph in paragraphs:
+        paragraph_ids: set[str] = set()
+        kinds: dict[str, StatementKind] = {}
+        depths: dict[str, int] = {}
+        for paragraph in self.paragraphs():
             if paragraph.paragraph_id in paragraph_ids:
                 raise ValueError("paragraph_id values must be unique")
             paragraph_ids.add(paragraph.paragraph_id)
             for statement in paragraph.statements:
-                if statement.statement_id in prior_statement_ids:
+                if statement.statement_id in kinds:
                     raise ValueError("statement_id values must be unique")
-                unknown = set(statement.premise_statement_ids) - prior_statement_ids
+                unknown = set(statement.premise_statement_ids) - set(kinds)
                 if unknown:
                     raise ValueError(
                         "derived premises must reference earlier statements: "
                         + ", ".join(sorted(unknown))
                     )
-                prior_statement_ids.add(statement.statement_id)
+                kinds[statement.statement_id] = statement.kind
+                depths[statement.statement_id] = premise_depth(statement, kinds, depths)
         return self
 
+    def paragraphs(self) -> list[ReportParagraph]:
+        """Every paragraph in document order, introduction through conclusion."""
+        return [
+            *self.introduction,
+            *(paragraph for section in self.sections for paragraph in section.paragraphs),
+            *self.conclusion,
+        ]
+
+    def statement_groups(self) -> list[list[ReportStatement]]:
+        """Statements grouped by top-level scope: introduction, each section, conclusion.
+
+        Bridge statements are verified against the material their own scope cites,
+        so the grouping is part of the contract rather than a caller-side detail.
+        """
+        groups: list[list[ReportParagraph]] = [list(self.introduction)]
+        groups.extend(list(section.paragraphs) for section in self.sections)
+        groups.append(list(self.conclusion))
+        return [
+            [statement for paragraph in group for statement in paragraph.statements]
+            for group in groups
+        ]
+
     def statements(self) -> list[ReportStatement]:
-        section_statements = [
-            statement
-            for section in self.sections
-            for paragraph in section.paragraphs
-            for statement in paragraph.statements
-        ]
-        conclusion_statements = [
-            statement for paragraph in self.conclusion for statement in paragraph.statements
-        ]
-        return section_statements + conclusion_statements
+        return [statement for paragraph in self.paragraphs() for statement in paragraph.statements]
 
     def body_char_count(self) -> int:
-        return len(self.introduction.strip()) + sum(
-            len(statement.text.strip()) for statement in self.statements()
-        )
+        return sum(len(statement.text.strip()) for statement in self.statements())
 
 
 def validate_writer_draft(snapshot: WriterSnapshot, draft: ReportDraft) -> None:

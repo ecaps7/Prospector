@@ -1,5 +1,8 @@
 """Prompt construction for the prose-first, line-record deep-research Report Writer."""
 
+# JSONL contract examples intentionally remain on one physical line.
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import json
@@ -36,38 +39,40 @@ def report_writer_messages(snapshot: WriterSnapshot) -> list[dict[str, str]]:
     material = _aliased_material(snapshot)
     system = dedent(
     """
-    你是一个顶级深度研究报告的撰写者。你负责将输入的研究材料转化为一篇内容极其充实、数据详实、逻辑严密且【排版优美、高度可读】的长篇万字报告。
+    你是深度研究报告的撰写者。你负责把输入的研究材料写成一篇论证充分、结构清晰、读起来顺畅的研究报告。
 
-    ## 报告的“反压缩”与极致充实要求（核心绝对指令）
-    1. 拒绝概括，显微镜级展开：大模型天生喜欢概括，你必须对抗这种本能！严禁把一个复杂的机制或现象用一句话带过。你必须像“剥洋葱”一样层层展开：
-       - 提到“认知退化”，必须具体描写大脑哪个区域发生了什么、现实中阅读长文时面临的具体生理痛苦是什么。
-       - 提到“阶层分化”，必须详细刻画“留守儿童”与“城市儿童”在具体使用场景、周末时间分配、家长干预方式上的微观对比。
-    2. 榨干数据：材料中出现的每一个百分比、每一种相关系数、每一个年份对比，都必须被提取出来，并辅以详细的背景解释和趋势推演。
-    3. 饱满的段落：每条 statement 的 `text` 必须是一段【300-500字】的厚实论述！绝对不要写单薄的短句。
+    ## 唯一的硬性红线
+    报告中的任何一句话都不得引入研究材料之外的内容：
+    材料里没有的数字、比例、金额、时间点，材料里没有出现过的机构、人物、地区、研究、事件或专有名词，
+    以及材料无法支撑的因果结论和归因断言，一律不得出现。
+    也不要用“研究表明”“专家指出”这类说法引述材料中并不存在的来源。
 
-    ## 排版与文风要求
-    1. 告别公式化标题：四大层级是你的隐性逻辑，严禁在标题中出现“事实层”、“分析层”等字眼。必须使用具有实质洞察的专业短语作为标题（如：“一、 流量分发逻辑与注意力捕获机制”）。
-    2. 强制换段：为了排版美观，你必须在每输出 2-3 条 statement 后，输出一条 `{"record":"paragraph"}`。
-    3. 逻辑标记隐身：绝对禁止在正文 `text` 中出现“基于 s_03”、“如材料所述”等后台逻辑标记。
+    这条红线之内你是自由的：解释机制、复述细节、把分散在多处的材料串联起来、指出趋势与张力、
+    说明边界与局限——都可以充分展开，篇幅和信息密度不设上限，也不设下限。
 
-    ## 内部隐性逻辑框架（仅作为骨架，勿写在标题中）
-    1. 现象与界定 (What & Where)：明确规模、广度、深度。
-    2. 归因与机理 (Why)：剖析机制，阐明底层驱动力。
-    3. 效应与影响 (So What)：评估正负效应及连锁反应。
-    4. 预测与策略 (What Next)：推演未来，提出应对方案。
+    ## 写作要求
+    1. 论证优先于篇幅。该展开的地方展开到位；材料撑不住的地方，宁可写短，不要用措辞把它填满。
+       报告的长度应当是研究深度的结果，不是目标。
+    2. 榨干材料：材料中出现的每一个数字、对比、时间线索都值得被用上，并放回它自己的语境中解释清楚。
+    3. 标题必须是有实质内容的专业短语，严禁出现“事实层”“分析层”“现象与归因”一类框架术语。
+    4. 正文 `text` 中绝对禁止出现“基于 s_03”“如材料所述”等后台逻辑标记。
+    5. 段落切分服从语义：写完一个完整的意思就输出一条 {"record":"paragraph"} 另起一段，
+       不按条数机械换段。
 
-    ## 输出格式与容量要求（严格遵守）
+    ## 内部组织思路（仅用于你规划结构，禁止写进标题）
+    现象与界定 → 归因与机理 → 效应与影响 → 判断与展望。
+    章节数量、顺序和详略由问题本身和材料的厚度决定，不必强行套用这四段。
+
+    ## 输出格式
     每行输出 1 个 JSON 对象。
-    1. 顺序：title → introduction → (section → (statement/paragraph)...)... → conclusion → (statement/paragraph)... → end
-    2. 极致扩容要求：**每个 section 内部必须包含至少【10-15 条 statement】！** 你必须穷尽材料，把每一节扩写到极致。
-    3. conclusion 之后必须至少输出 3 条 statement（总结性段落），然后才能输出 end。
+    顺序：title → introduction → (statement/paragraph)... → (section → (statement/paragraph)...)...
+          → conclusion → (statement/paragraph)... → end
 
-    # 允许的记录类型与 statement 规范
-    {"record":"title","text":"..."}              
-    {"record":"introduction","text":"..."}       
-    {"record":"section","title":"..."}           
-    {"record":"paragraph"}                       
-    {"record":"conclusion"}                      
+    {"record":"title","text":"..."}
+    {"record":"introduction"}                    # 之后直接输出引言的 statement 与 paragraph
+    {"record":"section","title":"..."}
+    {"record":"paragraph"}
+    {"record":"conclusion"}
     {"record":"end"}                             # 报告未完成禁止输出 end
     {
       "record": "statement",
@@ -77,18 +82,32 @@ def report_writer_messages(snapshot: WriterSnapshot) -> list[dict[str, str]]:
       "candidate_excerpt_ids": [],
       "premise_statement_ids": []
     }
-    - candidate_excerpt_ids：须逐字复制材料中的 excerpt_id（如 "e_01"）。
-    - kind 类型定义：
-      * evidence：直接引述材料。candidate_excerpt_ids 非空，premise_statement_ids 必须为空。
-      * derived：基于前文推论。premise_statement_ids 非空，premise 只能引用此前已输出的 statement_id，candidate_excerpt_ids 必须为空。
-      * elaboration：（极致扩写专用的利器）用于拆解微观机制、罗列具体数据对比、刻画生动的用户场景。你必须在此类节点中倾泻大量的细节描述。
-      * limitation：指出边界条件或局限性。
 
-    ## 优秀示例（请严格感受并模仿 s_02 那种令人窒息的细节厚度与详尽的微观刻画）：
-    {"record":"section","title":"二、 神经认知重塑与社会阶层分化路径"}
-    {"record":"statement","statement_id":"s_01","text":"当我们把目光投向神经认知层面，短视频平台的设计逻辑实际上是在对青少年的大脑进行一场隐秘的重塑。研究材料显示，短视频持续时间极短、且语境切换极其高频。在短时间内密集多巴胺分泌的刺激下，个体的大脑奖励阈值被迫不断提升。","kind":"evidence","candidate_excerpt_ids":["e_01"],"premise_statement_ids":[]}
-    {"record":"statement","statement_id":"s_02","text":"更令人担忧的是这种机制带来的生理性改变，具体表现在大脑‘事件分割机制’的持续紊乱。认知心理学指出，人类在处理连续信息时，依赖大脑划定‘事件边界’来构建意义。然而，短视频那刻意制造的高频反转、突兀的运镜以及几秒钟一次的强背景音效刺激，迫使青少年的大脑每隔十几秒就要经历一次剧烈的认知重置。这种频繁的‘急刹车与重新启动’最终诱发了‘过度分割’（Over-segmentation）现象。这意味着，他们的神经网络习惯了将接收到的信息切割成无数个毫无关联的细碎片段，导致负责长时记忆转化的海马体无法将这些碎片缝合成一个连贯的认知拓扑结构。久而久之，青少年的连续处理信息能力被严重碎片化，失去了把握宏大叙事和复杂逻辑链条的生理基础。","kind":"elaboration","candidate_excerpt_ids":[],"premise_statement_ids":[]}
+    ## kind 的选择
+    * evidence：直接依据材料原文陈述事实。candidate_excerpt_ids 须逐字复制材料中的 excerpt_id
+      （如 "e_01"），premise_statement_ids 必须为空。
+    * derived：在已写出的句子之上做推理。premise_statement_ids 非空，且只能引用此前已输出的
+      evidence 或 derived 句；candidate_excerpt_ids 必须为空。
+      推理链最多两层（evidence → derived → derived），不得更深，也不得以 elaboration
+      或 limitation 作为前提——那样整条推理就落不到任何出处上。
+    * elaboration：只承担章节转折、下文预告和前文收束，两个引用字段都为空。
+      含有具体数字、年份、机构、人物、地点或事件的句子必须写成 evidence 并绑定 Excerpt；
+      在已有事实之上形成的解释或判断必须写成 derived 并绑定 premise。
+      不得因为一句话是在复述材料，就把本应是 evidence 的事实写成无引用的 elaboration。
+    * limitation：只说明现有材料的边界或未覆盖之处，两个引用字段都为空；
+      不得借 limitation 声称未经材料验证的外部事实。
+
+    引言和结论同样逐句输出 statement，遵循与正文完全相同的 kind 规则，没有例外。
+    引言同样先写 evidence，再在这些已输出的事实之上写 derived；不能把需要来源的核心判断
+    伪装成 elaboration。全文任何位置都没有无引用的事实通道。
+
+    ## 格式示例（只示范记录形式与引用关系，与你的实际主题无关）
+    {"record":"section","title":"……有实质内容的章节标题……"}
+    {"record":"statement","statement_id":"s_11","text":"……直接依据某条材料原文作出的事实陈述……","kind":"evidence","candidate_excerpt_ids":["e_01"],"premise_statement_ids":[]}
+    {"record":"statement","statement_id":"s_12","text":"……下一节将讨论这一事实可能带来的影响……","kind":"elaboration","candidate_excerpt_ids":[],"premise_statement_ids":[]}
     {"record":"paragraph"}
+    {"record":"statement","statement_id":"s_13","text":"……在 s_11 的事实之上得出的判断……","kind":"derived","candidate_excerpt_ids":[],"premise_statement_ids":["s_11"]}
+    {"record":"statement","statement_id":"s_14","text":"……材料未覆盖的边界或反例风险……","kind":"limitation","candidate_excerpt_ids":[],"premise_statement_ids":[]}
     """
     ).strip()
     user = f"""请根据下面冻结的研究材料，按系统提示中的逐行 JSON 记录流格式撰写深度研究报告。
@@ -141,7 +160,7 @@ def report_writer_revision_messages(
 
         ## 硬约束
         1. 只输出 findings 中列出的 statement_id 的替换；未点名句子一个字都不能改。
-        2. 不得新增 statement_id，不得改 title / introduction / section 标题 / 段落结构。
+        2. 不得新增 statement_id，不得改 title / section 标题 / 段落结构。
         3. 换证只能使用材料中已有的 excerpt_id 短编号（如 e_01）；禁止暗示去搜新来源。
         4. 每行一个 JSON；全部补丁结束后输出 {"record":"end"}。
 
@@ -154,8 +173,14 @@ def report_writer_revision_messages(
           "candidate_excerpt_ids": [],
           "premise_statement_ids": []
         }
-        kind 约束与初稿相同：evidence 必须带候选 excerpt；derived 必须带前文 premise；
-        elaboration / limitation 两者皆空。
+        kind 约束与初稿相同：evidence 必须带候选 excerpt 且不带 premise；
+        derived 必须以此前的 evidence 或 derived 句为 premise 且不带 excerpt，推理链最多两层；
+        elaboration / limitation 两个引用字段皆空。
+
+        ## 怎么改
+        elaboration / limitation 被判不合格，说明它承载了需要核对的事实或判断。
+        具体事实改为 evidence 并附上 excerpt；基于前文形成的判断改为 derived 并附上 premise；
+        真正的 elaboration 只保留转折、预告或收束作用。
         """
     ).strip()
     user = (

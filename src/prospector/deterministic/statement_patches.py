@@ -46,7 +46,7 @@ def apply_statement_patches(
 
     updated = ReportDraft(
         title=draft.title,
-        introduction=draft.introduction,
+        introduction=[map_paragraph(paragraph) for paragraph in draft.introduction],
         sections=[
             section.model_copy(
                 update={

@@ -27,6 +27,13 @@ from prospector.schemas.claims import (
 )
 
 MAX_VERIFY_WORKERS = 8
+# A single verdict is a handful of fields. Leaving the response budget at the provider
+# default let one runaway answer consume 8192 tokens and truncate the JSON.
+MAX_DECISION_TOKENS = 800
+_RETRY_INSTRUCTION = (
+    "上一次调用没有产生可读取的判定。请根据同一输入重新独立判断。"
+    "只输出要求的 JSON 对象；reason 和 inference_note 保持简洁，只说明主要依据。"
+)
 
 StatementDecision = (
     EvidenceStatementDecision | DerivedStatementDecision | BridgeStatementDecision
@@ -46,6 +53,8 @@ class ReportVerifierModel(Protocol):
 
 
 class ReportVerifierOutputError(ValueError):
+    """The verifier and this adapter disagree about the protocol — a bug, not bad luck."""
+
     def __init__(self, message: str, raw_output: object) -> None:
         super().__init__(message)
         self.raw_output = raw_output
@@ -85,30 +94,12 @@ def _decode_excerpt_ids(content: str, code_map: dict[str, str]) -> str:
     return content
 
 
-def _repair_prompt(
-    broken_output: str,
-    kind: str,
-    excerpt_code_map: dict[str, str] | None = None,
-) -> str:
-    if kind == "evidence":
-        schema = json.dumps(EvidenceStatementDecision.model_json_schema(), ensure_ascii=False)
-    elif kind == "derived":
-        schema = json.dumps(DerivedStatementDecision.model_json_schema(), ensure_ascii=False)
-    else:
-        schema = json.dumps(BridgeStatementDecision.model_json_schema(), ensure_ascii=False)
-    code_hint = ""
-    if excerpt_code_map:
-        codes = ", ".join(excerpt_code_map)
-        code_hint = f"\n注意：excerpt_id 使用短代码（{codes}），请勿修改这些代码。\n"
-    return f"""下面输出本应是符合 JSON Schema 的单个 JSON 对象。
-只修复 JSON 语法或结构，不得改写判定结论或 ID。{code_hint}
-JSON Schema：
-{schema}
-
-待修复输出：
-{broken_output}
-
-只输出修复后的 JSON。"""
+def _retry_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Retry from the original input, never from a truncated or malformed answer."""
+    return [
+        {"role": "system", "content": f"{messages[0]['content']}\n\n{_RETRY_INSTRUCTION}"},
+        messages[1],
+    ]
 
 
 def materialize_findings(
@@ -152,46 +143,27 @@ class OpenAIReportVerifier:
         self,
         client: OpenAI | None = None,
         model: str | None = None,
-        repair_model: str | None = None,
         max_workers: int = MAX_VERIFY_WORKERS,
     ) -> None:
         self.client = client or get_openai_client()
         self.model = model or mid_model()
-        self.repair_model = repair_model or mid_model()
         self.max_workers = max_workers
 
-    def _complete(self, messages: list[dict[str, str]]) -> str:
+    def _complete(self, messages: list[dict[str, str]]) -> tuple[str, str | None]:
+        """Return the content plus the provider's completion reason."""
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=0.0,
             messages=messages,  # type: ignore[arg-type]
             response_format={"type": "json_object"},
+            max_tokens=MAX_DECISION_TOKENS,
             extra_body=NO_THINKING_EXTRA_BODY,
         )
         record_response_usage(response, self.model)
         if not getattr(response, "choices", None):
-            return ""
-        return response.choices[0].message.content or ""
-
-    def _repair_content(
-        self, broken_output: str, kind: str, excerpt_code_map: dict[str, str] | None = None
-    ) -> str:
-        response = self.client.chat.completions.create(
-            model=self.repair_model,
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": _repair_prompt(broken_output, kind, excerpt_code_map),
-                }
-            ],
-            response_format={"type": "json_object"},
-            extra_body=NO_THINKING_EXTRA_BODY,
-        )
-        record_response_usage(response, self.repair_model)
-        if not getattr(response, "choices", None):
-            return ""
-        return response.choices[0].message.content or ""
+            return "", None
+        choice = response.choices[0]
+        return choice.message.content or "", getattr(choice, "finish_reason", None)
 
     def _parse(self, content: str) -> StatementDecision:
         return _DECISION_ADAPTER.validate_python(json.loads(_strip_code_fences(content)))
@@ -204,28 +176,44 @@ class OpenAIReportVerifier:
         excerpt_code_map = _encode_excerpt_ids(statement) if kind == "evidence" else {}
 
         messages = report_verifier_messages(statement)
-        content = self._complete(messages)
-        raw: object = {"role": "assistant", "content": content}
-        if not content.strip():
-            raise ReportVerifierOutputError(
-                f"Report Verifier returned empty content for {statement_id}", raw
-            )
-        # Decode short codes back to real UUIDs before Pydantic parsing
-        decoded_content = _decode_excerpt_ids(content, excerpt_code_map)
-        try:
-            decision = self._parse(decoded_content)
-        except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as first_error:
-            repaired = self._repair_content(content, kind, excerpt_code_map or None)
-            decoded_repaired = _decode_excerpt_ids(repaired, excerpt_code_map)
-            raw = {"role": "assistant", "content": content, "repaired_content": repaired}
+        attempts: list[dict[str, object]] = []
+        parse_errors: list[str] = []
+        decision: StatementDecision | None = None
+        for attempt_messages in (messages, _retry_messages(messages)):
+            content, finish_reason = self._complete(attempt_messages)
+            attempt: dict[str, object] = {
+                "content": content,
+                "finish_reason": finish_reason,
+            }
+            attempts.append(attempt)
+            if finish_reason == "length":
+                parse_errors.append("answer was cut off")
+                continue
+            if not content.strip():
+                parse_errors.append("empty content")
+                continue
+            decoded_content = _decode_excerpt_ids(content, excerpt_code_map)
             try:
-                decision = self._parse(decoded_repaired)
-            except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ReportVerifierOutputError(
+                decision = self._parse(decoded_content)
+                break
+            except (ValidationError, TypeError, ValueError) as exc:
+                attempt["parse_error"] = str(exc)
+                parse_errors.append(str(exc))
+
+        raw: object = {"attempts": attempts}
+        if decision is None:
+            if all(attempt["finish_reason"] == "length" for attempt in attempts):
+                message = (
+                    f"Report Verifier answer for {statement_id} was cut off twice; "
+                    "the model would not produce a bounded verdict"
+                )
+            else:
+                message = (
                     f"invalid Report Verifier decision for {statement_id}: "
-                    f"{first_error}; repair failed: {exc}",
-                    raw,
-                ) from exc
+                    f"first attempt failed: {parse_errors[0]}; "
+                    f"second attempt failed: {parse_errors[1]}"
+                )
+            raise ReportVerifierOutputError(message, raw)
         if decision.statement_id != statement_id:
             raise ReportVerifierOutputError(
                 f"decision statement_id mismatch: expected {statement_id}, "
@@ -280,15 +268,20 @@ class OpenAIReportVerifier:
             before = set(remaining)
             workers = min(self.max_workers, max(1, len(payloads)))
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [
-                    pool.submit(copy_context().run, self._verify_one, payload)
+                futures = {
+                    pool.submit(copy_context().run, self._verify_one, payload): str(
+                        payload["statement_id"]
+                    )
                     for payload in payloads
-                ]
+                }
                 for future in as_completed(futures):
+                    submitted_id = futures[future]
                     try:
                         statement_id, decision, raw = future.result()
                     except ReportVerifierOutputError as exc:
                         errors.append(str(exc))
+                        raw_outputs[submitted_id] = exc.raw_output
+                        remaining.pop(submitted_id, None)
                         continue
                     decisions_by_id[statement_id] = decision
                     raw_outputs[statement_id] = raw
@@ -308,12 +301,12 @@ class OpenAIReportVerifier:
             for item in snapshot.statements
             if item.statement_id in decisions_by_id
         ]
-        if len(ordered) != len(snapshot.statements):
-            missing = [
-                item.statement_id
-                for item in snapshot.statements
-                if item.statement_id not in decisions_by_id
-            ]
+        missing = [
+            item.statement_id
+            for item in snapshot.statements
+            if item.statement_id not in decisions_by_id
+        ]
+        if missing:
             raise ReportVerifierOutputError(
                 "missing decisions for: " + ", ".join(missing), raw_outputs
             )

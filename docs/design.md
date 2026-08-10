@@ -407,7 +407,7 @@ Report Verifier 对**最终正文中每个事实性陈述**（statement）的验
 - **derived**：推理型声明，支撑是**前提 claim**（经 ClaimPremise，§4.8）——推理链的中间节点可以是推导，但叶子节点必须最终落地到 Excerpt；
 - **computed**：数值计算型，支撑是不可变的 Computation 执行记录（经 ClaimComputation，§4.10/§4.11）——代码、运行环境与输入数据的 Excerpt 血缘全部落库，可复现即可验证（沿用"LLM 不做算术"原则）。
 
-正文中的衔接性、过渡性文字不产生 claim 行——但**每句都必须声明自己的性质**（事实句注明 grounding 与依据、衔接句声明无事实内容），由 Report Verifier 核对（§5.4）：没有任何句子能以"衔接"为名夹带未验证的事实，这一逐句核对接管了旧方案中 no-new-facts 审计的全部职责。
+展开与过渡性文字不产生 claim 行——因此它不能承载需要材料核对的事实或分析判断。事实复述仍是 `evidence`，必须绑定 Excerpt；在前文事实之上形成的解释仍是 `derived`，必须绑定 premise。`elaboration` 只负责转折、预告和收束，`limitation` 只说明现有材料未覆盖什么。由 Report Verifier 逐句核对性质标注，防止 Writer 通过选择无引用 kind 绕过 ClaimEvidence 或 ClaimPremise。
 
 ### 4.7 ClaimEvidence（证据支撑关系，版本化）
 
@@ -671,7 +671,9 @@ Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设
 成文流水线为：**Verified Evidence → Report Writing → Statement-level Verification →（句级修订环，有限轮）→ Deterministic Presentation Render**。核心规则：**被验证的对象就是交付给读者的文本**——Report Writer 直接写出最终正文，Report Verifier 逐句验证这份正文本身，通过后文本冻结、只做确定性渲染。正文定稿与验证之间不存在任何 LLM 改写环节，"验证过的内容被后续改写引入漂移"这类问题在结构上不可发生。成文链全程**不开搜索**：它是从证据库到报告的纯加工，不产生新证据。
 
 - **Report Writer 是单一智能体**，输入为冻结的 Brief、Plan 历史摘要、全部 usable 断言的轻量证据卡、ConflictResolution 与 minor gap。轻量证据卡包含 Assertion、所绑定的 Excerpt ID 与 Document 来源元数据，**不含 Excerpt 原文**；Assertion 是写作素材，Excerpt ID 只保留候选引用血缘，Report Verifier 后续才读取原文作正式裁决。Writer 先用 `introduction` 直接回答 Brief，再根据研究问题和材料性质自由决定 section → paragraph → statement 的叙事结构，最后用 `conclusion` 回收判断、反例、边界与行动含义。自由组织不等于取消章法：全文必须有清晰主线，各章承担明确且不同的论证作用，每段围绕一个中心展开，证据、分析与边界共同推进核心回答；系统不规定统一章节模板、段落数量或字符下限。同段 statements 渲染为自然段，每句带稳定编号（`statement_id`）与自我声明——
-  - **性质标注**：`evidence`（事实句，注明依据的断言/片段）、`derived`（分析结论，注明依据的前文句子作为前提）、`computed`（计算结论，注明 Computation，M2）、或衔接句（声明无事实内容）；
+  - **性质标注**：`evidence`（包括事实复述，注明依据的断言/片段）、`derived`（包括解释与分析，注明依据的前文句子作为前提）、`computed`（计算结论，注明 Computation，M2）、或 `elaboration` / `limitation`（不挂引用，只承担转折、预告、收束或材料边界说明）；
+  - **无引用 kind 不承载事实**：具体数字、年份、机构、人物、地点或事件必须进入 `evidence`；在已有事实之上形成的机制解释或判断必须进入 `derived`。自然语言可以充分展开，但其事实来源和推理前提不能隐去；
+  - **推理链必须落到证据**：`derived` 的前提只能是 `evidence` 或 `derived` 句（展开句不携带任何出处，不能充当论据），且链深不超过 `MAX_PREMISE_DEPTH`。该约束由 `ReportDraft` 在草稿成形时一次性判定，wire 层同步拦截，不在下游做静默截断；
   - **冲突呈现**：present_both 的冲突忠实呈现各方并带来源归属，不遗漏、静默择一或调和成材料不支持的新结论，具体位置与句序服从全文叙事；adjudicated 正常引用胜方；
   - **局限披露**：Verifier 确认的缺口写入"局限"部分，明说哪些问题未获回答。
 - **Report Verifier 逐句验证正文**，按句子声明的性质分型，三条路径最终都 bottom out 到证据：
@@ -682,14 +684,15 @@ flowchart TD
     G -- evidence --> VE[下钻 Excerpt 原文比对<br/>句子 + 候选片段黑盒验证]
     G -- derived --> VD[前提链审查<br/>① 前提句全部已验证（硬）<br/>② 推理无过度延伸（软）<br/>③ 不确定性表述与前提强度相称（软）]
     G -- computed --> VC[复现检查 + 忠实检查<br/>重跑 Computation · 比对输出值<br/>核对输入血缘与转述口径]
-    G -- 衔接句 --> VN[核对确实无事实内容<br/>夹带事实 = 验证失败]
+    G -- 展开句 --> VN[核对是否夹带事实或判断<br/>存在则 kind 标注错误]
     VE --> X[(Excerpt / Document version)]
     VD -- 递归至叶子 --> X
     VC -- input_bindings --> X
 ```
 
-  每句验证的产物**落库为 claim 记录**（§4.6，`produced_by: report_verifier`，锚定 `statement_id`）：evidence 句只看"句子 + 候选 Excerpt"（最小上下文，天然可并行分片、用中档模型），关系行写入直连 Excerpt 的版本化 ClaimEvidence，判定写 ClaimVerdict（§4.9）；derived 句关系写 ClaimPremise（§4.8），前提审查①是机器可查的硬闸门，②③是 LLM 软判断——典型要拦的是"相关性前提推出因果结论""个例推出普遍规律"这类跳跃，以及"多家媒体报道"被写成"确凿事实"这类校准失当；computed 句的复现与忠实检查（§4.11）关系写 ClaimComputation。衔接句免建 claim 行，但必须通过"无事实内容"核对——**没有任何句子存在免检通道**，这一逐句核对使旧方案的末端 no-new-facts 审计不再需要。**必须诚实承认：推理合理性验证的可靠性天然低于事实核对，这是引入推理能力的代价**，靠深度上限与人工抽检兜底。
-- **句级修订环（有限轮）**：存在未通过句时，Verifier 输出结构化 findings（statement_id、失败类型、原因）打回 Writer。修订只替换被点名的句子，换证仅限**既有 Excerpt 池**，成文期不补搜。每个新 revision 都对全部 statement 重新验证，最多允许两次修订，因此最多验证 revision 1–3。触顶后仍未通过的句子保留原文，报告标记为 `partial`，渲染器不给这些句子生成已验证引用角标；通过句仍按 ClaimEvidence 渲染引用。该硬上限保证修订环终止。
+  每句验证的产物**落库为 claim 记录**（§4.6，`produced_by: report_verifier`，锚定 `statement_id`）：evidence 句只看"句子 + 候选 Excerpt"（最小上下文，天然可并行分片、用中档模型），关系行写入直连 Excerpt 的版本化 ClaimEvidence，判定写 ClaimVerdict（§4.9）；derived 句关系写 ClaimPremise（§4.8），前提审查①是机器可查的硬闸门，②③是 LLM 软判断——典型要拦的是"相关性前提推出因果结论""个例推出普遍规律"这类跳跃，以及"多家媒体报道"被写成"确凿事实"这类校准失当；computed 句的复现与忠实检查（§4.11）关系写 ClaimComputation。展开句免建 claim 行，但必须通过"不承载事实或分析判断"核对；若含具体事实则打回改为 evidence，若含基于前文的解释或判断则打回改为 derived。它不需要接收整章 Excerpt 原文。**没有任何句子存在免检通道**——引言与结论同样逐句成句、逐句验证，不存在整段直出的自由文本字段——这一逐句核对使旧方案的末端 no-new-facts 审计不再需要。**必须诚实承认：推理合理性验证的可靠性天然低于事实核对，这是引入推理能力的代价**，靠深度上限与人工抽检兜底。
+- **句级修订环（有限轮）**：存在未通过句时，Verifier 输出结构化 findings（statement_id、失败类型、原因）打回 Writer。修订只替换被点名的句子，换证仅限**既有 Excerpt 池**，成文期不补搜。每个新 revision 都对全部 statement 重新验证，最多允许两次修订，因此最多验证 revision 1–3。触顶后仍未通过的句子保留原文，报告标记为 `partial`，渲染器不给这些句子生成已验证引用角标；通过句仍按 ClaimEvidence 渲染引用。该硬上限保证修订环终止。**"全部通过"与"轮次耗尽"是两个不同的报告状态**（`verified` / `revisions_exhausted`）：两者都会进入渲染，但只有前者表示每一句都查过；把它们合并成同一个状态会让任何基于历史记录构建的 eval 集从一开始就掺入未通过样本。
+- **验证器自身失败不等于正文失败**：只有通过输出契约的有效判定才能产生 `unsupported` 等 finding。单句判定返回残缺 JSON 或违反 schema 时，从原始输入独立重试一次；仍失败则将 Report Verifier Run、Report 与 Job 分别收口为 `failed` / `verification_failed` / `failed`，保存两次原始输出与结束原因，不驱动 Writer 修改正文。
 - **Deterministic Presentation Render**：全部句子通过或修订轮次触顶后，正文文本**冻结**。渲染器按 statement_id 解析每句的验证状态与证据链：通过的 evidence 句插引用角标并生成文末来源列表；失败句保留但不生成已验证引用角标，报告整体标记为 `partial`；derived 句渲染为"基于上述数据，我们认为……"式显式分析标记，附前提索引而非引用编号；computed 句标注计算口径，角标解析到 Computation 记录，来源列表展示其 `input_bindings` 锚定 Excerpt 的原始来源。读者一眼可分"查到的"与"推出来的"——这本身是报告质量的一部分。引用编号、角标与来源列表全由**确定性代码**渲染，LLM 完全退出引用格式化——消灭"引用格式幻觉"这一整类问题。表格与图表同属本层：经声明式 FigureSpec 绑定后确定性渲染（§5.5）。
 
 ### 5.5 表格与图表：声明式绑定与确定性渲染
@@ -903,7 +906,8 @@ flowchart TD
 | 未经 view 落证 | Worker 提交未见过的 source_ref 或任意文本 | 运行时先校验 source_ref 属于当前 Worker，再由 `save_findings` 校验 view 的 Job、Task、Document version 与 source_ids |
 | 证据污染 | 低质量来源支撑关键结论 | Verifier 结合来源元数据、Excerpt 原文与独立佐证直接判断；来源身份不替代逐条验证（§4.3） |
 | 陈述无证据支撑 | 正文事实句与 Excerpt 不符 | 正文逐句验证（§5.4），未过句打回句级修订；触顶后报告标记 `partial`，失败句不生成已验证引用角标 |
-| 衔接句夹带新事实 | 声明为"衔接"的句子实含事实性表达 | 每句必须声明性质、Report Verifier 逐句核对，无免检通道；夹带即验证失败打回 |
+| 展开句夹带事实或判断 | 声明为"展开"的句子写入数字、机构、事件或因果结论，却没有 Excerpt 或 premise | Report Verifier 逐句核对 kind；事实改为 evidence，解释或判断改为 derived，无免检通道（含引言与结论） |
+| 推理链落空 | derived 句以展开句为前提，整条链没有任何出处 | `ReportDraft` 在草稿成形时判定：premise 只能是 evidence / derived，链深不超过 2，wire 层同步拦截；不在验证输入构造处做静默截断 |
 | 修订环不收敛 | Writer 反复改写、验证反复打回 | 句级修订 + 每个 revision 全量重验 + 轮数硬上限（默认 2）；触顶后生成 `partial` 产物，环必然终止 |
 | 推理过度延伸 | derived 句结论强于前提所能支撑 | 前提链审查（硬查前提有效性 + 软查推理跳跃与校准）+ 推理链深度上限 2 + 呈现层显式标记为分析结论 |
 | 上下文截断 | 长任务中途丢失计划 | 状态外化（D7），Plan 版本先落库再执行 |

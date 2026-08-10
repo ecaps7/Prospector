@@ -247,6 +247,7 @@ class JobView:
             "verifying": 5,
             "revising": 5,
             "verified": 5,
+            "revisions_exhausted": 5,
             "draft_rendered": 6,
             "cancelling": 0,
             "cancelled": 0,

@@ -2218,7 +2218,7 @@ class ResearchRepository:
                     text(
                         """
                         SELECT id, report_id, revision, round, status, dirty_statement_ids,
-                               findings, statement_checks, created_at, completed_at
+                               findings, statement_checks, error, created_at, completed_at
                         FROM app.report_verifier_runs
                         WHERE report_id=:report_id AND revision=:revision AND round=:round
                         """
@@ -2246,7 +2246,7 @@ class ResearchRepository:
                     text(
                         """
                         SELECT id, report_id, revision, round, status, dirty_statement_ids,
-                               findings, statement_checks, created_at, completed_at
+                               findings, statement_checks, error, created_at, completed_at
                         FROM app.report_verifier_runs
                         WHERE report_id=:report_id
                         ORDER BY revision DESC, round DESC
@@ -2287,6 +2287,103 @@ class ResearchRepository:
             failed = {item.statement_id for item in model.failures}
             passed -= failed
         return passed
+
+    def fail_report_verifier_run(
+        self,
+        job_id: UUID,
+        report_id: UUID,
+        run_id: UUID,
+        *,
+        error: dict[str, Any],
+    ) -> None:
+        """Atomically close the failed verifier run, report, and parent job."""
+        now = datetime.now(UTC)
+        error_code = "report_verifier_contract_error"
+        with self.engine.begin() as conn:
+            updated_run = conn.execute(
+                text(
+                    """
+                    UPDATE app.report_verifier_runs
+                    SET status='failed', error=CAST(:error AS JSONB), completed_at=:now
+                    WHERE id=:run_id AND report_id=:report_id AND status='running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "report_id": report_id,
+                    "error": _json(error),
+                    "now": now,
+                },
+            ).rowcount
+            if updated_run != 1:
+                existing = conn.execute(
+                    text(
+                        """
+                        SELECT status FROM app.report_verifier_runs
+                        WHERE id=:run_id AND report_id=:report_id
+                        """
+                    ),
+                    {"run_id": run_id, "report_id": report_id},
+                ).scalar_one()
+                if existing != "failed":
+                    raise RuntimeError("Report verifier run is missing or not running")
+
+            updated_report = conn.execute(
+                text(
+                    """
+                    UPDATE app.reports
+                    SET status='verification_failed', updated_at=:now
+                    WHERE id=:report_id AND job_id=:job_id
+                      AND status IN ('verifying','verification_failed')
+                    """
+                ),
+                {"report_id": report_id, "job_id": job_id, "now": now},
+            ).rowcount
+            if updated_report != 1:
+                raise RuntimeError("Report is missing or not being verified")
+
+            updated_job = conn.execute(
+                text(
+                    """
+                    UPDATE app.jobs
+                    SET status='failed', outcome='failed', error_code=:error_code,
+                        updated_at=:now
+                    WHERE id=:job_id
+                    """
+                ),
+                {"job_id": job_id, "error_code": error_code, "now": now},
+            ).rowcount
+            if updated_job != 1:
+                raise RuntimeError("Research job is missing")
+
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM app.events
+                    WHERE job_id=:job_id AND event_type=:event_type
+                      AND payload->>'phase'='failed'
+                      AND payload->>'outcome'='failed'
+                      AND payload->>'error_code'=:error_code
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "event_type": EventType.JOB_PHASE_CHANGED.value,
+                    "error_code": error_code,
+                },
+            ).scalar_one_or_none()
+            if exists is None:
+                self._event(
+                    conn,
+                    job_id=job_id,
+                    event_type=EventType.JOB_PHASE_CHANGED,
+                    payload={
+                        "phase": "failed",
+                        "outcome": "failed",
+                        "error_code": error_code,
+                    },
+                )
 
     def complete_report_verifier_run(
         self,
@@ -2559,7 +2656,9 @@ class ResearchRepository:
             passed_ids = self.get_passed_statement_ids(report_id, revision=revision)
 
         statement_map = {item.statement_id: item for item in draft.statements()}
-        # Depth for derived premises: evidence leaves = 0.
+        # Depth for derived premises: evidence leaves = 0. ReportDraft already refuses
+        # chains deeper than MAX_PREMISE_DEPTH, so this reports the real depth instead
+        # of clamping a violation out of sight.
         depth_cache: dict[str, int] = {}
 
         def statement_depth(statement_id: str) -> int:
@@ -2569,11 +2668,10 @@ class ResearchRepository:
             if statement.kind != "derived":
                 depth_cache[statement_id] = 0
                 return 0
-            value = 1 + max(
+            depth_cache[statement_id] = 1 + max(
                 (statement_depth(premise) for premise in statement.premise_statement_ids),
                 default=0,
             )
-            depth_cache[statement_id] = min(value, 2)
             return depth_cache[statement_id]
 
         inputs: list[ReportVerifierStatementInput] = []
@@ -2718,7 +2816,9 @@ class ResearchRepository:
                         markdown_hash=:markdown_hash, json_ref=:json_ref,
                         json_hash=:json_hash, updated_at=:now
                     WHERE id=:report_id AND job_id=:job_id
-                      AND status IN ('writing','verifying','revising','verified')
+                      AND status IN (
+                        'writing','verifying','revising','verified','revisions_exhausted'
+                      )
                     """
                 ),
                 {

@@ -19,7 +19,20 @@ def _draft(*, fact_text: str = "事实句", analysis_text: str = "推理句") ->
     return ReportDraft.model_validate(
         {
             "title": "t",
-            "introduction": "intro",
+            "introduction": [
+                {
+                    "paragraph_id": "p_intro",
+                    "statements": [
+                        {
+                            "statement_id": "s_intro",
+                            "text": "引言",
+                            "kind": "elaboration",
+                            "candidate_excerpt_ids": [],
+                            "premise_statement_ids": [],
+                        }
+                    ],
+                }
+            ],
             "sections": [
                 {
                     "section_id": "sec_1",
@@ -74,7 +87,9 @@ def _draft(*, fact_text: str = "事实句", analysis_text: str = "推理句") ->
 
 def test_first_verify_marks_all_dirty() -> None:
     draft = _draft()
+    # s_intro is in the set: introduction sentences are verified like any other.
     assert dirty_statement_ids(draft) == {
+        "s_intro",
         "s_fact",
         "s_bridge",
         "s_analysis",
@@ -90,7 +105,7 @@ def test_changing_premise_dirties_dependents() -> None:
     dirty = dirty_statement_ids(
         after,
         changed_ids=changed,
-        previous_clean_ids={"s_fact", "s_bridge", "s_analysis", "s_conclusion"},
+        previous_clean_ids={"s_intro", "s_fact", "s_bridge", "s_analysis", "s_conclusion"},
     )
     assert dirty == {"s_fact", "s_analysis", "s_conclusion"}
     assert "s_bridge" not in dirty
@@ -101,7 +116,7 @@ def test_unchanged_clean_statements_stay_clean() -> None:
     dirty = dirty_statement_ids(
         draft,
         changed_ids=set(),
-        previous_clean_ids={"s_fact", "s_bridge", "s_analysis", "s_conclusion"},
+        previous_clean_ids={"s_intro", "s_fact", "s_bridge", "s_analysis", "s_conclusion"},
     )
     assert dirty == set()
 

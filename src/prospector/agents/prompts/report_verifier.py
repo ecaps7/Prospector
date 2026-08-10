@@ -1,5 +1,8 @@
 """Prompt construction for per-statement Report Verifier calls."""
 
+# JSONL contract examples intentionally remain on one physical line.
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import json
@@ -29,6 +32,7 @@ def report_verifier_messages(statement: dict[str, Any]) -> list[dict[str, str]]:
             - pairs 必须覆盖输入中的每一个候选 excerpt 代码，数量与顺序不限，但不得遗漏。
             - pass 至少要有一条 support；unsupported 不得保留 support；conflicted 至少一条 contradict。
             - 原文未给出句子中的关键数字/事实时判 unsupported，不要猜测。
+            - reason 保持简洁，只说明最主要的判定依据，不要逐条罗列或复述原文。
             """
         ).strip()
     elif kind == "derived":
@@ -50,13 +54,29 @@ def report_verifier_messages(statement: dict[str, Any]) -> list[dict[str, str]]:
             }
             重点拦截：把相关说成因果、把个例说成规律、把多家报道说成确凿事实（miscalibrated）、
             推理跳跃（overreach）。
+            inference_note 与 reason 保持简洁，只说明最主要的推理或判定依据，
+            不要逐条罗列或复述原文。
             """
         ).strip()
     else:
         system = dedent(
             """
-            你是研究报告的逐句审稿人。当前句子声明为衔接句（elaboration 或 limitation），
-            声称不含需核验的事实主张。请检查是否夹带了具体事实、数字、因果结论或归因断言。
+            你是研究报告的逐句审稿人。当前句子声明为衔接句
+            （elaboration 或 limitation），因此不得承载需要外部材料核对的事实。
+
+            contains_factual_claim 判 true（不合格）的情形：
+            - 出现具体数字、比例、金额、年份或时间点；
+            - 陈述具体机构、人物、地点、研究或事件做了什么；
+            - 给出因果结论、归因断言或可独立核验的事实判断；
+            - 以"研究表明""专家指出"等方式引述外部来源。
+
+            判 false（合格）的情形：
+            - 只承担章节转折、下文预告或前文收束；
+            - 只说明本报告接下来如何组织讨论；
+            - limitation 只说明现有材料未覆盖什么，不声称外部世界的真实情况。
+
+            若句子复述材料中的具体事实，它仍然是事实句，必须改为 evidence 并绑定 Excerpt；
+            若句子在前文事实之上得出判断，必须改为 derived 并绑定 premise。
 
             只输出一个 JSON 对象，字段：
             {
@@ -65,6 +85,8 @@ def report_verifier_messages(statement: dict[str, Any]) -> list[dict[str, str]]:
               "contains_factual_claim": true | false,
               "reason": "简短中文理由"
             }
+            reason 只说明最主要的判定依据。
+            判 true 时只指出最主要的一处事实表达，不要逐条罗列或复述整句。
             """
         ).strip()
 

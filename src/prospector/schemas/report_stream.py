@@ -12,8 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from prospector.schemas.report import (
     ReportDraft,
     ReportStatement,
+    StatementKind,
     WriterSnapshot,
     excerpt_alias_map,
+    premise_depth,
 )
 
 
@@ -29,10 +31,15 @@ class TitleRecord(BaseModel):
 
 
 class IntroductionRecord(BaseModel):
+    """Opens the introduction; its prose arrives as ordinary statement records.
+
+    The introduction used to be one free-text field, which meant the report's
+    opening answer was rendered without ever passing statement-level verification.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     record: Literal["introduction"]
-    text: str = Field(..., min_length=1)
 
 
 class SectionRecord(BaseModel):
@@ -126,11 +133,13 @@ class ReportStreamAssembler:
             for excerpt in card.excerpts
         }
         self._title: str | None = None
-        self._introduction: str | None = None
         self._sections: list[_SectionDraft] = []
+        self._introduction_paragraphs: list[list[ReportStatement]] = []
         self._conclusion_paragraphs: list[list[ReportStatement]] = []
+        self._in_introduction = False
         self._in_conclusion = False
-        self._statement_ids: set[str] = set()
+        self._statement_kinds: dict[str, StatementKind] = {}
+        self._statement_depths: dict[str, int] = {}
         self.done = False
         self.last_accepted = "（尚未接受任何记录，请从头开始输出）"
 
@@ -178,12 +187,13 @@ class ReportStreamAssembler:
                 raise ReportStreamError("title 已经输出过，不能重复")
             self._title = record.text
         elif isinstance(record, IntroductionRecord):
-            if self._introduction is not None:
-                raise ReportStreamError("introduction 已经输出过，不能重复")
-            self._introduction = record.text
+            if self._in_introduction or self._sections or self._in_conclusion:
+                raise ReportStreamError("introduction 只能在正文章节之前输出一次")
+            self._in_introduction = True
         elif isinstance(record, SectionRecord):
             if self._in_conclusion:
                 raise ReportStreamError("conclusion 之后不能再开启新章节")
+            self._in_introduction = False
             self._sections.append(_SectionDraft(title=record.title))
         elif isinstance(record, ParagraphRecord):
             self._open_paragraph()
@@ -199,15 +209,19 @@ class ReportStreamAssembler:
     def _current_paragraphs(self) -> list[list[ReportStatement]]:
         if self._in_conclusion:
             return self._conclusion_paragraphs
-        if not self._sections:
-            raise ReportStreamError("statement/paragraph 之前必须先输出 section 或 conclusion")
-        return self._sections[-1].paragraphs
+        if self._sections:
+            return self._sections[-1].paragraphs
+        if self._in_introduction:
+            return self._introduction_paragraphs
+        raise ReportStreamError(
+            "statement/paragraph 之前必须先输出 introduction、section 或 conclusion"
+        )
 
     def _open_paragraph(self) -> None:
         self._current_paragraphs().append([])
 
     def _apply_statement(self, record: StatementRecord) -> None:
-        if record.statement_id in self._statement_ids:
+        if record.statement_id in self._statement_kinds:
             raise ReportStreamError(f"statement_id {record.statement_id} 已经出现过，必须全文唯一")
         unknown_excerpts = set(record.candidate_excerpt_ids) - self._allowed_excerpt_aliases
         if unknown_excerpts:
@@ -216,23 +230,30 @@ class ReportStreamAssembler:
                 + ", ".join(sorted(unknown_excerpts))
                 + "。只能逐字复制材料中的 excerpt_id 短编号"
             )
-        unknown_premises = set(record.premise_statement_ids) - self._statement_ids
+        unknown_premises = set(record.premise_statement_ids) - set(self._statement_kinds)
         if unknown_premises:
             raise ReportStreamError(
                 "premise_statement_ids 只能引用之前已输出的 statement，未知："
                 + ", ".join(sorted(unknown_premises))
             )
+        # Reject an ungrounded or over-deep chain here rather than at build(), so the
+        # model can repair one statement instead of losing an entire generation.
+        try:
+            depth = premise_depth(record, self._statement_kinds, self._statement_depths)
+        except ValueError as exc:
+            raise ReportStreamError(str(exc)) from exc
         paragraphs = self._current_paragraphs()
         if not paragraphs:
             paragraphs.append([])
         paragraphs[-1].append(record.to_statement(self._alias_to_id))
-        self._statement_ids.add(record.statement_id)
+        self._statement_kinds[record.statement_id] = record.kind
+        self._statement_depths[record.statement_id] = depth
 
     def _apply_end(self) -> None:
         if self._title is None:
             raise ReportStreamError("end 之前必须输出 title")
-        if self._introduction is None:
-            raise ReportStreamError("end 之前必须输出 introduction")
+        if not any(self._introduction_paragraphs):
+            raise ReportStreamError("end 之前必须先输出 introduction 及其 statement")
         if not self._sections:
             raise ReportStreamError("end 之前至少要有一个章节")
         empty = [section.title for section in self._sections if section.statement_count() == 0]
@@ -256,6 +277,12 @@ class ReportStreamAssembler:
                 "statements": [statement.model_dump(mode="json") for statement in statements],
             }
 
+        # Paragraph ids are handed out in document order, so introduction comes first.
+        introduction = [
+            paragraph_payload(paragraph)
+            for paragraph in self._introduction_paragraphs
+            if paragraph
+        ]
         sections = [
             {
                 "section_id": f"sec_{index:03d}",
@@ -276,7 +303,7 @@ class ReportStreamAssembler:
         return ReportDraft.model_validate(
             {
                 "title": self._title,
-                "introduction": self._introduction,
+                "introduction": introduction,
                 "sections": sections,
                 "conclusion": conclusion,
             }

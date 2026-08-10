@@ -63,11 +63,28 @@ def _snapshot(effort: str = "quick") -> WriterSnapshot:
     )
 
 
+def _intro_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "paragraph_id": "p_intro",
+            "statements": [
+                {
+                    "statement_id": "s_intro",
+                    "text": "核心答案",
+                    "kind": "elaboration",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": [],
+                }
+            ],
+        }
+    ]
+
+
 def _draft() -> ReportDraft:
     return ReportDraft.model_validate(
         {
             "title": "深度研究报告",
-            "introduction": "核心答案",
+            "introduction": _intro_payload(),
             "sections": [
                 {
                     "section_id": "sec_answer",
@@ -111,7 +128,7 @@ def _draft() -> ReportDraft:
                             "text": "收束",
                             "kind": "derived",
                             "candidate_excerpt_ids": [],
-                            "premise_statement_ids": ["s_conclusion_1"],
+                            "premise_statement_ids": ["s_fact"],
                         },
                     ],
                 }
@@ -127,7 +144,14 @@ def _line(**payload: object) -> str:
 def _first_turn_lines() -> list[str]:
     return [
         _line(record="title", text="深度研究报告"),
-        _line(record="introduction", text="核心答案"),
+        _line(record="introduction"),
+        _line(record="paragraph"),
+        _line(
+            record="statement",
+            statement_id="s_intro",
+            text="核心答案",
+            kind="elaboration",
+        ),
         _line(record="section", title="核心判断"),
         _line(record="paragraph"),
         _line(
@@ -186,8 +210,12 @@ def test_writer_prompt_is_stream_contract_and_contains_no_excerpt_body() -> None
 
     assert "每行输出 1 个 JSON 对象" in prompt
     assert '"record":"conclusion"' in prompt
-    assert "candidate_excerpt_ids 非空" in prompt
-    assert "premise 只能引用此前已输出的 statement_id" in prompt
+    assert "不得引入研究材料之外的内容" in prompt
+    assert "只能引用此前已输出的" in prompt
+    assert "推理链最多两层" in prompt
+    assert "含有具体数字、年份、机构、人物、地点或事件" in prompt
+    assert "必须写成 evidence" in prompt
+    assert "可以很长、很具体" not in prompt
     assert "未完成禁止输出 end" in prompt
     assert "narrative_plan" not in prompt
     assert '"excerpt_id"' in prompt
@@ -195,6 +223,21 @@ def test_writer_prompt_is_stream_contract_and_contains_no_excerpt_body() -> None
     # Excerpt ids are shown as short aliases, never raw UUIDs the model could corrupt.
     assert '"e_01"' in messages[1]["content"]
     assert str(EXCERPT_ID) not in messages[1]["content"]
+
+
+def test_writer_prompt_mandates_no_length_targets_and_no_worked_domain() -> None:
+    """Length quotas made the model pad, and padding is where unsourced content enters.
+
+    The old prompt also carried a fully worked example from one subject area, which
+    framed every unrelated question in that example's terms.
+    """
+    prompt = "\n".join(message["content"] for message in report_writer_messages(_snapshot()))
+
+    for length_mandate in ("万字", "300-500", "10-15", "至少 3 条"):
+        assert length_mandate not in prompt
+    for leaked_domain in ("短视频", "青少年", "留守儿童", "海马体", "多巴胺"):
+        assert leaked_domain not in prompt
+    assert "长度应当是研究深度的结果" in prompt
 
 
 def test_writer_prompt_aliases_conflict_excerpt_ids() -> None:
@@ -247,7 +290,7 @@ def test_derived_statement_can_only_reference_earlier_statements() -> None:
         ReportDraft.model_validate(
             {
                 "title": "非法草稿",
-                "introduction": "先给出核心答案。",
+                "introduction": _intro_payload(),
                 "sections": [
                     {
                         "section_id": "sec_invalid",
@@ -298,6 +341,110 @@ def test_derived_statement_can_only_reference_earlier_statements() -> None:
                 ],
             }
         )
+
+
+def _draft_payload_with_section_statements(
+    statements: list[dict[str, object]],
+) -> dict[str, object]:
+    payload = _draft().model_dump(mode="json")
+    payload["sections"][0]["paragraphs"][0]["statements"] = statements
+    payload["conclusion"][0]["statements"][0]["premise_statement_ids"] = [
+        str(statements[0]["statement_id"])
+    ]
+    payload["conclusion"][0]["statements"][0]["kind"] = "derived"
+    return payload
+
+
+def test_derived_statement_cannot_rest_on_a_statement_that_carries_no_evidence() -> None:
+    """Otherwise a chain can read elaboration → derived → derived and ground out in nothing."""
+    with pytest.raises(ValidationError, match="carry no evidence"):
+        ReportDraft.model_validate(
+            _draft_payload_with_section_statements(
+                [
+                    {
+                        "statement_id": "s_bridge",
+                        "text": "一段不带出处的展开。",
+                        "kind": "elaboration",
+                        "candidate_excerpt_ids": [],
+                        "premise_statement_ids": [],
+                    },
+                    {
+                        "statement_id": "s_on_bridge",
+                        "text": "在没有出处的句子上继续推理。",
+                        "kind": "derived",
+                        "candidate_excerpt_ids": [],
+                        "premise_statement_ids": ["s_bridge"],
+                    },
+                ]
+            )
+        )
+
+
+def test_reasoning_chain_deeper_than_two_steps_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="reasoning chain of depth 3"):
+        ReportDraft.model_validate(
+            _draft_payload_with_section_statements(
+                [
+                    {
+                        "statement_id": "s_root",
+                        "text": "材料记录的事实。",
+                        "kind": "evidence",
+                        "candidate_excerpt_ids": [str(EXCERPT_ID)],
+                        "premise_statement_ids": [],
+                    },
+                    {
+                        "statement_id": "s_step_1",
+                        "text": "第一层推理。",
+                        "kind": "derived",
+                        "candidate_excerpt_ids": [],
+                        "premise_statement_ids": ["s_root"],
+                    },
+                    {
+                        "statement_id": "s_step_2",
+                        "text": "第二层推理。",
+                        "kind": "derived",
+                        "candidate_excerpt_ids": [],
+                        "premise_statement_ids": ["s_step_1"],
+                    },
+                    {
+                        "statement_id": "s_step_3",
+                        "text": "第三层推理，已经离材料太远。",
+                        "kind": "derived",
+                        "candidate_excerpt_ids": [],
+                        "premise_statement_ids": ["s_step_2"],
+                    },
+                ]
+            )
+        )
+
+
+def test_assembler_rejects_a_groundless_chain_as_it_streams_in() -> None:
+    """Rejecting at build() would throw away a whole generation over one statement."""
+    assembler = ReportStreamAssembler(_snapshot())
+    assembler.consume("\n".join(_first_turn_lines()))
+
+    outcome = assembler.consume(
+        _line(
+            record="statement",
+            statement_id="s_on_bridge",
+            text="以引言里的展开句作为推理前提。",
+            kind="derived",
+            premise_statement_ids=["s_intro"],
+        )
+    )
+
+    assert outcome.error is not None
+    assert "carry no evidence" in outcome.error
+    assert not assembler.done
+
+
+def test_introduction_statements_are_verified_like_every_other_sentence() -> None:
+    draft = _draft()
+
+    assert [statement.statement_id for statement in draft.statements()][0] == "s_intro"
+    assert draft.body_char_count() == sum(
+        len(statement.text) for statement in draft.statements()
+    )
 
 
 def test_paragraph_can_contain_one_statement() -> None:
@@ -385,15 +532,18 @@ def test_assembler_folds_multi_turn_stream_and_assigns_runtime_ids() -> None:
     draft = assembler.build()
     assert draft.title == "深度研究报告"
     assert [section.section_id for section in draft.sections] == ["sec_001"]
-    assert draft.sections[0].paragraphs[0].paragraph_id == "p_001"
-    assert draft.conclusion[0].paragraph_id == "p_002"
+    # Paragraph ids follow document order, so the introduction claims the first one.
+    assert draft.introduction[0].paragraph_id == "p_001"
+    assert draft.sections[0].paragraphs[0].paragraph_id == "p_002"
+    assert draft.conclusion[0].paragraph_id == "p_003"
     assert [statement.statement_id for statement in draft.statements()] == [
+        "s_intro",
         "s_fact",
         "s_analysis",
         "s_conclusion",
     ]
     # Wire aliases are mapped back to the real excerpt UUIDs in the draft.
-    assert draft.statements()[0].candidate_excerpt_ids == [EXCERPT_ID]
+    assert draft.statements()[1].candidate_excerpt_ids == [EXCERPT_ID]
     validate_writer_draft(_snapshot(), draft)
 
 
@@ -418,11 +568,11 @@ def test_assembler_rejects_bad_record_but_keeps_earlier_records() -> None:
     assembler = ReportStreamAssembler(_snapshot())
     lines = _first_turn_lines()
     lines.insert(
-        2,
+        1,
         _line(
             record="statement",
             statement_id="s_orphan",
-            text="没有章节就出现的语句。",
+            text="没有任何范围打开就出现的语句。",
             kind="evidence",
             candidate_excerpt_ids=["e_01"],
         ),
@@ -430,11 +580,11 @@ def test_assembler_rejects_bad_record_but_keeps_earlier_records() -> None:
 
     outcome = assembler.consume("\n".join(lines))
 
-    assert outcome.accepted == 2
+    assert outcome.accepted == 1
     assert outcome.error is not None
     assert "section" in outcome.error
 
-    recovery = assembler.consume("\n".join([*_first_turn_lines()[2:], *_second_turn_lines()]))
+    recovery = assembler.consume("\n".join([*_first_turn_lines()[1:], *_second_turn_lines()]))
     assert recovery.error is None
     assert assembler.done
 

@@ -18,6 +18,7 @@ from sqlalchemy import text
 from prospector.agents.planner import PlannerModelResult, PlannerOutputError
 from prospector.agents.prompts.report_writer import report_writer_messages
 from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.report_verifier import ReportVerifierOutputError
 from prospector.agents.report_writer import ReportWriterResult
 from prospector.agents.research_verifier import VerifierModelResult
 from prospector.agents.research_worker import (
@@ -225,7 +226,7 @@ class PassingReportVerifier:
                         statement_id=item.statement_id,
                         kind=item.kind,
                         contains_factual_claim=False,
-                        reason="测试放行：无夹带事实",
+                        reason="测试放行：仅承担衔接作用",
                     )
                 )
         findings = materialize_findings(
@@ -236,6 +237,22 @@ class PassingReportVerifier:
         )
         return ReportVerifierModelResult(
             findings=findings, decisions=decisions, raw_outputs={}
+        )
+
+
+class BrokenReportVerifier:
+    def verify(self, snapshot: Any) -> Any:
+        statement_id = snapshot.statements[0].statement_id
+        raise ReportVerifierOutputError(
+            f"invalid Report Verifier decision for {statement_id}",
+            {
+                "attempts": [
+                    {
+                        "content": '{"statement_id":"s_intro","reason":"',
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
         )
 
 
@@ -251,7 +268,20 @@ class PassingWriter:
         draft = ReportDraft.model_validate(
             {
                 "title": "并行研究测试报告",
-                "introduction": "现有材料支持一个需要结合反例理解的核心判断。",
+                "introduction": [
+                    {
+                        "paragraph_id": "p_intro",
+                        "statements": [
+                            {
+                                "statement_id": "s_intro",
+                                "text": "现有材料支持一个需要结合反例理解的核心判断。",
+                                "kind": "elaboration",
+                                "candidate_excerpt_ids": [],
+                                "premise_statement_ids": [],
+                            }
+                        ],
+                    }
+                ],
                 "sections": [
                     {
                         "section_id": "sec_answer",
@@ -295,7 +325,7 @@ class PassingWriter:
                                 "text": "最终结论不应超出这些事实与分析的范围。",
                                 "kind": "derived",
                                 "candidate_excerpt_ids": [],
-                                "premise_statement_ids": ["s_conclusion_1"],
+                                "premise_statement_ids": ["s_analysis"],
                             },
                         ],
                     }
@@ -496,6 +526,7 @@ def _services(
     planner: ScriptedPlanner,
     *,
     verifier: Any | None = None,
+    report_verifier: Any | None = None,
 ) -> tuple[ResearchGraphServices, MockExa, LedgerWorkerModel]:
     repository = ResearchRepository()
     object_store = ObjectStore()
@@ -522,7 +553,7 @@ def _services(
             worker=worker,
             verifier=verifier or PassingVerifier(),
             writer=PassingWriter(),
-            report_verifier=PassingReportVerifier(),
+            report_verifier=report_verifier or PassingReportVerifier(),
             object_store=object_store,
         ),
         exa,
@@ -882,6 +913,57 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert "你的输出不合法" in json.dumps(
             prompts[1]["full_prompt"], ensure_ascii=False, default=str
         )
+    finally:
+        with repository.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_report_verifier_contract_failure_closes_every_persisted_state() -> None:
+    dispatch = PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "dispatch": {"tasks": [_task("逐句验证失败")], "reason": "先取得一条证据"},
+        }
+    )
+    finish = PlannerDecision.model_validate(
+        {"decision": "finish", "finish": {"reason": "已有证据，进入成文"}}
+    )
+    planner = ScriptedPlanner([dispatch, finish])
+    services, _, _ = _services(planner, report_verifier=BrokenReportVerifier())
+    job_id, brief_id, repository = _create_research_job("quick")
+    try:
+        with checkpointer_session() as checkpointer:
+            graph = build_research_graph(checkpointer, services)
+            result = graph.invoke(
+                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                thread_config(str(job_id)),
+            )
+
+        assert result["outcome"] == "failed"
+        assert result["error_code"] == "report_verifier_contract_error"
+        with repository.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT j.status AS job_status, r.status AS report_status,
+                               rv.status AS run_status, rv.error
+                        FROM app.jobs j
+                        JOIN app.reports r ON r.job_id=j.id
+                        JOIN app.report_verifier_runs rv ON rv.report_id=r.id
+                        WHERE j.id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert row["job_status"] == "failed"
+        assert row["report_status"] == "verification_failed"
+        assert row["run_status"] == "failed"
+        assert "s_intro" in row["error"]["message"]
+        assert row["error"]["raw_output"]["attempts"][0]["finish_reason"] == "stop"
     finally:
         with repository.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})

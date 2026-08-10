@@ -62,7 +62,7 @@ def render_verified_report(
             ]
         )
 
-    lines.extend([f"# {draft.title}", "", "## 引言", "", draft.introduction, ""])
+    lines.extend([f"# {draft.title}", ""])
 
     def append_paragraph(paragraph: Any) -> None:
         rendered_statements: list[str] = []
@@ -75,6 +75,10 @@ def render_verified_report(
             )
             rendered_statements.append(f"{prefix}{statement.text}{citations}")
         lines.extend(["".join(rendered_statements), ""])
+
+    lines.extend(["## 引言", ""])
+    for paragraph in draft.introduction:
+        append_paragraph(paragraph)
 
     for section in draft.sections:
         lines.extend([f"## {section.title}", ""])

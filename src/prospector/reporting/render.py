@@ -66,14 +66,7 @@ def render_report_draft(
             "> **草稿预览：正文和引用尚未逐句验证。**",
             "",
         ])
-    lines.extend([
-        f"# {draft.title}",
-        "",
-        "## 引言",
-        "",
-        draft.introduction,
-        "",
-    ])
+    lines.extend([f"# {draft.title}", ""])
 
     def append_paragraph(paragraph: Any) -> None:
         rendered_statements: list[str] = []
@@ -86,6 +79,10 @@ def render_report_draft(
             )
             rendered_statements.append(f"{prefix}{statement.text}{citations}")
         lines.extend(["".join(rendered_statements), ""])
+
+    lines.extend(["## 引言", ""])
+    for paragraph in draft.introduction:
+        append_paragraph(paragraph)
 
     for section in draft.sections:
         lines.extend([f"## {section.title}", ""])

@@ -7,13 +7,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from prospector.schemas.report import MAX_PREMISE_DEPTH
+
 ClaimType = Literal["fact", "number", "causal", "opinion_attributed"]
 ClaimGrounding = Literal["evidence", "derived"]
 EvidenceRelation = Literal["support", "contradict", "partial"]
 VerdictStatus = Literal[
     "pass", "unsupported", "conflicted", "overreach", "miscalibrated"
 ]
-MAX_PREMISE_DEPTH = 2
 MAX_REPORT_REVISION_ROUNDS = 2
 
 
@@ -68,6 +69,7 @@ class BridgeStatementDecision(BaseModel):
 
     @property
     def status(self) -> VerdictStatus:
+        """A bridge may organise prose, but facts must use an auditable statement kind."""
         return "pass" if not self.contains_factual_claim else "unsupported"
 
 

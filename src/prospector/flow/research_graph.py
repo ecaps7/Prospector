@@ -53,6 +53,7 @@ from prospector.deterministic.gates import (
 from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
+from prospector.schemas.claims import ReportVerifierFindings
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.report import ReportDraft
 from prospector.schemas.verifier import VerifierDecision
@@ -934,6 +935,24 @@ def _writer_node(services: ResearchGraphServices):
     return writer
 
 
+_VERIFY_TERMINAL_STATUSES = frozenset({"verified", "revisions_exhausted"})
+
+
+def _post_verify_status(findings: ReportVerifierFindings, revision: int) -> str:
+    """Where the report goes after one verification pass.
+
+    "verified" is reserved for a report where every statement passed. A report that
+    still has failures but has used up its revision rounds also renders, but under
+    its own status: collapsing the two would make "verified" mean two different
+    confidence levels and quietly poison any eval set built from these records.
+    """
+    if findings.all_passed:
+        return "verified"
+    if not can_revise_again(revision):
+        return "revisions_exhausted"
+    return "revising"
+
+
 def _report_verifier_node(services: ResearchGraphServices):
     def report_verifier(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
@@ -952,9 +971,9 @@ def _report_verifier_node(services: ResearchGraphServices):
                 "report_json_ref": stored["json_ref"],
                 "route": "end",
             }
-        if stored["report_status"] == "verified":
+        if stored["report_status"] in _VERIFY_TERMINAL_STATUSES:
             return {
-                "phase": "verified",
+                "phase": str(stored["report_status"]),
                 "outcome": None,
                 "error_code": None,
                 "report_id": str(stored["report_id"]),
@@ -974,10 +993,11 @@ def _report_verifier_node(services: ResearchGraphServices):
             and latest["findings"] is not None
         ):
             findings = latest["findings"]
-            if findings.all_passed or not can_revise_again(revision):
-                services.repository.set_report_status(report_id, "verified")
+            resumed_status = _post_verify_status(findings, revision)
+            if resumed_status in _VERIFY_TERMINAL_STATUSES:
+                services.repository.set_report_status(report_id, resumed_status)
                 return {
-                    "phase": "verified",
+                    "phase": resumed_status,
                     "outcome": None,
                     "error_code": None,
                     "report_id": str(report_id),
@@ -1040,11 +1060,14 @@ def _report_verifier_node(services: ResearchGraphServices):
                     ):
                         result = services.report_verifier.verify(rv_snapshot)
                 except (ReportVerifierOutputError, ValueError) as exc:
-                    services.repository.set_research_outcome(
+                    raw_output = (
+                        exc.raw_output if isinstance(exc, ReportVerifierOutputError) else None
+                    )
+                    services.repository.fail_report_verifier_run(
                         job_id,
-                        outcome="failed",
-                        error_code="report_verifier_contract_error",
-                        phase="failed",
+                        report_id,
+                        run_id,
+                        error={"message": str(exc), "raw_output": raw_output},
                     )
                     log.error(
                         "report_verifier.contract_error",
@@ -1059,11 +1082,7 @@ def _report_verifier_node(services: ResearchGraphServices):
                         "route": "end",
                     }
                 findings = result.findings
-                next_status = (
-                    "verified"
-                    if findings.all_passed or not can_revise_again(revision)
-                    else "revising"
-                )
+                next_status = _post_verify_status(findings, revision)
                 log.info(
                     "report_verifier.completed",
                     revision=revision,
@@ -1085,9 +1104,10 @@ def _report_verifier_node(services: ResearchGraphServices):
                     next_status=next_status,
                 )
 
-        if findings.all_passed or not can_revise_again(revision):
+        final_status = _post_verify_status(findings, revision)
+        if final_status in _VERIFY_TERMINAL_STATUSES:
             return {
-                "phase": "verified",
+                "phase": final_status,
                 "outcome": None,
                 "error_code": None,
                 "report_id": str(report_id),

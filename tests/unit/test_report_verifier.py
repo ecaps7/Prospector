@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
-from prospector.agents.report_verifier import OpenAIReportVerifier
+from prospector.agents.report_verifier import (
+    OpenAIReportVerifier,
+    ReportVerifierOutputError,
+)
 from prospector.agents.report_writer import OpenAIReportWriter
 from prospector.deterministic.statement_patches import apply_statement_patches
 from prospector.schemas.claims import (
@@ -62,7 +65,20 @@ def _draft() -> ReportDraft:
     return ReportDraft.model_validate(
         {
             "title": "t",
-            "introduction": "intro",
+            "introduction": [
+                {
+                    "paragraph_id": "p_intro",
+                    "statements": [
+                        {
+                            "statement_id": "s_intro",
+                            "text": "引言给出核心答案。",
+                            "kind": "elaboration",
+                            "candidate_excerpt_ids": [],
+                            "premise_statement_ids": [],
+                        }
+                    ],
+                }
+            ],
             "sections": [
                 {
                     "section_id": "sec_1",
@@ -108,6 +124,14 @@ def _draft() -> ReportDraft:
     )
 
 
+def _text_of(draft: ReportDraft, statement_id: str) -> str:
+    return next(
+        statement.text
+        for statement in draft.statements()
+        if statement.statement_id == statement_id
+    )
+
+
 class _FakeCompletions:
     def __init__(self, payloads: dict[str, dict[str, object]]) -> None:
         self.payloads = payloads
@@ -116,12 +140,172 @@ class _FakeCompletions:
     def create(self, **kwargs: Any) -> SimpleNamespace:
         self.calls += 1
         messages = kwargs["messages"]
-        user = messages[-1]["content"]
+        user = messages[0]["content"] if len(messages) == 1 else messages[1]["content"]
         statement = json.loads(user.split("请审阅下面句子：\n", 1)[1])
         payload = self.payloads[statement["statement_id"]]
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))]
+        return _completion(json.dumps(payload))
+
+
+def _completion(content: str, finish_reason: str = "stop") -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content), finish_reason=finish_reason
+            )
+        ]
+    )
+
+
+class _TruncatingCompletions:
+    """Cuts the first *truncate_times* answers off mid-string, like a real length stop."""
+
+    def __init__(self, payload: dict[str, object], truncate_times: int) -> None:
+        self.payload = payload
+        self.truncate_times = truncate_times
+        self.calls = 0
+        self.message_counts: list[int] = []
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls += 1
+        self.message_counts.append(len(kwargs["messages"]))
+        if self.calls <= self.truncate_times:
+            full = json.dumps(self.payload, ensure_ascii=False)
+            return _completion(full[: len(full) // 2], finish_reason="length")
+        return _completion(json.dumps(self.payload, ensure_ascii=False))
+
+
+class _MalformedCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls += 1
+        return _completion(
+            '{"statement_id":"s_intro","kind":"elaboration",'
+            '"contains_factual_claim":false,"reason":"',
+            finish_reason="stop",
         )
+
+
+def _bridge_snapshot(statement_id: str = "s_intro") -> ReportVerifierSnapshot:
+    return ReportVerifierSnapshot(
+        job_id=UUID("20000000-0000-0000-0000-000000000001"),
+        report_id=UUID("40000000-0000-0000-0000-000000000001"),
+        revision=1,
+        round=1,
+        brief_question="q",
+        statements=[
+            ReportVerifierStatementInput(
+                statement_id=statement_id,
+                text="接下来讨论这一变化的影响。",
+                kind="elaboration",
+            )
+        ],
+        allowed_excerpt_ids=[EXCERPT_ID],
+    )
+
+
+_BRIDGE_PASS: dict[str, object] = {
+    "statement_id": "s_intro",
+    "kind": "elaboration",
+    "contains_factual_claim": False,
+    "reason": "仅为衔接",
+}
+
+
+def test_a_truncated_answer_is_retried_rather_than_sent_to_the_syntax_repairer() -> None:
+    """Repair cannot recover a length stop: the syntax is fine, the content is missing."""
+    completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=1)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+
+    result = verifier.verify(_bridge_snapshot())
+
+    assert result.findings.all_passed
+    assert completions.calls == 2
+    assert completions.message_counts == [2, 2]
+
+
+def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() -> None:
+    """No valid decision means the verifier failed; it does not mean the prose is wrong."""
+    completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=99)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(ReportVerifierOutputError, match="cut off twice") as raised:
+        verifier.verify(_bridge_snapshot())
+
+    assert completions.calls == 2
+    raw_output = cast(
+        dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output
+    )
+    attempts = raw_output["s_intro"]["attempts"]
+    assert attempts[0]["finish_reason"] == "length"
+    assert attempts[1]["finish_reason"] == "length"
+
+
+def test_unterminated_json_with_stop_reason_is_retried_then_fails_clearly() -> None:
+    completions = _MalformedCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(ReportVerifierOutputError, match="Unterminated string") as raised:
+        verifier.verify(_bridge_snapshot())
+
+    raw_output = cast(
+        dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output
+    )
+    attempts = raw_output["s_intro"]["attempts"]
+    assert completions.calls == 2
+    assert attempts[0]["finish_reason"] == "stop"
+    assert "Unterminated string" in attempts[0]["parse_error"]
+
+
+def test_complete_long_reason_is_accepted_without_retry() -> None:
+    reason = (
+        "原文明确记载宁德时代2027年小批量生产、2030年规模化量产，"
+        "比亚迪2027年Q1小批量装车、2030年大规模商业化及液固同价，"
+        "丰田推迟至2028年，与句子完全一致。"
+    )
+    completions = _FakeCompletions(
+        {
+            "s_fact": {
+                "statement_id": "s_fact",
+                "kind": "evidence",
+                "claim_type": "fact",
+                "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+                "status": "pass",
+                "reason": reason,
+            }
+        }
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client)  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="企业量产时间表与原文一致。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "候选证据原文。"}
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert result.decisions[0].reason == reason
+    assert completions.calls == 1
 
 
 def test_report_verifier_passes_evidence_and_derived() -> None:
@@ -259,8 +443,9 @@ def test_apply_statement_patches_only_replaces_named_sentences() -> None:
         ],
         allowed_statement_ids={"s_fact"},
     )
-    assert patched.statements()[0].text == "修订后的事实。"
-    assert patched.statements()[1].text == draft.statements()[1].text
+    assert _text_of(patched, "s_fact") == "修订后的事实。"
+    assert _text_of(patched, "s_analysis") == _text_of(draft, "s_analysis")
+    assert _text_of(patched, "s_intro") == _text_of(draft, "s_intro")
 
 
 def test_patch_assembler_rejects_unlisted_statement() -> None:
@@ -315,4 +500,4 @@ def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
         ],
     )
     result = writer.revise(_snapshot(), _draft(), findings)
-    assert result.draft.statements()[0].text == "补丁事实"
+    assert _text_of(result.draft, "s_fact") == "补丁事实"
