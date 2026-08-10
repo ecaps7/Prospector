@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -202,6 +203,12 @@ class _FakeStreamClient:
         text = self.turns.pop(0)
         chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
         return iter([chunk])
+
+    def last_message(self, call_index: int) -> dict[str, str]:
+        """Last chat message of a recorded call, typed for the assertions below."""
+        messages = self.calls[call_index]["messages"]
+        assert isinstance(messages, list)
+        return cast(dict[str, str], messages[-1])
 
 
 def test_writer_prompt_is_stream_contract_and_contains_no_excerpt_body() -> None:
@@ -637,8 +644,7 @@ def test_writer_loop_continues_across_turns_and_disables_json_mode() -> None:
 
     assert len(client.calls) == 2
     assert all("response_format" not in call for call in client.calls)
-    second_messages = client.calls[1]["messages"]
-    assert second_messages[-1]["content"] == continuation_message("statement s_fact")
+    assert client.last_message(1)["content"] == continuation_message("statement s_fact")
     assert result.draft.title == "深度研究报告"
     assert result.raw_output == [
         "\n".join(_first_turn_lines()),
@@ -665,7 +671,7 @@ def test_writer_loop_feeds_validation_error_back_for_localized_retry() -> None:
     result = writer.write(_snapshot())
 
     assert len(client.calls) == 2
-    feedback = client.calls[1]["messages"][-1]["content"]
+    feedback = client.last_message(1)["content"]
     assert feedback.startswith("你最近一轮输出存在问题：")
     assert "statement s_fact" in feedback
     assert retry_message("x", "y").startswith("你最近一轮输出存在问题：x")

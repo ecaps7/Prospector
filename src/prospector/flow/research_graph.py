@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
@@ -1226,10 +1226,17 @@ def _route(state: ResearchState) -> str:
     return state["route"]
 
 
+class _GraphNode(Protocol):
+    """A graph node. LangGraph's node protocol requires the parameter be named ``state``,
+    which a bare ``Callable[[ResearchState], ...]`` does not preserve."""
+
+    def __call__(self, state: ResearchState) -> dict[str, Any]: ...
+
+
 def _guard_cancelled(
-    node: Callable[[ResearchState], dict[str, Any]],
+    node: _GraphNode,
     services: ResearchGraphServices,
-) -> Callable[[ResearchState], dict[str, Any]]:
+) -> _GraphNode:
     def guarded(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
         if services.cancel_requested(job_id):

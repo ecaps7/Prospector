@@ -17,7 +17,11 @@ class PatchStatementRecord(ReportStatement):
     """Wire patch: candidate_excerpt_ids carries short aliases, not UUIDs."""
 
     record: Literal["patch_statement"] = "patch_statement"
-    candidate_excerpt_ids: list[str] = Field(default_factory=list)
+    # Deliberate narrowing of the base field: on the wire this holds aliases, and
+    # to_statement() converts back to UUIDs.
+    candidate_excerpt_ids: list[str] = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
+        default_factory=list
+    )
 
     def to_statement(self, alias_to_id: dict[str, UUID]) -> ReportStatement:
         payload = self.model_dump(exclude={"record"})

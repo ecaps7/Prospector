@@ -189,6 +189,7 @@ class PassingReportVerifier:
         from prospector.schemas.claims import (
             BridgeStatementDecision,
             DerivedStatementDecision,
+            EvidencePairDecision,
             EvidenceStatementDecision,
         )
 
@@ -201,10 +202,10 @@ class PassingReportVerifier:
                         statement_id=item.statement_id,
                         claim_type="fact",
                         pairs=[
-                            {
-                                "excerpt_id": excerpt["excerpt_id"],
-                                "relation": "support",
-                            }
+                            EvidencePairDecision(
+                                excerpt_id=excerpt["excerpt_id"],
+                                relation="support",
+                            )
                             for excerpt in item.candidate_excerpts
                         ],
                         status="pass",

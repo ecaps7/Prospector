@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from openai import AsyncOpenAI
+from openai.types.shared_params import ResponseFormatJSONObject
 from opentelemetry import trace
 from pydantic import (
     BaseModel,
@@ -184,7 +185,7 @@ class WorkerAction(BaseModel):
 
 # DeepSeek 等供应商只支持 response_format=text/json_object，不支持 json_schema；
 # 动作结构改由系统提示词内嵌 WorkerAction JSON Schema 约束。
-WORKER_ACTION_RESPONSE_FORMAT = {"type": "json_object"}
+WORKER_ACTION_RESPONSE_FORMAT: ResponseFormatJSONObject = {"type": "json_object"}
 
 WORKER_ACTION_SCHEMA = json.dumps(WorkerAction.model_json_schema(), ensure_ascii=False)
 

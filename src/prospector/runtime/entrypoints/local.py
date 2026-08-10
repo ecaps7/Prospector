@@ -18,7 +18,7 @@ from prospector.flow.research_graph import (
     build_research_graph,
     thread_config,
 )
-from prospector.flow.state import initial_research_state
+from prospector.flow.state import ResearchState, initial_research_state
 from prospector.obs.logging import get_logger, setup_logging
 from prospector.obs.tracing import setup_tracing
 from prospector.runtime.hitl.brief_confirm import (
@@ -116,7 +116,7 @@ def _run_research_graph(
     job_id: UUID,
     *,
     effort: EffortLevel,
-    initial_state: dict[str, object] | None,
+    initial_state: ResearchState | None,
 ) -> None:
     """Follow the timeline while the graph runs, then print the report.
 
