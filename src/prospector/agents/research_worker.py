@@ -16,12 +16,14 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
 
-from prospector.agents.llm import get_async_openai_client, mid_model
+from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_async_openai_client, mid_model
 from prospector.agents.prompts.research_worker import (
+    worker_constraints_message,
     worker_coverage_message,
     worker_coverage_prompt,
     worker_runtime_message,
@@ -57,7 +59,16 @@ SUMMARY_TOOL_NAME = "submit_worker_summary"
 # Rounds cap depth; this caps per-round breadth so a single round cannot fan out
 # unboundedly (each result still lengthens the thread and bills the Exa API).
 MAX_PARALLEL_TOOL_CALLS_PER_ROUND = 8
+# Auto-fetch depth follows the stage's job. scout screens a bounded candidate set, where
+# titles and snippets usually settle existence and naming, so pulling several full bodies
+# per query buys little and costs a lot of thread; deep_dive is where the evidence chain
+# is actually built and full text earns its place.
+AUTO_FETCH_TOP_N_BY_STAGE: dict[str, int] = {"scout": 1, "deep_dive": 3, "verify": 2}
 AUTO_FETCH_TOP_N = 2
+# Fetched page bodies stay in the thread only while the Worker is still working on them.
+# Once they are older than this, the Evidence Store is the record; leaving stale copies in
+# context both costs tokens and competes with the gap the Worker is currently closing.
+KEEP_FULL_FETCH_ROUNDS = 2
 LLM_EMPTY_RESPONSE_RETRIES = 2
 LLM_RETRY_DELAYS = (1.0, 2.0)
 log = get_logger("prospector.research_worker")
@@ -171,15 +182,11 @@ class WorkerAction(BaseModel):
         return self
 
 
-WORKER_ACTION_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "worker_action",
-        "description": "Prospector Worker 下一决策轮的唯一动作单",
-        "schema": WorkerAction.model_json_schema(),
-        "strict": True,
-    },
-}
+# DeepSeek 等供应商只支持 response_format=text/json_object，不支持 json_schema；
+# 动作结构改由系统提示词内嵌 WorkerAction JSON Schema 约束。
+WORKER_ACTION_RESPONSE_FORMAT = {"type": "json_object"}
+
+WORKER_ACTION_SCHEMA = json.dumps(WorkerAction.model_json_schema(), ensure_ascii=False)
 
 
 class SummaryItem(BaseModel):
@@ -318,6 +325,29 @@ def _extract_top_urls(
     return urls
 
 
+def _pruned_results_summary(round_number: int, executions: list[ToolExecution]) -> str:
+    """One-line replacement for a round whose fetched bodies have left the thread.
+
+    Keeps what the Worker needs to avoid repeating itself — which queries ran, which
+    sources came back — and drops the source refs along with the text, since an
+    assertion must never be saved from material the Worker can no longer read.
+    """
+    lines = [f"第 {round_number} 轮结果（原文已移出上下文；已保存的内容见证据清单）："]
+    for execution in executions:
+        if execution.call.tool_name == "web_search":
+            query = str(execution.call.arguments.get("query") or "").strip()
+            if query:
+                lines.append(f"- 搜索：{query}")
+        elif execution.call.tool_name == "web_fetch":
+            url = str(execution.call.arguments.get("url") or "").strip()
+            if execution.error is not None:
+                lines.append(f"- 抓取失败：{url}")
+            elif url:
+                lines.append(f"- 已抓取：{url}")
+    lines.append("如需再次引用这些原文，必须重新检索抓取，不得凭印象落证。")
+    return "\n".join(lines)
+
+
 def _runtime_results_message(
     executions: list[ToolExecution],
     source_registry: EvidenceSourceRegistry,
@@ -400,18 +430,7 @@ class OpenAIWorkerModel:
         raise last_exc  # type: ignore[misc]
 
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
-        choice = await self._create_with_retry(
-            label="worker.next_action",
-            model=self.model,
-            temperature=0.0,
-            messages=messages,  # type: ignore[arg-type]
-            response_format=WORKER_ACTION_RESPONSE_FORMAT,
-            extra_body={"enable_thinking": False},
-        )
-        content = choice.message.content
-        if not content:
-            raise ValueError("Worker returned an empty action")
-        action = WorkerAction.model_validate_json(content)
+        action, content = await self._request_valid_action(messages)
         assistant_message = {"role": "assistant", "content": content}
         if action.action == "finish":
             return WorkerModelAction(
@@ -441,6 +460,45 @@ class OpenAIWorkerModel:
             tool_calls=calls,
         )
 
+    async def _request_valid_action(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[WorkerAction, str]:
+        # json_object 模式不由 API 强制 schema（DeepSeek 不支持 json_schema），
+        # 校验失败时把错误反馈给模型修复一次，与 Planner 的修复惯例一致。
+        repair_messages = messages
+        for attempt in range(2):
+            choice = await self._create_with_retry(
+                label="worker.next_action",
+                model=self.model,
+                temperature=0.0,
+                messages=repair_messages,  # type: ignore[arg-type]
+                response_format=WORKER_ACTION_RESPONSE_FORMAT,
+                extra_body=NO_THINKING_EXTRA_BODY,
+            )
+            content = choice.message.content
+            if not content:
+                raise ValueError("Worker returned an empty action")
+            try:
+                return WorkerAction.model_validate_json(content), content
+            except ValidationError as exc:
+                if attempt == 1:
+                    raise
+                log.warning("worker.action_validation_error", error=str(exc).splitlines()[:4])
+                repair_messages = [
+                    *messages,
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一轮动作单未通过 JSON Schema 校验，错误如下：\n"
+                            f"{exc}\n"
+                            "请只输出修正后、符合系统提示词中 JSON Schema 的单个 JSON 动作单，"
+                            "不要任何其他文本。"
+                        ),
+                    },
+                ]
+        raise AssertionError("unreachable")
+
     async def assess_coverage(
         self,
         assertions: list[Assertion],
@@ -463,7 +521,7 @@ class OpenAIWorkerModel:
                 }
             ],
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         content = choice.message.content
         if not content:
@@ -514,7 +572,7 @@ class OpenAIWorkerModel:
                 "function": {"name": SUMMARY_TOOL_NAME},
             },
             parallel_tool_calls=False,
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         calls = choice.message.tool_calls or []
         call = calls[0] if len(calls) == 1 else None
@@ -550,11 +608,18 @@ class ResearchWorker:
 
     async def run(self, job_id: UUID, task: ResearchTask, *, worker_id: str) -> WorkerFeedback:
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": worker_system_prompt()},
+            {"role": "system", "content": worker_system_prompt(action_schema=WORKER_ACTION_SCHEMA)},
             {"role": "user", "content": worker_task_message(task)},
         ]
+        constraints_message = worker_constraints_message(
+            await asyncio.to_thread(self.repository.get_job_user_constraints, job_id)
+        )
+        if constraints_message is not None:
+            messages.append({"role": "user", "content": constraints_message})
         information_gain = InformationGainCounter()
         source_registry = EvidenceSourceRegistry()
+        # (message index, replacement text) for each round's results message, oldest first.
+        prunable_results: list[tuple[int, str]] = []
         tool_calls_used = 0
         worker_rounds_used = 0
         goal_met = False
@@ -693,7 +758,7 @@ class ResearchWorker:
             if search_executions:
                 urls_to_fetch = _extract_top_urls(
                     search_executions,
-                    top_n=AUTO_FETCH_TOP_N,
+                    top_n=AUTO_FETCH_TOP_N_BY_STAGE.get(task.research_stage, AUTO_FETCH_TOP_N),
                 )
                 if urls_to_fetch:
                     fetch_calls = [
@@ -716,6 +781,15 @@ class ResearchWorker:
                     "content": _runtime_results_message(round_executions, source_registry),
                 }
             )
+            prunable_results.append(
+                (
+                    len(messages) - 1,
+                    _pruned_results_summary(worker_rounds_used, round_executions),
+                )
+            )
+            if len(prunable_results) > KEEP_FULL_FETCH_ROUNDS:
+                index, summary = prunable_results[-KEEP_FULL_FETCH_ROUNDS - 1]
+                messages[index]["content"] = summary
 
             save_inserted = sum(
                 int((execution.result or {}).get("inserted", 0))
@@ -745,7 +819,7 @@ class ResearchWorker:
                 messages.append(
                     {
                         "role": "user",
-                        "content": worker_coverage_message(coverage.reason),
+                        "content": worker_coverage_message(coverage.reason, current_assertions),
                     }
                 )
             if saved_in_batch and information_gain.record_save(save_inserted):

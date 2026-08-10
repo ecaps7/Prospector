@@ -46,9 +46,16 @@ CLARIFY_INSTRUCTIONS = """\
 - 若需要澄清，need_clarification 为 true，question 写给用户看的澄清问题。
 - 若不需要澄清，need_clarification 为 false，question 必须为空字符串。
 
+无论是否需要澄清，都必须填写 assessment，用一两句话说明你的判断依据：
+问题里哪部分已经足够明确，还有哪些缺口是可以通过展开研究方向来弥补、不必打扰用户的。
+这句话会交给下一步撰写 Brief 的环节，避免它把你刚做过的判断重做一遍。
+例：「研究对象是某新能源车企的海外扩张，很明确；用户没有说明是从投资角度还是
+供应链角度关心这件事，这个缺口应该由 Brief 展开多个方向覆盖，不必追问。」
+
 只输出一个 JSON 对象，键为：
 "need_clarification" (boolean),
-"question" (string)。
+"question" (string),
+"assessment" (string)。
 不要 markdown 围栏，不要其它说明。
 """
 
@@ -65,32 +72,62 @@ Research Brief 不是合同，也不是研究计划。你负责把问题打开�
 <question>
 {question}
 </question>
-{clarification_context}
+{assessment_context}{clarification_context}
 {revision_context}
 
 写作要求：
+0. 两类信息必须分开输出，不能混写
+
+- **用户自己说过的限制** → 逐项填入 user_constraints 对应字段。
+  用贴近用户原话的短句，不要改写、不要美化、不要扩展成更专业的说法。
+  用户没提到的字段一律留空——**留空是常态，宁可少填也不要猜**。
+  判断标准只有一条：这句话如果用户没说过，就不能出现在这里。
+  例：用户说"别给我看那些自媒体的东西"，就写"不要自媒体内容"，
+  不要写成"来源应限定为机构报告与学术文献"——那是你的扩展，会悄悄改变范围。
+
+- **你补充的研究方向** → 全部写进 brief_text，用"可以关注""值得检验"
+  "一种可能的解释是"这样的措辞。这些是供 Planner 取舍的建议，不是必须遵守的要求。
+
+brief_text 里不要重复 user_constraints 中已写下的限制，也不要用"用户要求""必须"
+这类词去描述你自己补充的方向。
+
+user_constraints 各字段的含义：
+- time_range：用户说的时间范围（如"近三年""2020 年以后"）；
+- regions：用户说的地域范围；
+- comparison_targets：用户点名要比较的对象；
+- source_rules：用户对来源的要求（如"只要一手数据""不要媒体转述"）；
+- exclusions：用户明确说不要研究或不要写的内容；
+- deliverable_rules：用户对输出形式的额外要求。
+
 1. 先把问题写具体
-- 完整保留用户明确提出的研究对象、目的、时间、地域、比较关系、输出要求、来源要求与排除项。
+- 完整保留用户明确提出的研究对象与目的；限制类信息按第 0 条进 user_constraints。
 - 说清用户真正想判断什么、这个判断服务于什么问题，以及哪些概念需要在研究中辨析。
 - 输出前在内部逐项核对用户明确要求，不能遗漏；不要输出核对过程。
 
-2. 主动打开研究空间
-- 根据具体问题提出多种彼此竞争的假设或替代解释，不能只沿用户问题表面的二选一继续写。
-- 展开可能改变答案的机制、主体视角、时间阶段、地域差异、比较基准、反例与边界条件。
-- 提出多条相互独立的直接和间接证据路径；直接证据不足时，应让 Planner 仍能看见可供选择的侧面路径。
-- 主动指出什么相反证据、异常现象或失败案例可能推翻常见直觉。
-- 只展开与当前问题真正相关的方向，不堆砌适用于所有研究的通用维度。
+2. 主动打开研究空间（请根据用户问题的类型，动态采取不同的展开策略）：
+- 若为【探索/梳理型问题】（如“XX是什么/发生了什么”）：不要强行制造竞争性假设。应着重拆解研究的“维度”，如：核心机制分解、关键时间节点与演变阶段、不同利益相关者的视角、以及该事物的上下游影响。帮助 Planner 看到该话题的全貌结构。
+- 若为【分析/评判型问题】（如“XX为什么失败/A是否优于B”）：必须提出多种彼此竞争的假设或替代解释；展开可能改变答案的机制、地域差异、比较基准或边界条件；并主动指出哪些相反证据或异常现象可能推翻常见直觉。
+- 无论何种题型，都应主动指出哪些常见的直觉或行业刻板印象是需要在这个研究中被重新检验的，避免过早收敛于单一叙事。
 
-3. 区分用户要求与候选方向
-- 用户明确要求是必须原样保留的事实；你补充的内容只能写成「可探索」「需要检验」
-  「可能的解释」等候选方向。
-- 不得把你补充的时间范围、来源偏好、评价标准、排除项或结论写成用户要求。
-- 用户未指定的方面保持开放，但不能止步于「未指定」；应说明有哪些值得 Planner 考虑的研究方向。
-- 不得预设结论。常见印象、行业惯例和已有直觉只能作为待验证假设。
+展开的宽度必须匹配用户选择的研究档位（本次档位：{effort}）：
+- quick：只展开 1 到 2 个最关键的方向。这个档位的研究预算只够回答核心问题，\
+展开太宽会导致每个方向都浅尝辄止。宁可窄而深。
+- standard：展开 3 到 4 个方向，其中至少包含一个可能推翻常见直觉的角度。
+- deep：可以充分展开，并列多个竞争性解释、多个比较基准与多层边界条件。
+这不是硬性数量指标，而是提醒你：**Brief 的宽度就是后续的研究成本**。\
+你在这里多开一个方向，Planner 就要多花决策轮去覆盖它。
+
+3. 语言风格与边界感（区分用户要求与候选方向）
+- 用户明确要求是必须原样保留的事实；你补充的内容应写成「可探索的维度」「值得重点关注的机制」或「需要检验的假设」。
+- 绝对禁止使用晦涩的学术套话和执行指令语，例如“需要转化为可检验的研究命题”、“可探索的间接证据路径包括”等。请用平实、清晰、面向业务或直接阅读的专业语言描述。
+- 不得把你补充的时间范围、来源偏好、评价标准、排除项或结论写成用户要求，\
+也不得把它们填进 user_constraints。
+- 不得预设结论，已有直觉只能作为待验证假设。
 
 4. 输出形式
 - question：能够准确概括核心研究问题的短问句标题。
 - brief_text：连贯、具体的研究问题说明，可以使用自然段；不要写成可逐项打勾的 must_cover 清单。
+- user_constraints：按第 0 条填写；用户没提到的字段留空（字符串用 ""，列表用 []）。
 - 使用与用户问题相同的主要语言。
 
 元数据：
@@ -99,7 +136,10 @@ Research Brief 不是合同，也不是研究计划。你负责把问题打开�
 - output_format 使用 "report_with_citations"。
 
 只输出一个 JSON 对象，键为：
-"question", "brief_text", "output_format", "language", "effort"。
+"question", "brief_text", "user_constraints", "output_format", "language", "effort"。
+其中 user_constraints 是一个对象，键为：
+"time_range" (string), "regions" (array), "comparison_targets" (array),
+"source_rules" (array), "exclusions" (array), "deliverable_rules" (array)。
 不要 markdown 围栏，不要其它说明。
 """
 
@@ -116,12 +156,25 @@ def write_brief_prompt(
     *,
     clarification_question: str | None = None,
     clarification_answer: str | None = None,
+    assessment: str | None = None,
     previous_brief: ResearchBrief | None = None,
     revision_note: str | None = None,
     language: str = "zh",
     effort: str = "standard",
     today: str | None = None,
 ) -> str:
+    # The clarify step already worked out what is settled and what should be opened by
+    # the Brief rather than asked about. Passing that verdict on saves this step from
+    # deriving it a second time, with less information than the first.
+    assessment_context = ""
+    if assessment and assessment.strip():
+        assessment_context = f"""
+
+澄清环节的判断：
+<assessment>
+{assessment.strip()}
+</assessment>"""
+
     clarification_context = ""
     if clarification_question is not None and clarification_answer is not None:
         clarification_context = f"""
@@ -139,11 +192,13 @@ def write_brief_prompt(
             raise ValueError("revision_note must not be blank when previous_brief is set")
         revision_context = f"""
 
-用户要求对上一版 Research Brief 做一轮修订（仅此一轮，改完即定稿）：
+用户要求对上一版 Research Brief 做一轮修订（仅此一轮；改完会交回用户复看）：
 <previous_brief>
 question: {previous_brief.question}
 brief_text:
 {previous_brief.brief_text}
+user_constraints:
+{previous_brief.user_constraints.model_dump_json()}
 </previous_brief>
 <revision_note>
 {note}
@@ -153,6 +208,7 @@ brief_text:
     return WRITE_BRIEF_INSTRUCTIONS.format(
         today=today or date.today().isoformat(),
         question=question.strip(),
+        assessment_context=assessment_context,
         clarification_context=clarification_context,
         revision_context=revision_context,
         language=language,

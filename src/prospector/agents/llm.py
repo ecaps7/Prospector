@@ -19,6 +19,10 @@ LLM_TIMEOUT = httpx.Timeout(
     pool=120.0,
 )
 
+# 关闭思考模式的 extra_body：Qwen 系只认 enable_thinking，DeepSeek V4 系只认
+# thinking.type（enable_thinking 会被静默忽略，导致 tool_choice 等被思考模式拒绝）。
+NO_THINKING_EXTRA_BODY: dict = {"enable_thinking": False, "thinking": {"type": "disabled"}}
+
 
 def require_llm_settings(settings: Settings | None = None) -> Settings:
     cfg = settings or get_settings()

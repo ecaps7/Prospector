@@ -223,3 +223,56 @@ def test_queued_and_running_jobs_reach_idempotent_cancelled_terminal_state() -> 
                 text("DELETE FROM app.jobs WHERE id = ANY(:job_ids)"),
                 {"job_ids": job_ids},
             )
+
+
+def test_unaccepted_verifier_run_refreezes_its_prompt_instead_of_stranding_the_job() -> None:
+    """Editing the Verifier prompt must not permanently strand Jobs that stopped mid-run.
+
+    The guard only ever sees runs that never completed -- the graph short-circuits on a
+    completed one -- so there is no accepted answer whose provenance it could protect here.
+    """
+    jobs = JobRepository()
+    research = ResearchRepository()
+    brief = ResearchBrief(
+        question="Verifier replay integration",
+        brief_text="Re-enter a stopped Verifier run after its prompt changed.",
+    )
+    created = jobs.create_with_brief(brief, start_immediately=True)
+    job_id = created["job_id"]
+    try:
+        old_prompt = [{"role": "system", "content": "旧版 Verifier 提示词"}]
+        new_prompt = [{"role": "system", "content": "新版 Verifier 提示词"}]
+        run_id = research.begin_verifier_run(
+            job_id,
+            evaluated_plan_version=1,
+            decision_round=1,
+            trigger="planner_finish",
+            full_prompt=old_prompt,
+        )
+        research.fail_verifier_run(
+            job_id, run_id, raw_output={"content": "被拒的原话"}, error="invalid decision"
+        )
+
+        replayed = research.begin_verifier_run(
+            job_id,
+            evaluated_plan_version=1,
+            decision_round=1,
+            trigger="planner_finish",
+            full_prompt=new_prompt,
+        )
+
+        assert replayed == run_id
+        with research.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text("SELECT full_prompt, raw_output FROM app.verifier_runs WHERE id=:id"),
+                    {"id": run_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert row["full_prompt"] == new_prompt
+        assert row["raw_output"] == {"content": "被拒的原话"}
+    finally:
+        with jobs.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})

@@ -124,7 +124,10 @@ def test_planner_repairs_broken_json_with_light_structured_model() -> None:
     assert repair_request.get("stream") is None
     assert repair_request["model"] == "test-repair-model"
     assert repair_request["response_format"] == {"type": "json_object"}
-    assert repair_request["extra_body"] == {"enable_thinking": False}
+    assert repair_request["extra_body"] == {
+        "enable_thinking": False,
+        "thinking": {"type": "disabled"},
+    }
     assert isinstance(result.raw_output, dict)
     assert result.raw_output["repaired_content"] == valid
 

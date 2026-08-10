@@ -60,10 +60,14 @@ class ProspectorClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = (base_url or server_url()).rstrip("/")
+        # Local CLI must not inherit macOS/system HTTP proxies: when nothing
+        # listens on the Prospector port, those proxies often return an empty
+        # HTTP 502 instead of a connect error, which hides "serve not running".
         self.http = httpx.Client(
             base_url=self.base_url,
             timeout=REQUEST_TIMEOUT,
             transport=transport,
+            trust_env=False,
         )
 
     def __enter__(self) -> Self:

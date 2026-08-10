@@ -552,7 +552,11 @@ Research Verifier 对**单条 Assertion** 的证据资格判断：伪学术、UG
 ```
 
 - **挂在 Assertion，不做 excerpt 绑定**：毒的是那句抽取事实；冲突（§4.12）才需要 excerpt 对撞服务于 Claim 期。
-- **`source_credibility` 缺口必须带 `related_assertion_ids`**，且这些 ID 必须在同轮 dispositions 中为 `unusable`——禁止只填 excerpt 绕过废证。
+- **`source_credibility` 缺口必须带 `related_assertion_ids`**（任何 severity），禁止只填 excerpt 或含糊指代来绕过点名。
+- **点名 ≠ 废证**：`related_assertion_ids` 表达"该缺口涉及哪些断言"，`assertion_dispositions` 才表达"还能不能用"。二者的关系由 severity 决定，且由代码而非模型维护：
+  - `major`：这些断言按定义不可用于成文。代码在 `materialize_verifier_decision` 中把它们全部补标为 `unusable`（`derive_credibility_dispositions`），模型漏填即被纠正，而不是整轮判断被拒。
+  - `minor`：可披露、不阻断，**不要求废任何证**。"来源偏弱、值得说明、但结论仍成立"是合法判断；把它定义为非法会消灭最常见的一类可信度结论。
+- **校验分层**：`VerifierLlmDecision` 只校验模型能靠改写满足的规则（点名、去重、pass/major 一致）；"major 缺口的断言必须 unusable"作为推导后的不变量放在 `VerifierDecision` 上，此时它已由构造保证成立。
 - **消费约定**：Verifier 覆盖度与后续成文线（Report Writer / Report Verifier）默认只读 usable 投影；Replan 时把 `unusable_assertions`（id/statement/reason）注入 Planner 线程，历史 worker_projection 中的假句不得再作覆盖依据。
 
 ---

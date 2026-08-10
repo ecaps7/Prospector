@@ -18,11 +18,9 @@ class DispatchDecision(BaseModel):
         description="一两句极短中文：本轮为何继续、为何派这些任务",
     )
 
-    @model_validator(mode="after")
-    def _single_research_stage(self) -> DispatchDecision:
-        if len({task.research_stage for task in self.tasks}) != 1:
-            raise ValueError("all tasks in one dispatch must use the same research_stage")
-        return self
+    # Single-stage batches are enforced at the runtime gate, not here: mixing stages is a
+    # planning error that must consume a decision round and come back as a readable
+    # rejection, whereas a schema error here would be charged to the format-retry budget.
 
 
 class ReflectDecision(BaseModel):

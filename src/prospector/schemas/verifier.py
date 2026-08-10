@@ -110,19 +110,26 @@ def _decision_matches_gaps(
         raise ValueError("misaligned requires a major brief_alignment gap")
 
 
-def _validate_assertion_dispositions(
-    gaps: list[VerifierGap],
-    dispositions: list[AssertionDisposition],
-) -> None:
+DERIVED_UNUSABLE_REASON = (
+    "由代码推导：该断言被列入 major source_credibility 缺口，按定义不可用于成文。"
+)
+
+
+def _validate_assertion_dispositions(dispositions: list[AssertionDisposition]) -> None:
     seen: set[UUID] = set()
     for disposition in dispositions:
         if disposition.assertion_id in seen:
             raise ValueError("duplicate assertion disposition in one Verifier decision")
         seen.add(disposition.assertion_id)
 
-    unusable = {
-        item.assertion_id for item in dispositions if item.status == "unusable"
-    }
+
+def _validate_credibility_gaps_name_assertions(gaps: list[VerifierGap]) -> None:
+    """Every credibility gap must say *which* assertions it is about, at any severity.
+
+    Naming is all the model is asked for here, and it can always comply. Whether the named
+    assertions are then discarded depends on severity and is decided by code
+    (``derive_credibility_dispositions``), not by the model's own bookkeeping.
+    """
     for gap in gaps:
         if gap.kind != "source_credibility":
             continue
@@ -131,6 +138,23 @@ def _validate_assertion_dispositions(
                 "source_credibility gap must cite related_assertion_ids "
                 "(cannot point at toxic evidence via excerpts alone)"
             )
+
+
+def _validate_major_credibility_is_discarded(
+    gaps: list[VerifierGap],
+    dispositions: list[AssertionDisposition],
+) -> None:
+    """Post-derivation invariant: evidence called fatally unreliable must be unusable.
+
+    Scoped to ``major`` on purpose. A *minor* credibility gap is the disclosable-but-not
+    -blocking case the Verifier prompt defines, so requiring disposals for it would make
+    "this source is weak, disclose it, but the finding stands" an illegal judgement --
+    which is the most ordinary credibility call there is.
+    """
+    unusable = {item.assertion_id for item in dispositions if item.status == "unusable"}
+    for gap in gaps:
+        if gap.kind != "source_credibility" or gap.severity != "major":
+            continue
         missing = [
             assertion_id
             for assertion_id in gap.related_assertion_ids
@@ -138,9 +162,59 @@ def _validate_assertion_dispositions(
         ]
         if missing:
             raise ValueError(
-                "source_credibility gap assertions must be marked unusable "
+                "major source_credibility gap assertions must be marked unusable "
                 "in assertion_dispositions"
             )
+
+
+def derive_credibility_dispositions(
+    gaps: list[VerifierGap],
+    dispositions: list[AssertionDisposition],
+) -> list[AssertionDisposition]:
+    """Force every assertion named in a *major* credibility gap to ``unusable``.
+
+    The model owns the open judgement -- is this source unreliable, and how badly. The
+    mechanical consequence -- fatally unreliable therefore unusable -- is code's, so a
+    Verifier that names toxic evidence and then forgets to discard it gets corrected
+    instead of rejected. Deriving beats validating here: no model round trip, no run lost
+    to bookkeeping, and no way to name toxic evidence in a major gap and still keep it.
+
+    Minor gaps are left exactly as the model wrote them.
+    """
+    forced: list[UUID] = []
+    for gap in gaps:
+        if gap.kind != "source_credibility" or gap.severity != "major":
+            continue
+        for assertion_id in gap.related_assertion_ids:
+            if assertion_id not in forced:
+                forced.append(assertion_id)
+    if not forced:
+        return list(dispositions)
+
+    forced_set = set(forced)
+    derived = [
+        AssertionDisposition(
+            assertion_id=item.assertion_id,
+            status="unusable" if item.assertion_id in forced_set else item.status,
+            reason=(
+                f"{item.reason}（{DERIVED_UNUSABLE_REASON}）"
+                if item.assertion_id in forced_set and item.status != "unusable"
+                else item.reason
+            ),
+        )
+        for item in dispositions
+    ]
+    already_disposed = {item.assertion_id for item in dispositions}
+    derived.extend(
+        AssertionDisposition(
+            assertion_id=assertion_id,
+            status="unusable",
+            reason=DERIVED_UNUSABLE_REASON,
+        )
+        for assertion_id in forced
+        if assertion_id not in already_disposed
+    )
+    return derived
 
 
 class VerifierLlmDecision(BaseModel):
@@ -164,8 +238,12 @@ class VerifierLlmDecision(BaseModel):
 
     @model_validator(mode="after")
     def _decision_matches_gaps(self) -> VerifierLlmDecision:
+        # Model-facing shape: only rules the model can always satisfy by writing more
+        # carefully. Consistency between credibility gaps and disposals is *derived* on
+        # the way to VerifierDecision, so it must not reject the model's output here.
         _decision_matches_gaps(self.release_decision, self.brief_alignment, self.gaps)
-        _validate_assertion_dispositions(self.gaps, self.assertion_dispositions)
+        _validate_assertion_dispositions(self.assertion_dispositions)
+        _validate_credibility_gaps_name_assertions(self.gaps)
         return self
 
 
@@ -190,8 +268,13 @@ class VerifierDecision(BaseModel):
 
     @model_validator(mode="after")
     def _decision_matches_gaps(self) -> VerifierDecision:
+        # Persisted shape: the full invariant, which now holds by construction because
+        # derive_credibility_dispositions ran first. It is a genuine assertion about
+        # system state rather than a bet on how the model filled in two fields.
         _decision_matches_gaps(self.release_decision, self.brief_alignment, self.gaps)
-        _validate_assertion_dispositions(self.gaps, self.assertion_dispositions)
+        _validate_assertion_dispositions(self.assertion_dispositions)
+        _validate_credibility_gaps_name_assertions(self.gaps)
+        _validate_major_credibility_is_discarded(self.gaps, self.assertion_dispositions)
         return self
 
 
@@ -272,7 +355,10 @@ def materialize_verifier_decision(
             llm_decision.conflict_judgements,
             assertion_excerpts,
         ),
-        assertion_dispositions=list(llm_decision.assertion_dispositions),
+        assertion_dispositions=derive_credibility_dispositions(
+            llm_decision.gaps,
+            llm_decision.assertion_dispositions,
+        ),
     )
 
 

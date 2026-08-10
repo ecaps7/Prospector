@@ -106,10 +106,11 @@ class JobRepository:
                 text(
                     """
                     INSERT INTO app.briefs
-                      (id, job_id, question, brief_text, output_format, language, effort, frozen_at)
+                      (id, job_id, question, brief_text, user_constraints,
+                       output_format, language, effort, frozen_at)
                     VALUES
-                      (:id, :job_id, :question, :brief_text, :output_format,
-                       :language, :effort, :frozen_at)
+                      (:id, :job_id, :question, :brief_text, CAST(:user_constraints AS JSONB),
+                       :output_format, :language, :effort, :frozen_at)
                     """
                 ),
                 {
@@ -117,6 +118,7 @@ class JobRepository:
                     "job_id": job_id,
                     "question": brief.question,
                     "brief_text": brief.brief_text,
+                    "user_constraints": _json(brief.user_constraints.model_dump(mode="json")),
                     "output_format": brief.output_format,
                     "language": brief.language,
                     "effort": brief.effort,

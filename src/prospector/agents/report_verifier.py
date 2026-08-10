@@ -13,7 +13,7 @@ from uuid import UUID
 from openai import OpenAI
 from pydantic import TypeAdapter, ValidationError
 
-from prospector.agents.llm import get_openai_client, mid_model
+from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model
 from prospector.agents.prompts.report_verifier import report_verifier_messages
 from prospector.agents.usage import record_response_usage
 from prospector.schemas.claims import (
@@ -166,7 +166,7 @@ class OpenAIReportVerifier:
             temperature=0.0,
             messages=messages,  # type: ignore[arg-type]
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         record_response_usage(response, self.model)
         if not getattr(response, "choices", None):
@@ -186,7 +186,7 @@ class OpenAIReportVerifier:
                 }
             ],
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         record_response_usage(response, self.repair_model)
         if not getattr(response, "choices", None):

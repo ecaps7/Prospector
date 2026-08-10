@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import subprocess
 from typing import Annotated
 
 import typer
@@ -14,6 +16,45 @@ from prospector.obs.tracing import setup_tracing
 from prospector.store.checkpoint import close_pool, setup_checkpointer
 from prospector.store.database import clear_engine_cache
 from prospector.store.object_store import ObjectStore
+
+
+def _listeners_on_port(port: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    return "\n".join(lines)
+
+
+def _ensure_port_free(host: str, port: int) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            typer.secho(
+                f"端口 {port} 已被占用。先结束占用进程，或改用 "
+                f"`prospector serve --port <其他端口>`。",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            listeners = _listeners_on_port(port)
+            if listeners is not None:
+                typer.echo(listeners, err=True)
+            else:
+                typer.echo(
+                    f"排查: lsof -nP -iTCP:{port} -sTCP:LISTEN",
+                    err=True,
+                )
+            raise typer.Exit(code=1) from None
 
 
 def serve(
@@ -39,10 +80,12 @@ def serve(
         typer.secho(f"serve preflight failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
+    host = "127.0.0.1"
+    _ensure_port_free(host, port)
     try:
         uvicorn.run(
             create_app(services, validate_startup=False),
-            host="127.0.0.1",
+            host=host,
             port=port,
             workers=1,
         )

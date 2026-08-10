@@ -38,7 +38,7 @@ def planner_system_prompt(*, today: str | None = None) -> str:
   并在 dispatch.reason 中简要说明依据。
 
 任务容量（按阶段区分粒度）：
-- 每个任务必须在 subjects 中显式列出全部研究对象（城市、项目、模式或案例），
+- 每个任务必须在 subjects 中显式列出全部研究对象（公司、产品、机构、地区、事件或方案等），
   question 涉及的对象必须与 subjects 完全一致，不得在 question 中夹带未申报对象。
 - scout 任务 = 一个筛选维度 × 一个有界候选集：subjects 可列出多个候选（不超过 6 个），
   但 question 只允许一个筛选性问题（如指标口径确认、案例存在性、反例存在性）；
@@ -47,8 +47,8 @@ def planner_system_prompt(*, today: str | None = None) -> str:
   但一个筛选闭环（搜索、抓取、落证）需要约 3 个串行决策轮，多维度会成倍消耗轮数。
 - 不同筛选维度必须拆成不同任务，即使候选集相同；research_mode 不同的证据问题
   （如事实核验与反例扫描）也必须分任务。
-  反例：「东京、新加坡在最后一公里是否存在典型实践项目，以及是否存在失败案例？」
-  ——"实践存在性"与"失败案例存在性"是两个筛选维度，必须拆成两个任务。
+  反例：「A 药与 B 药在老年患者中是否有长期随访研究，以及是否存在停药案例？」
+  ——"研究存在性"与"停药案例存在性"是两个筛选维度，必须拆成两个任务。
 - deep_dive 与 verify 任务 = 一个对象 × 一个机制或断言：subjects 必须恰好一个，
   否则会被运行时直接拒绝；能分别判断完成的证据问题必须拆分为多个任务。
 - 仅当多条事实服务于同一 subjects 候选集上的同一筛选维度，
@@ -104,12 +104,47 @@ def _stage_budget_lines(limits: ResearchLimits) -> str:
     )
 
 
+def _user_constraint_lines(brief: ResearchBrief) -> str:
+    """Render the user's own limits as a labelled block, apart from Scope's suggestions.
+
+    The two kinds of information carry different authority — one is binding, the other
+    is a menu — so they are presented as two blocks rather than one paragraph the
+    Planner has to re-read and re-classify every round.
+    """
+    constraints = brief.user_constraints
+    if constraints.is_empty():
+        return """【用户明确要求】
+（本次用户没有提出额外限制。）"""
+
+    rows: list[str] = []
+    if constraints.time_range:
+        rows.append(f"- 时间范围：{constraints.time_range}")
+    labelled = (
+        ("地域", constraints.regions),
+        ("必须比较的对象", constraints.comparison_targets),
+        ("来源要求", constraints.source_rules),
+        ("排除", constraints.exclusions),
+        ("输出要求", constraints.deliverable_rules),
+    )
+    rows.extend(f"- {label}：{'、'.join(values)}" for label, values in labelled if values)
+    body = "\n".join(rows)
+    return f"""【用户明确要求 —— 不可协商，违反即为错误】
+{body}
+
+以上是用户本人提出的限制，不是可选建议。派发任务时必须遵守：
+不要研究被排除的内容，不要越出声明的时间与地域范围，来源要求同样适用于 Worker。"""
+
+
 def planner_brief_message(brief: ResearchBrief, limits: ResearchLimits) -> str:
     return f"""已确认 Research Brief（不可改写）：
 <brief>
 question: {brief.question}
-brief_text:
+
+{_user_constraint_lines(brief)}
+
+【可探索的研究方向 —— 供你取舍，不必全做】
 {brief.brief_text}
+
 output_format: {brief.output_format}
 language: {brief.language}
 effort: {brief.effort}

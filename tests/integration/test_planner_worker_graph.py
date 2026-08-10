@@ -74,10 +74,12 @@ def _environment() -> Iterator[None]:
 
 
 def _task(label: str) -> dict[str, Any]:
+    # scout, because the runtime now refuses a first batch that skips screening; these
+    # fixtures are the Planner's opening move.
     return {
         "question": f"调查 {label} 的公开事实、时间口径和可能推翻当前解释的相反信号。",
         "subjects": [label],
-        "research_stage": "verify",
+        "research_stage": "scout",
         "research_mode": "counterargument",
         "source_policy": {"preferred_tiers": ["official", "industry"]},
         "expected_evidence": "至少保存一条带原文 highlight、时间和限定条件的直接证据",
@@ -725,8 +727,9 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         {
             "decision": "dispatch",
             "dispatch": {
-                "tasks": [_task(str(index)) for index in range(4)],
-                "reason": "先一次派四条路径",
+                # scout allows 6 concurrent tasks at standard, so overshoot needs 7.
+                "tasks": [_task(str(index)) for index in range(7)],
+                "reason": "先一次派七条路径",
             },
         }
     )
@@ -796,16 +799,18 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         )
         assert terminal is True
         assert last_id == int(events[-1]["id"])
+        # Round 1 was a schema error, which no longer spends research budget: only the
+        # over-concurrency rejection and this dispatch do, so 10 of 12 remain.
         assert (
-            "[轮 3] Planner 派发 2 个任务（Plan v1，余 9 轮）：缩小为两条相互独立的路径"
+            "[轮 3] Planner 派发 2 个任务（Plan v1，余 10 轮）：缩小为两条相互独立的路径"
             in timeline_lines
         )
         assert any(line.startswith("[T1] 搜索 ") for line in timeline_lines)
         assert any(line.startswith("[T2] 搜索 ") for line in timeline_lines)
         assert sum("：已保存任务要求的直接证据。" in line for line in timeline_lines) == 2
-        verify_budget = standard_limits.stages["verify"]
+        scout_budget = standard_limits.stages["scout"]
         assert any(
-            f"Worker 决策轮预算 {verify_budget.max_worker_rounds} 轮" in line
+            f"Worker 决策轮预算 {scout_budget.max_worker_rounds} 轮" in line
             for line in timeline_lines
         )
         assert "[核验] Plan v1 通过（重大缺口 0，冲突裁决 0，废证 0）" in timeline_lines
@@ -1028,10 +1033,10 @@ def test_completed_task_is_not_reexecuted_when_worker_node_replays() -> None:
         first = asyncio.run(_run_one_worker(services, job_id, task_id, 1))
         second = asyncio.run(_run_one_worker(services, job_id, task_id, 1))
         assert first["status"] == "done", first
-        assert first["research_stage"] == "verify"
+        assert first["research_stage"] == "scout"
         assert first["question"]
         assert second["status"] == "done"
-        assert second["research_stage"] == "verify"
+        assert second["research_stage"] == "scout"
         assert model.research_runs[str(task_id)] == 1
         assert model.coverage_checks[str(task_id)] == 1
         feedback = repository.get_task_feedback(task_id)

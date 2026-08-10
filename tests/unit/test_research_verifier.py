@@ -211,14 +211,63 @@ def test_reference_validation_rejects_ids_outside_job() -> None:
         )
 
 
-def test_source_credibility_gap_requires_unusable_dispositions() -> None:
-    with pytest.raises(ValidationError, match="must be marked unusable"):
+def test_minor_credibility_gap_may_disclose_without_discarding_evidence() -> None:
+    """A weak source worth disclosing, with the finding intact, must stay a legal judgement.
+
+    Requiring disposals at every severity made the most ordinary credibility call illegal,
+    and killed whole runs at the final gate over bookkeeping.
+    """
+    decision = _decision("pass", severity="minor", kind="source_credibility")
+
+    assert decision.release_decision == "pass"
+    assert decision.assertion_dispositions == []
+    assert decision.gaps[0].related_assertion_ids == [ASSERTION_ID]
+
+
+def test_major_credibility_gap_derives_unusable_dispositions() -> None:
+    """Code supplies the mechanical consequence the model may have left out."""
+    llm_decision = _llm_decision(
+        "needs_research",
+        severity="major",
+        kind="source_credibility",
+        dispositions=[],
+    )
+    decision = materialize_verifier_decision(llm_decision, {})
+
+    assert llm_decision.assertion_dispositions == []
+    assert [item.assertion_id for item in decision.assertion_dispositions] == [ASSERTION_ID]
+    assert decision.assertion_dispositions[0].status == "unusable"
+
+
+def test_major_credibility_gap_overrides_a_contradicting_restore() -> None:
+    decision = materialize_verifier_decision(
         _llm_decision(
             "needs_research",
             severity="major",
             kind="source_credibility",
-            dispositions=[],
-        )
+            dispositions=[
+                {
+                    "assertion_id": str(ASSERTION_ID),
+                    "status": "restored",
+                    "reason": "上一轮误判。",
+                }
+            ],
+        ),
+        {},
+    )
+
+    assert len(decision.assertion_dispositions) == 1
+    assert decision.assertion_dispositions[0].status == "unusable"
+    assert "上一轮误判。" in decision.assertion_dispositions[0].reason
+
+
+def test_persisted_decision_still_asserts_major_credibility_invariant() -> None:
+    """The strict rule survives where it is now guaranteed rather than gambled on."""
+    payload = _decision("pass").model_dump(mode="json")
+    payload["release_decision"] = "needs_research"
+    payload["gaps"] = _gaps(severity="major", kind="source_credibility")
+    with pytest.raises(ValidationError, match="must be marked unusable"):
+        VerifierDecision.model_validate(payload)
 
 
 def test_source_credibility_gap_rejects_excerpt_only_pointers() -> None:
@@ -326,6 +375,7 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
     assert "assertion_dispositions" in prompt
     assert "effective_unusable_assertion_ids" in prompt
     assert "status=unusable" in prompt
+    assert "minor 表示可在报告中披露、但结论仍然成立" in prompt
     assert '"conflict_resolutions"' not in schema
     conflict_def = VerifierLlmDecision.model_json_schema().get("$defs", {}).get(
         "ConflictJudgement", {}
@@ -345,19 +395,23 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
 
 
 class _FakeCompletions:
-    def __init__(self, streamed: str, repaired: str | None = None) -> None:
-        self.streamed = streamed
+    def __init__(self, streamed: str | list[str], repaired: str | None = None) -> None:
+        self.streamed = [streamed] if isinstance(streamed, str) else list(streamed)
         self.repaired = repaired
         self.requests: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> object:
         self.requests.append(kwargs)
         if kwargs.get("stream"):
-            delta = SimpleNamespace(content=self.streamed)
+            content = self.streamed[min(len(self.streamed) - 1, self._stream_count() - 1)]
+            delta = SimpleNamespace(content=content)
             return iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta)])])
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self.repaired or ""))]
         )
+
+    def _stream_count(self) -> int:
+        return sum(1 for request in self.requests if request.get("stream"))
 
 
 def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
@@ -383,7 +437,41 @@ def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
     assert first["extra_body"] == {"enable_thinking": True}
     assert second["model"] == "mid"
     assert second["response_format"] == {"type": "json_object"}
-    assert second["extra_body"] == {"enable_thinking": False}
+    assert second["extra_body"] == {"enable_thinking": False, "thinking": {"type": "disabled"}}
+
+
+def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> None:
+    """Judgement errors are re-asked with the snapshot; only syntax goes to the cheap model.
+
+    The repair model never sees the snapshot, so asking it to fix a judgement contract
+    would be asking it to re-decide the evidence while looking at none of it.
+    """
+    snapshot = {"brief": {}, "plans": [], "tasks": [], "assertions": [], "excerpts": []}
+    illegal = json.dumps(
+        {
+            **_llm_decision().model_dump(mode="json"),
+            "gaps": _gaps(severity="major", kind="plan_coverage"),
+        },
+        ensure_ascii=False,
+    )
+    legal = json.dumps(
+        _llm_decision("needs_research", severity="major").model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    completions = _FakeCompletions([illegal, legal])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+
+    result = verifier.verify(snapshot)
+
+    assert result.decision.release_decision == "needs_research"
+    assert [request["model"] for request in completions.requests] == ["strong", "strong"]
+    retry_messages = completions.requests[1]["messages"]
+    assert retry_messages[:2] == research_verifier_messages(snapshot)
+    assert retry_messages[-2] == {"role": "assistant", "content": illegal}
+    assert "pass must not contain major gaps" in retry_messages[-1]["content"]
+    assert "不表示" in retry_messages[-1]["content"]
+    assert cast(dict[str, Any], result.raw_output)["retried_content"] == legal
 
 
 def test_verifier_binds_conflict_judgements_to_excerpt_ids() -> None:
@@ -432,6 +520,7 @@ class _FakeRepository:
         self.run_id = uuid4()
         self.stored = stored
         self.completed: VerifierDecision | None = None
+        self.failed: dict[str, object] | None = None
         self.outcomes: list[dict[str, object]] = []
         self.begin_count = 0
 
@@ -453,6 +542,10 @@ class _FakeRepository:
     def complete_verifier_run(self, job_id: UUID, run_id: UUID, **kwargs: object) -> None:
         del job_id, run_id
         self.completed = cast(VerifierDecision, kwargs["decision"])
+
+    def fail_verifier_run(self, job_id: UUID, run_id: UUID, **kwargs: object) -> None:
+        del job_id, run_id
+        self.failed = kwargs
 
     def record_phase_changed(self, job_id: UUID, phase: str, **kwargs: object) -> None:
         del job_id, phase, kwargs
@@ -525,6 +618,28 @@ def test_verifier_node_passes_to_composition_pending() -> None:
     assert result["route"] == "writer"
     assert repository.completed is not None
     assert repository.outcomes[-1]["phase"] == "composition_pending"
+
+
+def test_verifier_node_keeps_the_raw_answer_and_stops_the_job_when_output_is_rejected() -> None:
+    """The rejected answer is the whole diagnosis; losing it is how a run becomes unexplainable."""
+
+    class _RejectingVerifier:
+        def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
+            del snapshot
+            raise VerifierOutputError("invalid Verifier decision: boom", {"content": "…"})
+
+    repository = _FakeRepository()
+
+    with pytest.raises(VerifierOutputError):
+        _verifier_node(_services(repository, cast(Any, _RejectingVerifier())))(cast(Any, _state()))
+
+    assert repository.failed is not None
+    assert repository.failed["raw_output"] == {"content": "…"}
+    assert repository.outcomes[-1] == {
+        "outcome": "failed",
+        "error_code": "verifier_output_invalid",
+        "phase": "failed",
+    }
 
 
 def test_verifier_node_logs_decision_reason_after_persistence(
@@ -621,6 +736,9 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
             "decision_round": 3,
             "payload": {
                 "plan_version": 1,
+                # The research budget is spent by decisions, not by storage rounds, so the
+                # runtime reports it explicitly rather than letting the renderer infer it.
+                "research_decisions_used": 3,
                 "release_decision": "needs_research",
                 "decision_reason": "关键比较口径仍缺证据",
                 "major_gap_count": 2,

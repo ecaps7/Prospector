@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from prospector.schemas.brief import ResearchBrief
+from prospector.schemas.brief import ResearchBrief, UserConstraints
 
 EchoFn = Callable[[str], None]
 PromptFn = Callable[[str], str]
@@ -24,6 +24,23 @@ ReviseOnceFn = Callable[[ResearchBrief, str], ResearchBrief]
 DEEP_EFFORT_HINT = "深度档最坏可能运行数小时；单次模型/抓取调用仍有超时上限。"
 
 _YAML_KEYS = ("question", "brief_text", "effort", "language", "output_format")
+_CONSTRAINT_KEY = "user_constraints"
+_CONSTRAINT_SCALARS = ("time_range",)
+_CONSTRAINT_LISTS = (
+    "regions",
+    "comparison_targets",
+    "source_rules",
+    "exclusions",
+    "deliverable_rules",
+)
+_CONSTRAINT_LABELS = {
+    "time_range": "时间范围",
+    "regions": "地域",
+    "comparison_targets": "比较对象",
+    "source_rules": "来源要求",
+    "exclusions": "排除",
+    "deliverable_rules": "输出要求",
+}
 _LABEL_WIDTH = 14  # display width of left-hand field labels
 
 
@@ -99,7 +116,32 @@ def _card_width(*, width: int | None = None) -> int:
     return max(min(cols, 100), 56)
 
 
-def format_brief_card(brief: ResearchBrief, *, width: int | None = None) -> str:
+CONSTRAINTS_HEADING = "你明确要求的限制（不可协商）："
+
+
+def constraint_lines(constraints: UserConstraints) -> list[str]:
+    """Label each stated limit for display; empty when the user stated none.
+
+    Shared by every surface that shows a Brief to the user, so a new surface cannot
+    quietly drop the binding half of it.
+    """
+    if constraints.is_empty():
+        return []
+    lines = [CONSTRAINTS_HEADING]
+    for key in (*_CONSTRAINT_SCALARS, *_CONSTRAINT_LISTS):
+        value = getattr(constraints, key)
+        rendered = value if isinstance(value, str) else "、".join(value)
+        if rendered:
+            lines.append(f"  {_CONSTRAINT_LABELS[key]}：{rendered}")
+    return lines
+
+
+def format_brief_card(
+    brief: ResearchBrief,
+    *,
+    width: int | None = None,
+    revision_used: bool = False,
+) -> str:
     """Render a closed box card; wraps long lines so left/right borders stay intact.
 
     Title sits *inside* the box (not embedded in the top border). Mixing CJK
@@ -135,6 +177,16 @@ def format_brief_card(brief: ResearchBrief, *, width: int | None = None) -> str:
         for cont in wrapped[1:]:
             lines.append(row(hang + cont))
 
+    # Shown before brief_text and labelled as binding: the user needs to see what the
+    # run will treat as non-negotiable, separately from directions Scope merely proposed.
+    constraint_rows = constraint_lines(brief.user_constraints)
+    if constraint_rows:
+        lines.append(row())
+        for entry in constraint_rows:
+            hang = " " * (len(entry) - len(entry.lstrip()))
+            for index, piece in enumerate(_wrap_display(entry, inner)):
+                lines.append(row(piece if index == 0 else hang + piece))
+
     lines.append(row())
     lines.append(row("brief_text:"))
     for paragraph in brief.brief_text.splitlines() or [brief.brief_text]:
@@ -147,7 +199,8 @@ def format_brief_card(brief: ResearchBrief, *, width: int | None = None) -> str:
     lines.append(bottom)
     if brief.effort == "deep":
         lines.append(DEEP_EFFORT_HINT)
-    lines.append("  [c] 确认  [e] 直接编辑  [i] 指令修订（一轮定稿）  [q] 放弃")
+    instruct = "[i] 指令修订（已用完）" if revision_used else "[i] 指令修订（限一轮）"
+    lines.append(f"  [c] 确认  [e] 直接编辑  {instruct}  [q] 放弃")
     return "\n".join(lines)
 
 
@@ -170,7 +223,56 @@ def _brief_to_yaml(brief: ResearchBrief) -> str:
                 lines.append(f"  {row}")
         else:
             lines.append(f"{key}: {_escape_yaml_scalar(value)}")
+
+    constraints = brief.user_constraints
+    lines.append(f"{_CONSTRAINT_KEY}:")
+    lines.append("  # 只写你自己提出的限制；留空表示没有该项限制")
+    for key in _CONSTRAINT_SCALARS:
+        lines.append(f"  {key}: {_escape_yaml_scalar(getattr(constraints, key))}")
+    for key in _CONSTRAINT_LISTS:
+        entries: list[str] = getattr(constraints, key)
+        if not entries:
+            lines.append(f"  {key}: []")
+            continue
+        lines.append(f"  {key}:")
+        lines.extend(f"    - {_escape_yaml_scalar(entry)}" for entry in entries)
     return "\n".join(lines) + "\n"
+
+
+def _parse_constraint_block(lines: list[str], start: int) -> tuple[dict[str, object], int]:
+    """Read the two-space-indented user_constraints mapping starting after ``start``."""
+    data: dict[str, object] = {}
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        if not line.startswith("  ") or line.startswith("    "):
+            break
+        key, _, rest = line.strip().partition(":")
+        key = key.strip()
+        rest = rest.strip()
+        if key not in (*_CONSTRAINT_SCALARS, *_CONSTRAINT_LISTS):
+            raise ValueError(f"unknown user_constraints field: {key}")
+        i += 1
+        if key in _CONSTRAINT_SCALARS:
+            data[key] = _unescape_yaml_scalar(rest)
+            continue
+        if rest and rest != "[]":
+            raise ValueError(f"{key} must be a YAML list or []")
+        entries: list[str] = []
+        while i < len(lines):
+            item = lines[i]
+            if not item.strip() or item.lstrip().startswith("#"):
+                i += 1
+                continue
+            if not item.startswith("    - "):
+                break
+            entries.append(_unescape_yaml_scalar(item.strip()[2:]))
+            i += 1
+        data[key] = entries
+    return data, i
 
 
 def _unescape_yaml_scalar(raw: str) -> str:
@@ -184,8 +286,8 @@ def _unescape_yaml_scalar(raw: str) -> str:
 
 
 def _brief_from_yaml(text: str) -> ResearchBrief:
-    """Parse the flat Brief YAML subset produced by `_brief_to_yaml`."""
-    data: dict[str, str] = {}
+    """Parse the Brief YAML subset produced by `_brief_to_yaml`."""
+    data: dict[str, object] = {}
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -198,6 +300,11 @@ def _brief_from_yaml(text: str) -> ResearchBrief:
         key, _, rest = line.partition(":")
         key = key.strip()
         rest = rest.strip()
+        if key == _CONSTRAINT_KEY:
+            if rest:
+                raise ValueError("user_constraints must be a nested block")
+            data[key], i = _parse_constraint_block(lines, i + 1)
+            continue
         if key not in _YAML_KEYS:
             raise ValueError(f"unknown Brief field: {key}")
         if rest in {"|", ">"}:
@@ -276,13 +383,20 @@ def confirm_brief(
     edit_fn: EditFn | None = None,
     echo: EchoFn | None = None,
 ) -> ResearchBrief:
-    """Run c/e/i/q confirmation. Instruction path finalizes after one model revision."""
+    """Run c/e/i/q confirmation.
+
+    The model may revise once, but the revised Brief comes back for review rather than
+    going straight to a run: seconds of rereading against a job that can take hours is
+    the cheapest confirmation in the pipeline. Hand editing stays unlimited — that is
+    the user's own typing, and it costs no model call.
+    """
     say = echo or (lambda _msg: None)
     do_edit = edit_fn or (lambda b: edit_brief(b, echo=say))
     current = brief
+    revision_used = False
 
     while True:
-        say(format_brief_card(current))
+        say(format_brief_card(current, revision_used=revision_used))
         choice = prompt("选择").strip().lower()
         if choice == "c":
             return current
@@ -292,9 +406,15 @@ def confirm_brief(
             current = do_edit(current)
             continue
         if choice == "i":
+            if revision_used:
+                say("本次只允许一轮模型修订，已经用过了。可以 [e] 手工编辑，或 [c] 确认。")
+                continue
             note = prompt("修订指令").strip()
             if not note:
                 say("修订指令不能为空")
                 continue
-            return revise_once_fn(current, note)
+            current = revise_once_fn(current, note)
+            revision_used = True
+            say("已按指令修订，请复看后再确认。")
+            continue
         say("请输入 c / e / i / q")

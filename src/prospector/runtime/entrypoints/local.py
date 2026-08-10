@@ -24,6 +24,7 @@ from prospector.obs.tracing import setup_tracing
 from prospector.runtime.hitl.brief_confirm import (
     BriefConfirmAborted,
     confirm_brief,
+    constraint_lines,
     require_tty,
 )
 from prospector.runtime.timeline import (
@@ -67,30 +68,36 @@ def _bootstrap(*, require_llm: bool = False) -> None:
     log.info("bootstrap", result="done")
 
 
+def _format_brief_body(brief: ResearchBrief, *, header: str) -> str:
+    """Header, metadata, the user's stated limits, then the open research space.
+
+    The limits go above brief_text and carry their own label, so a reader of the log
+    can tell what the run must obey from what Scope merely proposed.
+    """
+    lines = [
+        f"{header}:",
+        f"question: {brief.question}",
+        f"effort: {brief.effort}",
+        f"language: {brief.language}",
+        f"output_format: {brief.output_format}",
+    ]
+    constraints = constraint_lines(brief.user_constraints)
+    if constraints:
+        lines.append("")
+        lines.extend(constraints)
+    lines.extend(["", brief.brief_text])
+    return "\n".join(lines)
+
+
 def format_scope_outcome(outcome: ScopeOutcome) -> str:
     if outcome.kind == "clarify":
         return f"CLARIFY:\n{outcome.clarification_question}"
     assert outcome.brief is not None
-    brief = outcome.brief
-    return (
-        "BRIEF_PENDING:\n"
-        f"question: {brief.question}\n"
-        f"effort: {brief.effort}\n"
-        f"language: {brief.language}\n"
-        f"output_format: {brief.output_format}\n"
-        f"\n{brief.brief_text}"
-    )
+    return _format_brief_body(outcome.brief, header="BRIEF_PENDING")
 
 
 def format_confirmed_brief(brief: ResearchBrief) -> str:
-    return (
-        "BRIEF_CONFIRMED:\n"
-        f"question: {brief.question}\n"
-        f"effort: {brief.effort}\n"
-        f"language: {brief.language}\n"
-        f"output_format: {brief.output_format}\n"
-        f"\n{brief.brief_text}"
-    )
+    return _format_brief_body(brief, header="BRIEF_CONFIRMED")
 
 
 @app.command()
@@ -102,6 +109,53 @@ def setup() -> None:
     store.ensure_bucket()
     log.info("setup_complete", message="checkpointer + bucket ready")
     close_pool()
+
+
+def _run_research_graph(
+    repository: ResearchRepository,
+    job_id: UUID,
+    *,
+    effort: EffortLevel,
+    initial_state: dict[str, object] | None,
+) -> None:
+    """Follow the timeline while the graph runs, then print the report.
+
+    ``initial_state=None`` hands LangGraph nothing to start from, so it picks up the
+    checkpoint for this thread instead of restarting the research.
+    """
+    typer.echo("研究时间线：", err=True)
+    renderer = ResearchTimelineRenderer(repository, limits_for_effort(effort))
+    follower = ResearchTimelineFollower(
+        repository,
+        renderer,
+        job_id,
+        after_id=repository.latest_event_id(job_id),
+        emit=emit_timeline_line,
+    )
+    follower.start()
+    try:
+        with checkpointer_session() as checkpointer:
+            graph = build_research_graph(checkpointer)
+            result = graph.invoke(initial_state, thread_config(str(job_id)))
+    finally:
+        follower.stop()
+    typer.echo(
+        f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
+        err=True,
+    )
+    if result.get("report_markdown_ref"):
+        typer.echo(f"REPORT_DRAFT: {result['report_markdown_ref']}", err=True)
+    if result.get("report_json_ref"):
+        typer.echo(f"REPORT_DRAFT_JSON: {result['report_json_ref']}", err=True)
+    if result.get("report_markdown_ref"):
+        _output_separator()
+        store = ObjectStore()
+        ref = result["report_markdown_ref"]
+        # Parse s3://bucket/key
+        assert ref.startswith("s3://"), f"expected s3:// URI, got {ref}"
+        _, key = ref[len("s3://") :].split("/", 1)
+        markdown_bytes = store.get_bytes(key)
+        typer.echo(markdown_bytes.decode("utf-8"))
 
 
 @app.command()
@@ -119,6 +173,10 @@ def ask(
     effort_level: EffortLevel = effort  # type: ignore[assignment]
     t0 = time.monotonic()
     confirmed: ResearchBrief | None = None
+    job_id: UUID | None = None
+    # Names the phase the catch-all below reports. Without it every failure anywhere in the
+    # run -- including the Verifier at the very end -- gets labelled a Scope failure.
+    stage = "bootstrap"
     try:
         _bootstrap(require_llm=True)
         try:
@@ -127,6 +185,7 @@ def ask(
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2) from exc
 
+        stage = "scope"
         outcome = run_scope(
             question,
             language=language,
@@ -159,6 +218,7 @@ def ask(
                 effort=effort_level,
             )
 
+        stage = "brief_confirm"
         confirmed = confirm_brief(
             outcome.brief,
             prompt=lambda msg: typer.prompt(msg),
@@ -169,49 +229,17 @@ def ask(
         _output_separator()
         typer.echo(format_confirmed_brief(confirmed))
 
+        stage = "research"
         job_id = create_job()
         repository = ResearchRepository()
         brief_id = repository.freeze_brief(job_id, confirmed)
         typer.echo(f"\nJOB_CREATED: {job_id}", err=True)
-        typer.echo("研究时间线：", err=True)
-        renderer = ResearchTimelineRenderer(
+        _run_research_graph(
             repository,
-            limits_for_effort(confirmed.effort),
-        )
-        follower = ResearchTimelineFollower(
-            repository,
-            renderer,
             job_id,
-            after_id=repository.latest_event_id(job_id),
-            emit=emit_timeline_line,
+            effort=confirmed.effort,
+            initial_state=initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
         )
-        follower.start()
-        try:
-            with checkpointer_session() as checkpointer:
-                graph = build_research_graph(checkpointer)
-                result = graph.invoke(
-                    initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
-                    thread_config(str(job_id)),
-                )
-        finally:
-            follower.stop()
-        typer.echo(
-            f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
-            err=True,
-        )
-        if result.get("report_markdown_ref"):
-            typer.echo(f"REPORT_DRAFT: {result['report_markdown_ref']}", err=True)
-        if result.get("report_json_ref"):
-            typer.echo(f"REPORT_DRAFT_JSON: {result['report_json_ref']}", err=True)
-        if result.get("report_markdown_ref"):
-            _output_separator()
-            store = ObjectStore()
-            ref = result["report_markdown_ref"]
-            # Parse s3://bucket/key
-            assert ref.startswith("s3://"), f"expected s3:// URI, got {ref}"
-            _, key = ref[len("s3://"):].split("/", 1)
-            markdown_bytes = store.get_bytes(key)
-            typer.echo(markdown_bytes.decode("utf-8"))
     except BriefConfirmAborted as exc:
         log.info("brief.confirm", result="aborted", reason=str(exc))
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
@@ -223,8 +251,14 @@ def ask(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        log.exception("error", message=str(exc))
-        typer.secho(f"scope failed: {exc}", fg=typer.colors.RED, err=True)
+        log.exception("error", stage=stage, message=str(exc))
+        typer.secho(f"{stage} failed: {exc}", fg=typer.colors.RED, err=True)
+        if stage == "research" and job_id is not None:
+            typer.secho(
+                f"研究成果已保存，可用 `prospector-local job resume {job_id}` 从断点继续。",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
         raise typer.Exit(code=1) from exc
     finally:
         elapsed = time.monotonic() - t0
@@ -232,6 +266,38 @@ def ask(
         close_pool()
 
     assert confirmed is not None
+
+
+@job_app.command("resume")
+def job_resume(
+    job_id: Annotated[str, typer.Argument(help="Research job UUID")],
+) -> None:
+    """Re-enter a stopped research graph from its checkpoint, keeping the evidence."""
+    try:
+        parsed_job_id = UUID(job_id)
+    except ValueError as exc:
+        raise typer.BadParameter("job_id must be a UUID") from exc
+
+    t0 = time.monotonic()
+    try:
+        _bootstrap(require_llm=True)
+        repository = ResearchRepository()
+        effort = repository.get_job_effort(parsed_job_id)
+        typer.echo(f"JOB_RESUMED: {parsed_job_id}", err=True)
+        _run_research_graph(repository, parsed_job_id, effort=effort, initial_state=None)
+    except LlmNotConfiguredError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except VerifierMajorGapError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        log.exception("error", stage="resume", message=str(exc))
+        typer.secho(f"resume failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        log.info("done", elapsed=f"{time.monotonic() - t0:.1f}s")
+        close_pool()
 
 
 @job_app.command("events")

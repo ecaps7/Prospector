@@ -25,8 +25,14 @@ def research_verifier_messages(snapshot: dict[str, Any]) -> list[dict[str, str]]
    禁止在冲突字段填写 excerpt_id、doc_id、view_id 或任何非 assertion_id；
 4. 根据 URL、标题、author、发布时间、Excerpt 原文以及独立佐证情况，直接判断来源可信度。
    伪学术、UGC 幻觉或无独立佐证却支撑核心定量结论的断言，必须写入 assertion_dispositions
-  （status=unusable，只填 assertion_id）；若实质影响结论，再开 source_credibility 缺口，
-   且 related_assertion_ids 必须覆盖本轮废证集合。
+  （status=unusable，只填 assertion_id）；若实质影响结论，再开 source_credibility 缺口。
+   两个字段各司其职，不是同一份名单：
+   - assertion_dispositions 表达"这条证据还能不能用"；
+   - source_credibility 缺口的 related_assertion_ids 表达"这个来源问题涉及哪些断言"，
+     任何 severity 都必须点名到具体 assertion_id，不得只说"部分来源偏弱"。
+   severity 决定两者的关系：major 表示这些证据已不可用，代码会据此把它们全部废掉；
+   minor 表示可在报告中披露、但结论仍然成立，此时可以只点名而不废任何证据——
+   "来源偏弱、值得说明、但这条结论站得住"是合法且常见的判断，不要为了凑一致而硬废证。
    废证后若其余真实证据已足够履行 Plan，可 pass（仅 disposition、无 major 缺口）。
    每轮须重申仍成立的 unusable，或显式 restored；不得静默丢失历史废证。
    assertion_dispositions 禁止填写 excerpt/doc/view UUID。

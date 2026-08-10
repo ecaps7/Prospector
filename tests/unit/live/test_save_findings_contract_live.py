@@ -55,7 +55,7 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
             }
         ],
         response_format=WORKER_ACTION_RESPONSE_FORMAT,
-        extra_body={"enable_thinking": False},
+        extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
     )
     content = response.choices[0].message.content
     assert content is not None

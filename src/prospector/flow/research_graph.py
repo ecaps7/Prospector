@@ -34,13 +34,22 @@ from prospector.agents.report_writer import (
     ReportWriterModel,
     ReportWriterOutputError,
 )
-from prospector.agents.research_verifier import OpenAIResearchVerifier, VerifierModel
+from prospector.agents.research_verifier import (
+    OpenAIResearchVerifier,
+    VerifierModel,
+    VerifierOutputError,
+)
 from prospector.agents.research_worker import ResearchWorker
 from prospector.agents.usage import collect_usage
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.citation_render import render_verified_report
 from prospector.deterministic.dirty_propagation import can_revise_again, dirty_statement_ids
-from prospector.deterministic.gates import dispatch_rejection, finish_rejection
+from prospector.deterministic.gates import (
+    dispatch_rejection,
+    finish_rejection,
+    mixed_stage_rejection,
+    stage_order_rejection,
+)
 from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
@@ -55,6 +64,10 @@ from prospector.tools.web_search import ExaClient, WebSearchTool
 
 log = get_logger("prospector.research_graph")
 tracer = trace.get_tracer("prospector.research_graph")
+
+# Malformed Planner output is retried at the runtime layer rather than charged to the
+# research budget; this cap is what keeps that retry loop terminating.
+MAX_CONSECUTIVE_SCHEMA_ERRORS = 3
 
 
 @dataclass(slots=True)
@@ -116,7 +129,7 @@ def _stage_concurrency(state: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _research_state_message(state: Mapping[str, Any]) -> dict[str, Any]:
-    used = int(state.get("decision_round", 0))
+    used = int(state.get("research_decisions_used", 0))
     limit = int(state["decision_round_limit"])
     return {
         "current_research_stage": str(state["current_research_stage"]),
@@ -150,7 +163,10 @@ def _initialize_node(services: ResearchGraphServices):
             "current_research_stage": "scout",
             "plan_version": 0,
             "decision_round": 0,
+            "research_decisions_used": 0,
+            "consecutive_schema_errors": 0,
             "decision_round_limit": limits.decision_round_limit,
+            "scout_dispatched": False,
             "stage_budgets": stage_budgets,
             "active_task_ids": [],
             "outcome": None,
@@ -189,7 +205,7 @@ def _end_for_budget(state: ResearchState, services: ResearchGraphServices) -> di
 
 def _planner_node(services: ResearchGraphServices):
     def planner(state: ResearchState) -> dict[str, Any]:
-        if int(state["decision_round"]) >= int(state["decision_round_limit"]):
+        if int(state["research_decisions_used"]) >= int(state["decision_round_limit"]):
             return _end_for_budget(state, services)
 
         job_id = UUID(state["job_id"])
@@ -247,6 +263,31 @@ def _planner_node(services: ResearchGraphServices):
                     status="schema_error",
                 )
             services.repository.record_planner_rejection(job_id, decision_round, "schema_error")
+            # A malformed decision is a formatting failure, not a research decision: it
+            # advances the storage key but never the research budget. The consecutive cap
+            # is what keeps the retry loop terminating.
+            consecutive = int(state["consecutive_schema_errors"]) + 1
+            if consecutive >= MAX_CONSECUTIVE_SCHEMA_ERRORS:
+                services.repository.set_research_outcome(
+                    job_id,
+                    outcome="failed",
+                    error_code="planner_schema_error_limit",
+                    phase="failed",
+                )
+                log.error(
+                    "planner.schema_error_limit",
+                    job_id=str(job_id),
+                    consecutive=consecutive,
+                    decision_round=decision_round,
+                )
+                return {
+                    "decision_round": decision_round,
+                    "consecutive_schema_errors": consecutive,
+                    "phase": "failed",
+                    "outcome": "failed",
+                    "error_code": "planner_schema_error_limit",
+                    "route": "end",
+                }
             messages = append_decision(prompt, exc.raw_output)
             messages = append_runtime_feedback(
                 messages,
@@ -255,6 +296,7 @@ def _planner_node(services: ResearchGraphServices):
             )
             next_state: dict[str, Any] = {
                 "decision_round": decision_round,
+                "consecutive_schema_errors": consecutive,
                 "planner_messages": messages,
                 "route": "planner",
             }
@@ -268,6 +310,7 @@ def _planner_node(services: ResearchGraphServices):
 
         assert model_result is not None
         decision = model_result.decision
+        research_decisions_used = int(state["research_decisions_used"]) + 1
         if not replayed:
             services.repository.complete_decision(
                 job_id,
@@ -279,14 +322,36 @@ def _planner_node(services: ResearchGraphServices):
 
         if decision.decision == "dispatch":
             assert decision.dispatch is not None
-            batch_stage = decision.dispatch.tasks[0].research_stage
+            batch_stages = [task.research_stage for task in decision.dispatch.tasks]
+            batch_stage = batch_stages[0]
             stage_concurrency = int(state["stage_budgets"][batch_stage]["max_concurrency"])
-            rejection = dispatch_rejection(len(decision.dispatch.tasks), stage_concurrency)
+            # Order matters: a mixed batch has no single stage, so its concurrency ceiling
+            # is undefined until that is ruled out.
+            rejection = mixed_stage_rejection(batch_stages)
+            feedback = ""
             if rejection is not None:
                 feedback = (
-                    f"整批派发被拒绝：本轮提交 {len(decision.dispatch.tasks)} 个任务，"
-                    f"{batch_stage} 阶段的并发上限为 {stage_concurrency}。请缩小本轮任务批次。"
+                    f"整批派发被拒绝：本轮提交的任务分属 {'、'.join(sorted(set(batch_stages)))} "
+                    "多个阶段。每批只能使用一个 research_stage。"
+                    "请先派发其中一个阶段的任务，其余留到后续轮次。"
                 )
+            if rejection is None:
+                rejection = stage_order_rejection(
+                    batch_stage, scout_dispatched=bool(state["scout_dispatched"])
+                )
+                if rejection is not None:
+                    feedback = (
+                        f"整批派发被拒绝：本任务尚未派发过任何 scout 任务，不能直接进入 "
+                        f"{batch_stage}。请先用 scout 确认研究对象、可用指标和资料来源。"
+                    )
+            if rejection is None:
+                rejection = dispatch_rejection(len(decision.dispatch.tasks), stage_concurrency)
+                if rejection is not None:
+                    feedback = (
+                        f"整批派发被拒绝：本轮提交 {len(decision.dispatch.tasks)} 个任务，"
+                        f"{batch_stage} 阶段的并发上限为 {stage_concurrency}。请缩小本轮任务批次。"
+                    )
+            if rejection is not None:
                 services.repository.complete_decision(
                     job_id,
                     decision_round,
@@ -296,7 +361,10 @@ def _planner_node(services: ResearchGraphServices):
                     status="rejected",
                 )
                 services.repository.record_planner_rejection(
-                    job_id, decision_round, rejection.value
+                    job_id,
+                    decision_round,
+                    rejection.value,
+                    research_decisions_used=research_decisions_used,
                 )
                 messages = append_runtime_feedback(
                     messages,
@@ -320,9 +388,11 @@ def _planner_node(services: ResearchGraphServices):
                         if state.get("last_verifier_run_id")
                         else None
                     ),
+                    research_decisions_used=research_decisions_used,
                 )
                 result = {
-                    "current_research_stage": decision.dispatch.tasks[0].research_stage,
+                    "current_research_stage": batch_stage,
+                    "scout_dispatched": bool(state["scout_dispatched"]) or batch_stage == "scout",
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
                     "last_verifier_run_id": None,
@@ -339,6 +409,7 @@ def _planner_node(services: ResearchGraphServices):
                 decision_round,
                 decision,
                 {"note": decision.reflect.note.splitlines()[0]},
+                research_decisions_used=research_decisions_used,
             )
             messages = append_runtime_feedback(
                 messages,
@@ -361,7 +432,10 @@ def _planner_node(services: ResearchGraphServices):
                     status="rejected",
                 )
                 services.repository.record_planner_rejection(
-                    job_id, decision_round, rejection.value
+                    job_id,
+                    decision_round,
+                    rejection.value,
+                    research_decisions_used=research_decisions_used,
                 )
                 messages = append_runtime_feedback(
                     messages,
@@ -375,9 +449,12 @@ def _planner_node(services: ResearchGraphServices):
                     decision_round,
                     decision,
                     {"reason": decision.finish.reason.splitlines()[0]},
+                    research_decisions_used=research_decisions_used,
                 )
                 return {
                     "decision_round": decision_round,
+                    "research_decisions_used": research_decisions_used,
+                    "consecutive_schema_errors": 0,
                     "planner_messages": messages,
                     "phase": "verifier",
                     "outcome": "ready_for_verifier",
@@ -386,13 +463,18 @@ def _planner_node(services: ResearchGraphServices):
                     "route": "verifier",
                 }
 
-        updated_state = {**state, "decision_round": decision_round, **result}
+        counters = {
+            "decision_round": decision_round,
+            "research_decisions_used": research_decisions_used,
+            "consecutive_schema_errors": 0,
+        }
+        updated_state = {**state, **counters, **result}
         messages = append_runtime_feedback(
             messages,
             feedback_type="research_state",
             payload=_research_state_message(updated_state),
         )
-        return {"decision_round": decision_round, "planner_messages": messages, **result}
+        return {**counters, "planner_messages": messages, **result}
 
     return planner
 
@@ -581,18 +663,33 @@ def _verifier_node(services: ResearchGraphServices):
                 trigger=trigger,
                 full_prompt=full_prompt,
             )
-            with (
-                tracer.start_as_current_span(
-                    "llm.call",
-                    attributes={
-                        "prospector.job_id": str(job_id),
-                        "prospector.plan_version": plan_version,
-                        "prospector.agent": "research_verifier",
-                    },
-                ),
-                collect_usage(services.repository, job_id, "research_verifier"),
-            ):
-                model_result = services.verifier.verify(snapshot)
+            try:
+                with (
+                    tracer.start_as_current_span(
+                        "llm.call",
+                        attributes={
+                            "prospector.job_id": str(job_id),
+                            "prospector.plan_version": plan_version,
+                            "prospector.agent": "research_verifier",
+                        },
+                    ),
+                    collect_usage(services.repository, job_id, "research_verifier"),
+                ):
+                    model_result = services.verifier.verify(snapshot)
+            except VerifierOutputError as exc:
+                # Keep the raw answer and stop the Job cleanly. Both matter: without the
+                # answer the rejection cannot be diagnosed, and without the outcome the
+                # Job sits at 'running' forever after the process is already gone.
+                services.repository.fail_verifier_run(
+                    job_id, run_id, raw_output=exc.raw_output, error=str(exc)
+                )
+                services.repository.set_research_outcome(
+                    job_id,
+                    outcome="failed",
+                    error_code="verifier_output_invalid",
+                    phase="failed",
+                )
+                raise
             if model_result.full_prompt != full_prompt:
                 raise RuntimeError("Verifier model used a different prompt than the persisted run")
             decision = model_result.decision
@@ -603,6 +700,7 @@ def _verifier_node(services: ResearchGraphServices):
                 raw_output=model_result.raw_output,
                 evaluated_plan_version=plan_version,
                 decision_round=decision_round,
+                research_decisions_used=int(state["research_decisions_used"]),
             )
             major_gap_count = sum(gap.severity == "major" for gap in decision.gaps)
             log.debug(

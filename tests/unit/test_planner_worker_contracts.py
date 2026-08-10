@@ -10,14 +10,17 @@ import pytest
 from pydantic import ValidationError
 
 from prospector.agents.planner import append_runtime_feedback, initial_planner_messages
+from prospector.agents.prompts.research_worker import worker_constraints_message
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.gates import (
     InformationGainCounter,
     PlannerRejection,
     dispatch_rejection,
     finish_rejection,
+    mixed_stage_rejection,
+    stage_order_rejection,
 )
-from prospector.schemas.brief import ResearchBrief
+from prospector.schemas.brief import ResearchBrief, UserConstraints
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.plan import ResearchTaskDraft, SourcePolicy
 from prospector.tools.save_findings import SaveFindingsArguments
@@ -62,6 +65,29 @@ def test_planner_decision_is_exactly_one_of_three() -> None:
                 "reflect": {"note": "同时反思"},
             }
         )
+
+
+def test_mixed_stage_batch_parses_and_is_rejected_by_the_runtime_gate() -> None:
+    """A mixed batch is a planning error, so it must survive parsing and be gated.
+
+    Rejecting it in the schema would classify it as a formatting failure, which the
+    runtime retries for free instead of charging to the research budget.
+    """
+    decision = PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "dispatch": {
+                "tasks": [
+                    {**_draft().model_dump(), "research_stage": "scout"},
+                    {**_draft().model_dump(), "research_stage": "deep_dive"},
+                ],
+                "reason": "同时摸底和深挖",
+            },
+        }
+    )
+    assert decision.dispatch is not None
+    stages = [task.research_stage for task in decision.dispatch.tasks]
+    assert mixed_stage_rejection(stages) == PlannerRejection.MIXED_STAGE
 
 
 def test_planner_cannot_author_runtime_budget() -> None:
@@ -150,6 +176,52 @@ def test_planner_prompt_requires_bounded_stages_without_rigid_evidence_counts() 
     assert "completion_criteria" not in system_prompt
 
 
+def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> None:
+    """Binding limits and proposed directions must not arrive as one paragraph.
+
+    They carry different authority, so the Planner should be able to tell them apart by
+    position rather than by re-reading the prose every round.
+    """
+    brief = ResearchBrief(
+        question="研究问题",
+        brief_text="研究一个具体问题并比较竞争解释。",
+        user_constraints=UserConstraints(
+            time_range="近三年",
+            source_rules=["只要一手数据"],
+            exclusions=["不涉及监管政策"],
+        ),
+    )
+    message = str(initial_planner_messages(brief, limits_for_effort("standard"))[1]["content"])
+
+    assert "不可协商" in message
+    assert "近三年" in message
+    assert "只要一手数据" in message
+    assert "不涉及监管政策" in message
+    binding = message.index("不可协商")
+    suggestions = message.index("供你取舍")
+    assert binding < suggestions < message.index("研究一个具体问题")
+
+    bare = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
+    bare_message = str(initial_planner_messages(bare, limits_for_effort("standard"))[1]["content"])
+    assert "不可协商" not in bare_message
+    assert "没有提出额外限制" in bare_message
+
+
+def test_worker_receives_source_rules_and_exclusions_directly() -> None:
+    assert worker_constraints_message(UserConstraints()) is None
+
+    message = worker_constraints_message(
+        UserConstraints(source_rules=["只要一手数据"], exclusions=["不涉及监管政策"])
+    )
+    assert message is not None
+    assert "只要一手数据" in message
+    assert "不涉及监管政策" in message
+    assert "不可协商" in message
+
+    # deliverable_rules govern the report, not the Worker's searching, so they stay out.
+    assert worker_constraints_message(UserConstraints(deliverable_rules=["附带图表"])) is None
+
+
 def test_effort_maps_round_limit_and_stage_budgets() -> None:
     assert limits_for_effort("quick").decision_round_limit == 8
     assert limits_for_effort("standard").decision_round_limit == 12
@@ -183,6 +255,16 @@ def test_hard_gates_are_deterministic() -> None:
     assert dispatch_rejection(3, 3) is None
     assert finish_rejection(0) == PlannerRejection.EMPTY_FINISH
     assert finish_rejection(1) is None
+
+    assert mixed_stage_rejection(["scout", "scout"]) is None
+    assert mixed_stage_rejection(["scout", "deep_dive"]) == PlannerRejection.MIXED_STAGE
+
+    assert stage_order_rejection("scout", scout_dispatched=False) is None
+    assert stage_order_rejection("deep_dive", scout_dispatched=True) is None
+    assert stage_order_rejection("deep_dive", scout_dispatched=False) == (
+        PlannerRejection.STAGE_ORDER
+    )
+    assert stage_order_rejection("verify", scout_dispatched=False) == PlannerRejection.STAGE_ORDER
 
     counter = InformationGainCounter()
     assert counter.record_save(0) is False

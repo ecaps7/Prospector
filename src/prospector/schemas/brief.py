@@ -9,6 +9,52 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 EffortLevel = Literal["quick", "standard", "deep"]
 
 
+class UserConstraints(BaseModel):
+    """Limits the user stated themselves, kept apart from anything Scope proposed.
+
+    brief_text carries the open research space: suggestions the Planner may take or
+    drop. These fields carry the opposite kind of information — things that are wrong
+    to violate. Dissolving both into one paragraph forces every downstream agent to
+    re-infer which is which, so the binding half is held as fields instead.
+
+    Every field is empty unless the user actually said it; empty is the common case.
+    """
+
+    time_range: str = Field(default="", description="用户说的时间范围原话")
+    regions: list[str] = Field(default_factory=list, max_length=12)
+    comparison_targets: list[str] = Field(default_factory=list, max_length=12)
+    source_rules: list[str] = Field(default_factory=list, max_length=12)
+    exclusions: list[str] = Field(default_factory=list, max_length=12)
+    deliverable_rules: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("time_range")
+    @classmethod
+    def _strip_optional(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("regions", "comparison_targets", "source_rules", "exclusions")
+    @classmethod
+    def _clean_entries(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values if value.strip()]
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator("deliverable_rules")
+    @classmethod
+    def _clean_deliverable_rules(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values if value.strip()]
+        return list(dict.fromkeys(cleaned))
+
+    def is_empty(self) -> bool:
+        return not (
+            self.time_range
+            or self.regions
+            or self.comparison_targets
+            or self.source_rules
+            or self.exclusions
+            or self.deliverable_rules
+        )
+
+
 class ResearchBrief(BaseModel):
     """A concrete research question with an expanded candidate research space."""
 
@@ -17,6 +63,10 @@ class ResearchBrief(BaseModel):
         ...,
         min_length=1,
         description="Concrete research question and candidate directions for Planner selection",
+    )
+    user_constraints: UserConstraints = Field(
+        default_factory=UserConstraints,
+        description="Binding limits the user stated; never Scope's own suggestions",
     )
     output_format: str = Field(default="report_with_citations")
     language: str = Field(default="zh", min_length=1)
@@ -39,6 +89,13 @@ class ClarifyDecision(BaseModel):
         default="",
         description="Clarifying question for the user when need_clarification is true",
     )
+    assessment: str = Field(
+        default="",
+        description=(
+            "Why this question is answerable as-is, and which gaps the Brief should open "
+            "rather than ask about; handed to the Brief writer instead of being discarded"
+        ),
+    )
 
     @model_validator(mode="after")
     def _consistent_fields(self) -> ClarifyDecision:
@@ -46,6 +103,9 @@ class ClarifyDecision(BaseModel):
             raise ValueError("clarification question required when need_clarification")
         if not self.need_clarification and self.question.strip():
             raise ValueError("clarification question must be blank when not needed")
+        # assessment stays optional: losing a hint is a worse trade than failing Scope
+        # outright, and Scope has no retry path.
+        self.assessment = self.assessment.strip()
         return self
 
 

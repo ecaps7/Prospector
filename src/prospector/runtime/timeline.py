@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -136,6 +136,8 @@ _STOP_REASON_LABELS = {
 _REJECTION_LABELS = {
     "over_concurrency": "派发任务超过并发上限",
     "over_scope": "单任务申报对象超出工具预算可覆盖范围",
+    "mixed_stage": "同一批任务混用了多个 research_stage",
+    "stage_order": "尚未做过 scout 就直接进入深入阶段",
     "schema_error": "输出格式不合法",
     "empty_finish": "尚无证据，不能结束研究",
 }
@@ -181,6 +183,11 @@ class ResearchTimelineRenderer:
         self.repository = repository
         self.limits = limits
         self._task_labels: dict[str, str] = {}
+        # decision_round in the event payload is the storage key, which also advances on
+        # malformed output, so it no longer equals the research budget spent. The runtime
+        # writes the authoritative count into the payload; this mirrors the latest one it
+        # has seen so events that predate the field (or omit it) still render a number.
+        self._research_decisions_used = 0
 
     def _task_label(self, task_id: object) -> str:
         key = str(task_id)
@@ -195,8 +202,15 @@ class ResearchTimelineRenderer:
         for task_id in task_ids:
             self._task_label(task_id)
 
-    def _remaining_rounds(self, decision_round: int) -> int:
-        return max(0, self.limits.decision_round_limit - decision_round)
+    def _track_research_decisions(self, payload: Mapping[str, Any]) -> None:
+        reported = payload.get("research_decisions_used")
+        if reported is None:
+            self._research_decisions_used += 1
+        else:
+            self._research_decisions_used = int(reported)
+
+    def _remaining_rounds(self) -> int:
+        return max(0, self.limits.decision_round_limit - self._research_decisions_used)
 
     def render(self, event: dict[str, Any]) -> list[str]:
         event_type = str(event["event_type"])
@@ -215,7 +229,10 @@ class ResearchTimelineRenderer:
             decision_round = int(payload["decision_round"])
             reason_code = str(payload.get("reason_code") or "")
             reason = _REJECTION_LABELS.get(reason_code, reason_code)
-            remaining = self._remaining_rounds(decision_round)
+            if reason_code == "schema_error":
+                return [f"[轮 {decision_round}] Planner 输出格式不合法，重试（不计研究轮）"]
+            self._track_research_decisions(payload)
+            remaining = self._remaining_rounds()
             return [f"[轮 {decision_round}] Planner 决策被拒绝：{reason}（余 {remaining} 轮）"]
 
         if event_type == "verifier.completed":
@@ -276,6 +293,9 @@ class ResearchTimelineRenderer:
     def _render_verifier_completed(
         self, event: dict[str, Any], payload: dict[str, Any]
     ) -> list[str]:
+        reported = payload.get("research_decisions_used")
+        if reported is not None:
+            self._research_decisions_used = int(reported)
         plan_version = int(payload["plan_version"])
         major_count = int(payload.get("major_gap_count", 0))
         minor_count = int(payload.get("minor_gap_count", 0))
@@ -298,8 +318,7 @@ class ResearchTimelineRenderer:
                 lines.extend(self._render_unusable_tree(unusable_summaries))
             return lines
 
-        decision_round = int(event.get("decision_round") or 0)
-        remaining = self._remaining_rounds(decision_round)
+        remaining = self._remaining_rounds()
         header = (
             f"[核验] Plan v{plan_version} 不通过：{major_count} 个重大缺口"
             f"（次要 {minor_count}，冲突 {conflict_count}，废证 {unusable_count}）"
@@ -388,15 +407,18 @@ class ResearchTimelineRenderer:
                 return ["[研究] 失败：预算耗尽且没有保存任何证据"]
             if error_code == "verifier_major_gap":
                 return ["[核验] 失败：存在重大缺口且 Planner 决策轮已耗尽"]
+            if error_code == "planner_schema_error_limit":
+                return ["[研究] 失败：Planner 连续多次输出非法格式"]
             return [f"[研究] 失败：{error_code}"]
         return []
 
     def _render_planner_decision(self, payload: dict[str, Any]) -> list[str]:
         decision_round = int(payload["decision_round"])
         decision = str(payload.get("decision") or "")
+        self._track_research_decisions(payload)
         if decision == "dispatch":
             task_ids = [str(value) for value in payload.get("task_ids") or []]
-            remaining = self._remaining_rounds(decision_round)
+            remaining = self._remaining_rounds()
             reason = _first_line(payload.get("reason"))
             reason_suffix = f"：{reason}" if reason else ""
             lines = [

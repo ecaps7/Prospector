@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from prospector.config import Settings, get_settings
-from prospector.schemas.brief import EffortLevel, ResearchBrief
+from prospector.schemas.brief import EffortLevel, ResearchBrief, UserConstraints
 from prospector.schemas.claims import (
     BridgeStatementDecision,
     DerivedStatementDecision,
@@ -157,10 +157,11 @@ class ResearchRepository:
                 text(
                     """
                     INSERT INTO app.briefs
-                      (id, job_id, question, brief_text, output_format, language, effort, frozen_at)
+                      (id, job_id, question, brief_text, user_constraints,
+                       output_format, language, effort, frozen_at)
                     VALUES
-                      (:id, :job_id, :question, :brief_text, :output_format,
-                       :language, :effort, :frozen_at)
+                      (:id, :job_id, :question, :brief_text, CAST(:user_constraints AS JSONB),
+                       :output_format, :language, :effort, :frozen_at)
                     """
                 ),
                 {
@@ -168,6 +169,7 @@ class ResearchRepository:
                     "job_id": job_id,
                     "question": brief.question,
                     "brief_text": brief.brief_text,
+                    "user_constraints": _json(brief.user_constraints.model_dump(mode="json")),
                     "output_format": brief.output_format,
                     "language": brief.language,
                     "effort": brief.effort,
@@ -208,7 +210,8 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                    SELECT question, brief_text, output_format, language, effort
+                    SELECT question, brief_text, user_constraints,
+                           output_format, language, effort
                     FROM app.briefs WHERE id=:id
                     """
                     ),
@@ -218,6 +221,22 @@ class ResearchRepository:
                 .one()
             )
         return ResearchBrief.model_validate(dict(row))
+
+    def get_job_user_constraints(self, job_id: UUID) -> UserConstraints:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT b.user_constraints FROM app.briefs b
+                    JOIN app.jobs j ON j.brief_id=b.id
+                    WHERE j.id=:job_id
+                    """
+                ),
+                {"job_id": job_id},
+            ).scalar_one_or_none()
+        if not row:
+            return UserConstraints()
+        return UserConstraints.model_validate(row)
 
     def get_job_effort(self, job_id: UUID) -> EffortLevel:
         with self.engine.connect() as conn:
@@ -321,6 +340,8 @@ class ResearchRepository:
         decision_round: int,
         decision: PlannerDecision,
         payload: dict[str, Any],
+        *,
+        research_decisions_used: int | None = None,
     ) -> None:
         with self.engine.begin() as conn:
             exists = conn.execute(
@@ -347,6 +368,7 @@ class ResearchRepository:
                 decision_round=decision_round,
                 payload={
                     "decision_round": decision_round,
+                    "research_decisions_used": research_decisions_used,
                     "decision": decision.decision,
                     **payload,
                 },
@@ -357,6 +379,8 @@ class ResearchRepository:
         job_id: UUID,
         decision_round: int,
         reason_code: str,
+        *,
+        research_decisions_used: int | None = None,
     ) -> None:
         with self.engine.begin() as conn:
             exists = conn.execute(
@@ -381,7 +405,11 @@ class ResearchRepository:
                 job_id=job_id,
                 event_type=EventType.PLANNER_REJECTED,
                 decision_round=decision_round,
-                payload={"decision_round": decision_round, "reason_code": reason_code},
+                payload={
+                    "decision_round": decision_round,
+                    "research_decisions_used": research_decisions_used,
+                    "reason_code": reason_code,
+                },
             )
 
     def create_plan(
@@ -392,6 +420,7 @@ class ResearchRepository:
         *,
         reason: str,
         trigger_verifier_run: UUID | None = None,
+        research_decisions_used: int | None = None,
     ) -> Plan:
         now = datetime.now(UTC)
         plan_id = uuid4()
@@ -493,6 +522,7 @@ class ResearchRepository:
                 decision_round=decision_round,
                 payload={
                     "decision_round": decision_round,
+                    "research_decisions_used": research_decisions_used,
                     "decision": "dispatch",
                     "plan_version": version,
                     "task_ids": task_ids,
@@ -1418,7 +1448,22 @@ class ResearchRepository:
                 .one()
             )
             if row["full_prompt"] != full_prompt:
-                raise RuntimeError("Verifier replayed with a different persisted prompt")
+                # Only reachable for a run that never completed -- the caller short-circuits
+                # on a completed one -- so there is no accepted answer whose provenance this
+                # could falsify. Re-freeze rather than refuse: the guard's job is to keep a
+                # stored decision tied to the prompt that produced it, and erroring here
+                # instead strands every Job that stopped before its answer was accepted,
+                # permanently, the moment the Verifier prompt is edited.
+                conn.execute(
+                    text(
+                        """
+                        UPDATE app.verifier_runs
+                        SET full_prompt=CAST(:full_prompt AS JSONB)
+                        WHERE id=:run_id
+                        """
+                    ),
+                    {"full_prompt": _json(full_prompt), "run_id": row["id"]},
+                )
             return UUID(str(row["id"]))
 
     def complete_verifier_run(
@@ -1430,6 +1475,7 @@ class ResearchRepository:
         raw_output: object,
         evaluated_plan_version: int,
         decision_round: int,
+        research_decisions_used: int | None = None,
     ) -> None:
         with self.engine.begin() as conn:
             task_ids = {
@@ -1472,7 +1518,9 @@ class ResearchRepository:
                         credibility_rationale=:credibility_rationale,
                         release_decision=:release_decision,
                         gaps=CAST(:gaps AS JSONB), status='completed', completed_at=:now
-                    WHERE id=:run_id AND job_id=:job_id AND status='prompted'
+                    -- 'failed' is retryable on purpose: a resumed Job re-asks the same
+                    -- frozen prompt, and the second answer is allowed to land here.
+                    WHERE id=:run_id AND job_id=:job_id AND status IN ('prompted','failed')
                     """
                 ),
                 {
@@ -1507,6 +1555,7 @@ class ResearchRepository:
                 decision_round=decision_round,
                 payload={
                     "verifier_run_id": str(run_id),
+                    "research_decisions_used": research_decisions_used,
                     "plan_version": evaluated_plan_version,
                     "release_decision": decision.release_decision,
                     "decision_reason": decision.decision_reason.splitlines()[0],
@@ -1542,6 +1591,39 @@ class ResearchRepository:
                         }
                         for item in unusable_dispositions[:8]
                     ],
+                },
+            )
+
+    def fail_verifier_run(
+        self,
+        job_id: UUID,
+        run_id: UUID,
+        *,
+        raw_output: object,
+        error: str,
+    ) -> None:
+        """Persist what the model actually said when its output could not be accepted.
+
+        Without this the run stays at 'prompted' with raw_output NULL, so the one artifact
+        needed to diagnose a rejected judgement is the one thing thrown away.
+        """
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.verifier_runs
+                    SET raw_output=CAST(:raw_output AS JSONB),
+                        decision_reason=:error,
+                        status='failed', completed_at=:now
+                    WHERE id=:run_id AND job_id=:job_id AND status IN ('prompted','failed')
+                    """
+                ),
+                {
+                    "raw_output": _json(raw_output),
+                    "error": error[:2000],
+                    "now": datetime.now(UTC),
+                    "run_id": run_id,
+                    "job_id": job_id,
                 },
             )
 

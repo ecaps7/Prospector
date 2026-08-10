@@ -12,11 +12,15 @@ import pytest
 from pydantic import ValidationError
 
 from prospector.agents.prompts.research_worker import (
+    worker_coverage_message,
     worker_system_prompt,
 )
 from prospector.agents.research_worker import (
     AUTO_FETCH_TOP_N,
+    AUTO_FETCH_TOP_N_BY_STAGE,
+    KEEP_FULL_FETCH_ROUNDS,
     WORKER_ACTION_RESPONSE_FORMAT,
+    WORKER_ACTION_SCHEMA,
     EvidenceSourceRegistry,
     OpenAIWorkerModel,
     ResearchWorker,
@@ -27,6 +31,7 @@ from prospector.agents.research_worker import (
     WorkerToolCall,
 )
 from prospector.flow.cancellation import JobCancelledError
+from prospector.schemas.brief import UserConstraints
 from prospector.schemas.evidence import Assertion
 from prospector.schemas.plan import ResearchTask, TaskBudget
 from prospector.store.repositories import ResearchRepository
@@ -38,6 +43,11 @@ class FakeRepository:
         self.tool_events: list[dict[str, Any]] = []
         self.round_events: list[tuple[int, int]] = []
         self.assertions: list[Assertion] = []
+        self.user_constraints = UserConstraints()
+
+    def get_job_user_constraints(self, job_id: UUID) -> UserConstraints:
+        del job_id
+        return self.user_constraints
 
     def record_worker_round(
         self,
@@ -619,7 +629,7 @@ def test_worker_finish_requires_reason() -> None:
         )
 
 
-async def test_openai_worker_action_uses_strict_json_schema() -> None:
+async def test_openai_worker_action_uses_json_object_format() -> None:
     content = json.dumps(
         {
             "action": "finish",
@@ -641,8 +651,10 @@ async def test_openai_worker_action_uses_strict_json_schema() -> None:
 
     assert action.finish is not None
     assert action.finish.reason == "已覆盖任务要求的直接证据。"
-    assert WORKER_ACTION_RESPONSE_FORMAT["json_schema"]["strict"] is True
-    assert WORKER_ACTION_RESPONSE_FORMAT["json_schema"]["schema"]["additionalProperties"] is False
+    assert WORKER_ACTION_RESPONSE_FORMAT == {"type": "json_object"}
+    assert json.loads(WORKER_ACTION_SCHEMA)["additionalProperties"] is False
+    system_prompt = worker_system_prompt(action_schema=WORKER_ACTION_SCHEMA)
+    assert "JSON Schema" in system_prompt
     assert client.completions.request is not None
     assert client.completions.request["response_format"] == WORKER_ACTION_RESPONSE_FORMAT
     assert "tools" not in client.completions.request
@@ -981,6 +993,30 @@ async def test_worker_checks_coverage_after_every_save_until_goal_is_met() -> No
     assert feedback.goal_met is True
     assert feedback.stop_reason == "expected_evidence_satisfied"
     assert feedback.tool_calls_used == 4
+
+
+def test_coverage_message_hands_the_worker_the_same_ledger_the_judge_read() -> None:
+    """The judge decides from stored assertions in a clean context.
+
+    Echoing that ledger back keeps the Worker deciding against the same record, instead
+    of against a thread the judge never sees.
+    """
+    assertions = [
+        Assertion(
+            assertion_id=uuid4(),
+            statement="东京都 2023 年调查的样本量为 3400 人。",
+            excerpt_ids=[uuid4()],
+            topic_tags=[],
+            produced_by={"task_id": str(uuid4()), "worker": "rw_test"},
+        )
+    ]
+    message = worker_coverage_message("缺少大阪的同口径数据", assertions)
+
+    assert "东京都 2023 年调查的样本量为 3400 人。" in message
+    assert "缺少大阪的同口径数据" in message
+    assert "共 1 条" in message
+
+    assert "尚无已落库断言" in worker_coverage_message("缺少直接证据", [])
 
 
 async def test_worker_binds_summary_text_to_ledger_id_without_model_copying_uuid() -> None:
@@ -1351,3 +1387,99 @@ async def test_auto_fetch_respects_top_n_limit() -> None:
     assert len(fetch_tool.fetched_urls) == AUTO_FETCH_TOP_N
     assert fetch_tool.fetched_urls == urls[:AUTO_FETCH_TOP_N]
     assert feedback.tool_calls_used == 1 + AUTO_FETCH_TOP_N
+
+
+class RepeatingSearchModel:
+    """Searches every round until the round budget runs out."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_messages: list[dict[str, Any]] = []
+
+    async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
+        self.seen_messages = [dict(message) for message in messages]
+        self.calls += 1
+        return WorkerModelAction(
+            assistant_message={"role": "assistant", "content": None},
+            tool_calls=[
+                WorkerToolCall(
+                    tool_name="web_search",
+                    tool_call_id=f"search-{self.calls}",
+                    arguments={"query": f"第 {self.calls} 个证据缺口的检索问题？"},
+                )
+            ],
+        )
+
+    async def assess_coverage(self, *args: Any, **kwargs: Any) -> WorkerCoverageAssessment:
+        del args, kwargs
+        return WorkerCoverageAssessment(goal_met=False, reason="仍缺少直接证据")
+
+    async def summarize(self, assertions: list[Assertion]) -> list[str]:
+        return [item.statement for item in assertions]
+
+
+async def test_fetched_bodies_leave_the_thread_once_they_are_no_longer_current() -> None:
+    """Old page bodies are dropped: the Evidence Store is the record, not the thread.
+
+    Stale full text both inflates every later round and competes with the gap the
+    Worker is currently being told to close.
+    """
+    rounds = KEEP_FULL_FETCH_ROUNDS + 3
+    search_tool = SearchWithResultsTool([{"url": "https://example.test/a"}])
+    fetch_tool = RecordingFetchTool()
+    model = RepeatingSearchModel()
+    repository = FakeRepository()
+    worker = ResearchWorker(
+        cast(ResearchRepository, repository),
+        [search_tool, fetch_tool, ConcurrentTool("save_findings", {"active": 0, "max_active": 0})],
+        model,
+    )
+
+    await worker.run(uuid4(), _task(max_worker_rounds=rounds), worker_id="rw_prune")
+
+    results = [
+        str(message["content"])
+        for message in model.seen_messages
+        if message["role"] == "user" and "运行结果" in str(message["content"])
+    ]
+    pruned = [
+        str(message["content"])
+        for message in model.seen_messages
+        if message["role"] == "user" and "原文已移出上下文" in str(message["content"])
+    ]
+    assert len(results) == KEEP_FULL_FETCH_ROUNDS
+    assert pruned, "older rounds must be replaced by a summary"
+
+    # The summary keeps what stops the Worker repeating itself, and drops the source
+    # refs along with the text so nothing can be saved from material it cannot read.
+    assert "https://example.test/a" in pruned[0]
+    assert "第 1 个证据缺口的检索问题？" in pruned[0]
+    assert "目标事实的原文证据。" not in pruned[0]
+
+
+def test_auto_fetch_depth_follows_the_research_stage() -> None:
+    """scout screens breadth-first, so it should not pull the most full text."""
+    assert AUTO_FETCH_TOP_N_BY_STAGE["scout"] < AUTO_FETCH_TOP_N_BY_STAGE["verify"]
+    assert AUTO_FETCH_TOP_N_BY_STAGE["verify"] < AUTO_FETCH_TOP_N_BY_STAGE["deep_dive"]
+
+
+async def test_scout_fetches_fewer_bodies_than_deep_dive() -> None:
+    urls = [f"https://example.test/{i}" for i in range(5)]
+
+    async def fetched_for(stage: str) -> list[str]:
+        fetch_tool = RecordingFetchTool()
+        worker = ResearchWorker(
+            cast(ResearchRepository, FakeRepository()),
+            [
+                SearchWithResultsTool([{"url": url} for url in urls]),
+                fetch_tool,
+                ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
+            ],
+            SearchThenFinishModel(),
+        )
+        task = _task().model_copy(update={"research_stage": stage, "subjects": ["目标公司"]})
+        await worker.run(uuid4(), task, worker_id=f"rw_{stage}")
+        return fetch_tool.fetched_urls
+
+    assert len(await fetched_for("scout")) == AUTO_FETCH_TOP_N_BY_STAGE["scout"]
+    assert len(await fetched_for("deep_dive")) == AUTO_FETCH_TOP_N_BY_STAGE["deep_dive"]

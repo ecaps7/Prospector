@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from openai import OpenAI
 from pydantic import ValidationError
 
-from prospector.agents.llm import get_openai_client, mid_model, strong_model
+from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model, strong_model
 from prospector.agents.prompts.planner import planner_brief_message, planner_system_prompt
 from prospector.agents.usage import record_response_usage, record_usage_value
 from prospector.deterministic.budget import ResearchLimits
@@ -196,7 +196,7 @@ class OpenAIPlannerModel:
             temperature=0.0,
             messages=[{"role": "user", "content": _repair_prompt(broken_output)}],
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         record_response_usage(response, self.repair_model)
         if not getattr(response, "choices", None):

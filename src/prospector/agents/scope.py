@@ -9,7 +9,7 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
-from prospector.agents.llm import get_openai_client, mid_model
+from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model
 from prospector.agents.prompts.scope import clarify_prompt, write_brief_prompt
 from prospector.config import Settings
 from prospector.obs.logging import get_logger
@@ -74,7 +74,7 @@ def _chat_json(
             temperature=0.0,
             messages=messages,
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
     except Exception:
         log.debug("llm.call.json_object_fallback", label=label, model=model)
@@ -82,7 +82,7 @@ def _chat_json(
             model=model,
             temperature=0.0,
             messages=messages,
-            extra_body={"enable_thinking": False},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
     content = None
     if getattr(response, "choices", None):
@@ -126,6 +126,7 @@ def write_research_brief(
     *,
     clarification_question: str | None = None,
     clarification_answer: str | None = None,
+    assessment: str | None = None,
     previous_brief: ResearchBrief | None = None,
     revision_note: str | None = None,
     language: str = "zh",
@@ -153,6 +154,7 @@ def write_research_brief(
             text,
             clarification_question=clarified_question,
             clarification_answer=clarified_answer,
+            assessment=assessment,
             previous_brief=previous_brief,
             revision_note=revision_note,
             language=language,
@@ -220,6 +222,7 @@ def run_scope(
 
     brief = write_research_brief(
         text,
+        assessment=decision.assessment,
         language=language,
         effort=effort,
         client=openai,
