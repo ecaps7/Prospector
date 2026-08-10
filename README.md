@@ -125,6 +125,16 @@ uv run pytest tests/integration -q -m "integration and not live"
 
 M0 的 checkpoint kill/resume 能力由集成测试验证，不作为空流程产品命令暴露。
 
+### 小型质量评测
+
+仓库包含一个不依赖历史 Job 的人工标注案例，用来检查 Report Verifier 能否识别有依据的事实、错误数字和推断过头：
+
+```bash
+uv run --env-file .env python eval/run_report_verifier.py
+```
+
+案例内容和判定标准见 [eval/README.md](eval/README.md)。
+
 ## 项目结构
 
 ```
