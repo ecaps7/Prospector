@@ -18,9 +18,7 @@ def _aliased_material(snapshot: WriterSnapshot) -> str:
     Excerpt ids can surface in loosely-typed fields too (e.g. minor_gaps), so the
     replacement walks the whole payload instead of naming individual fields.
     """
-    aliases = {
-        str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()
-    }
+    aliases = {str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()}
 
     def replace(value: object) -> object:
         if isinstance(value, str):
@@ -38,7 +36,7 @@ def _aliased_material(snapshot: WriterSnapshot) -> str:
 def report_writer_messages(snapshot: WriterSnapshot) -> list[dict[str, str]]:
     material = _aliased_material(snapshot)
     system = dedent(
-    """
+        """
     你是深度研究报告的撰写者。你负责把输入的研究材料写成一篇论证充分、结构清晰、读起来顺畅的研究报告。
 
     ## 唯一的硬性红线
@@ -139,9 +137,7 @@ def report_writer_revision_messages(
     findings: ReportVerifierFindings,
 ) -> list[dict[str, str]]:
     material = _aliased_material(snapshot)
-    aliases = {
-        str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()
-    }
+    aliases = {str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()}
 
     def replace(value: object) -> object:
         if isinstance(value, str):

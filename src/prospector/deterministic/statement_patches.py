@@ -31,8 +31,7 @@ def apply_statement_patches(
         disallowed = set(patch_map) - allowed_statement_ids
         if disallowed:
             raise StatementPatchError(
-                "patches touch statements not listed in findings: "
-                + ", ".join(sorted(disallowed))
+                "patches touch statements not listed in findings: " + ", ".join(sorted(disallowed))
             )
 
     def map_paragraph(paragraph: ReportParagraph) -> ReportParagraph:
@@ -50,9 +49,7 @@ def apply_statement_patches(
         sections=[
             section.model_copy(
                 update={
-                    "paragraphs": [
-                        map_paragraph(paragraph) for paragraph in section.paragraphs
-                    ]
+                    "paragraphs": [map_paragraph(paragraph) for paragraph in section.paragraphs]
                 }
             )
             for section in draft.sections

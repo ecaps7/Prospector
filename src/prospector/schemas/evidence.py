@@ -72,9 +72,7 @@ class FindingInput(BaseModel):
 
     @field_validator("source_ids")
     @classmethod
-    def _deduplicate_source_ids(
-        cls, values: list[HighlightSourceId]
-    ) -> list[HighlightSourceId]:
+    def _deduplicate_source_ids(cls, values: list[HighlightSourceId]) -> list[HighlightSourceId]:
         return list(dict.fromkeys(values))
 
     @field_validator("statement")

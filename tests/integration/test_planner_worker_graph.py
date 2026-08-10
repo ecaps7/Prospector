@@ -235,9 +235,7 @@ class PassingReportVerifier:
             decisions=decisions,
             allowed_excerpt_ids=list(snapshot.allowed_excerpt_ids),
         )
-        return ReportVerifierModelResult(
-            findings=findings, decisions=decisions, raw_outputs={}
-        )
+        return ReportVerifierModelResult(findings=findings, decisions=decisions, raw_outputs={})
 
 
 class BrokenReportVerifier:

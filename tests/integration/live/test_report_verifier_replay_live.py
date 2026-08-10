@@ -47,11 +47,7 @@ def test_replay_persisted_report_through_report_verifier_without_writes() -> Non
         "evidence": 43,
         "derived": 8,
     }
-    assert all(
-        item.candidate_excerpts
-        for item in snapshot.statements
-        if item.kind == "evidence"
-    )
+    assert all(item.candidate_excerpts for item in snapshot.statements if item.kind == "evidence")
 
     result = OpenAIReportVerifier().verify(snapshot)
 

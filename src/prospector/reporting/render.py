@@ -62,10 +62,12 @@ def render_report_draft(
 
     lines: list[str] = []
     if not verified:
-        lines.extend([
-            "> **草稿预览：正文和引用尚未逐句验证。**",
-            "",
-        ])
+        lines.extend(
+            [
+                "> **草稿预览：正文和引用尚未逐句验证。**",
+                "",
+            ]
+        )
     lines.extend([f"# {draft.title}", ""])
 
     def append_paragraph(paragraph: Any) -> None:
@@ -146,9 +148,7 @@ def _render_findings_excerpt_context(
     """Render per-excerpt context lines for an evidence failure."""
     if failure.kind != "evidence" or not statement_input:
         return []
-    excerpt_meta = {
-        str(exc["excerpt_id"]): exc for exc in statement_input.candidate_excerpts
-    }
+    excerpt_meta = {str(exc["excerpt_id"]): exc for exc in statement_input.candidate_excerpts}
     if not excerpt_meta:
         return []
     lines: list[str] = []
@@ -218,9 +218,7 @@ def render_findings(
         lines.append("")
         for failure in llm_failures:
             si = stmt_index.get(failure.statement_id)
-            lines.append(
-                f" ✗ {failure.statement_id} [{failure.kind}] → {failure.status}"
-            )
+            lines.append(f" ✗ {failure.statement_id} [{failure.kind}] → {failure.status}")
             if si:
                 lines.append(f"   「{si.text}」")
             # Excerpt context
@@ -246,17 +244,11 @@ def render_findings(
             if si:
                 lines.append(f"   「{si.text}」")
                 # Show which premises failed
-                failed_premises = [
-                    p for p in si.premises
-                    if p["statement_id"] in failure_index
-                ]
+                failed_premises = [p for p in si.premises if p["statement_id"] in failure_index]
                 if failed_premises:
                     for p in failed_premises:
                         p_status = failure_index[p["statement_id"]].status
-                        lines.append(
-                            f"   ← {p['statement_id']} ({p_status}): "
-                            f"{p.get('text', '')}"
-                        )
+                        lines.append(f"   ← {p['statement_id']} ({p_status}): {p.get('text', '')}")
                 else:
                     # premises_all_passed=False but individual premise not in
                     # failures list — show all premises for context

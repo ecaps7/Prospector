@@ -13,9 +13,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE app.document_views DROP CONSTRAINT document_views_view_kind_check"
-    )
+    op.execute("ALTER TABLE app.document_views DROP CONSTRAINT document_views_view_kind_check")
     op.execute(
         "ALTER TABLE app.document_views ADD CONSTRAINT document_views_view_kind_check "
         "CHECK (view_kind IN ('exa_highlights','kb_read'))"
@@ -23,9 +21,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE app.document_views DROP CONSTRAINT document_views_view_kind_check"
-    )
+    op.execute("ALTER TABLE app.document_views DROP CONSTRAINT document_views_view_kind_check")
     op.execute(
         "ALTER TABLE app.document_views ADD CONSTRAINT document_views_view_kind_check "
         "CHECK (view_kind = 'exa_highlights')"

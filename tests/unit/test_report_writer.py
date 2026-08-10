@@ -442,9 +442,7 @@ def test_introduction_statements_are_verified_like_every_other_sentence() -> Non
     draft = _draft()
 
     assert [statement.statement_id for statement in draft.statements()][0] == "s_intro"
-    assert draft.body_char_count() == sum(
-        len(statement.text) for statement in draft.statements()
-    )
+    assert draft.body_char_count() == sum(len(statement.text) for statement in draft.statements())
 
 
 def test_paragraph_can_contain_one_statement() -> None:
@@ -549,9 +547,7 @@ def test_assembler_folds_multi_turn_stream_and_assigns_runtime_ids() -> None:
 
 def test_assembler_treats_truncated_last_line_as_resumable() -> None:
     assembler = ReportStreamAssembler(_snapshot())
-    truncated = "\n".join(
-        [*_first_turn_lines(), '{"record": "statement", "statement_id": "s_ana']
-    )
+    truncated = "\n".join([*_first_turn_lines(), '{"record": "statement", "statement_id": "s_ana'])
 
     outcome = assembler.consume(truncated)
 
@@ -634,9 +630,7 @@ def test_assembler_rejects_end_before_conclusion_and_section_after_conclusion() 
 
 
 def test_writer_loop_continues_across_turns_and_disables_json_mode() -> None:
-    client = _FakeStreamClient(
-        ["\n".join(_first_turn_lines()), "\n".join(_second_turn_lines())]
-    )
+    client = _FakeStreamClient(["\n".join(_first_turn_lines()), "\n".join(_second_turn_lines())])
     writer = OpenAIReportWriter(client=client, model="fake-model")  # type: ignore[arg-type]
 
     result = writer.write(_snapshot())
@@ -680,7 +674,11 @@ def test_writer_loop_feeds_validation_error_back_for_localized_retry() -> None:
 
 def test_writer_loop_fails_after_repeated_errors() -> None:
     bad_line = _line(
-        record="statement", statement_id="s_orphan", text="孤儿语句。", kind="evidence", candidate_excerpt_ids=[]
+        record="statement",
+        statement_id="s_orphan",
+        text="孤儿语句。",
+        kind="evidence",
+        candidate_excerpt_ids=[],
     )
     client = _FakeStreamClient([bad_line] * 5)
     writer = OpenAIReportWriter(client=client, model="fake-model")  # type: ignore[arg-type]

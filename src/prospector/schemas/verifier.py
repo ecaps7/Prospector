@@ -372,11 +372,7 @@ def effective_unusable_assertion_ids(
     ):
         for disposition in dispositions:
             status_by_id[disposition.assertion_id] = disposition.status
-    return {
-        assertion_id
-        for assertion_id, status in status_by_id.items()
-        if status == "unusable"
-    }
+    return {assertion_id for assertion_id, status in status_by_id.items() if status == "unusable"}
 
 
 def assertion_excerpt_map_from_snapshot(snapshot: dict[str, object]) -> dict[UUID, list[UUID]]:

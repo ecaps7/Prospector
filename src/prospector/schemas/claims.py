@@ -12,9 +12,7 @@ from prospector.schemas.report import MAX_PREMISE_DEPTH
 ClaimType = Literal["fact", "number", "causal", "opinion_attributed"]
 ClaimGrounding = Literal["evidence", "derived"]
 EvidenceRelation = Literal["support", "contradict", "partial"]
-VerdictStatus = Literal[
-    "pass", "unsupported", "conflicted", "overreach", "miscalibrated"
-]
+VerdictStatus = Literal["pass", "unsupported", "conflicted", "overreach", "miscalibrated"]
 MAX_REPORT_REVISION_ROUNDS = 2
 
 

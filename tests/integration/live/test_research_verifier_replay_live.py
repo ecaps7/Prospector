@@ -69,7 +69,9 @@ def test_replay_persisted_job_through_research_verifier_without_writes() -> None
     assert snapshot["planner_exit"]["decision_rounds_remaining"] == 6
     assert len(snapshot["assertions"]) == 132
     assert len(snapshot["excerpts"]) == 60
-    assert all("publisher" not in excerpt and "author" in excerpt for excerpt in snapshot["excerpts"])
+    assert all(
+        "publisher" not in excerpt and "author" in excerpt for excerpt in snapshot["excerpts"]
+    )
 
     result = OpenAIResearchVerifier().verify(snapshot)
     decision = result.decision

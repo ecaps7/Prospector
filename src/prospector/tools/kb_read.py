@@ -82,11 +82,7 @@ class KbReadTool:
         locator_with_meta: dict[str, Any] = {
             "kind": "page_index",
             **({"page": result.page} if result.page is not None else {}),
-            **(
-                {"line_span": result.line_span}
-                if result.line_span is not None
-                else {}
-            ),
+            **({"line_span": result.line_span} if result.line_span is not None else {}),
             "doc_id": str(doc_id),
             "doc_version": document.version,
         }
@@ -150,7 +146,7 @@ KB_READ_SCHEMA = {
                     "type": "object",
                     "description": (
                         "Position to read from the document. "
-                        "Examples: {\"page\": 14}, {\"line_span\": [35, 78]}."
+                        'Examples: {"page": 14}, {"line_span": [35, 78]}.'
                     ),
                     "additionalProperties": True,
                 },

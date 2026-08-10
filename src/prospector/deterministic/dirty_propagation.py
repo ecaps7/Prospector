@@ -21,8 +21,10 @@ def changed_statement_ids(before: ReportDraft, after: ReportDraft) -> set[str]:
     for statement_id in set(before_map) | set(after_map):
         left = before_map.get(statement_id)
         right = after_map.get(statement_id)
-        if left is None or right is None or _statement_signature(left) != _statement_signature(
-            right
+        if (
+            left is None
+            or right is None
+            or _statement_signature(left) != _statement_signature(right)
         ):
             changed.add(statement_id)
     return changed
@@ -56,8 +58,7 @@ def dirty_statement_ids(
             dirty.add(statement_id)
 
     premises = {
-        statement.statement_id: list(statement.premise_statement_ids)
-        for statement in statements
+        statement.statement_id: list(statement.premise_statement_ids) for statement in statements
     }
     changed = True
     while changed:

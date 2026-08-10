@@ -126,9 +126,7 @@ def _draft() -> ReportDraft:
 
 def _text_of(draft: ReportDraft, statement_id: str) -> str:
     return next(
-        statement.text
-        for statement in draft.statements()
-        if statement.statement_id == statement_id
+        statement.text for statement in draft.statements() if statement.statement_id == statement_id
     )
 
 
@@ -149,9 +147,7 @@ class _FakeCompletions:
 def _completion(content: str, finish_reason: str = "stop") -> SimpleNamespace:
     return SimpleNamespace(
         choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=content), finish_reason=finish_reason
-            )
+            SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)
         ]
     )
 
@@ -236,9 +232,7 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
         verifier.verify(_bridge_snapshot())
 
     assert completions.calls == 2
-    raw_output = cast(
-        dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output
-    )
+    raw_output = cast(dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output)
     attempts = raw_output["s_intro"]["attempts"]
     assert attempts[0]["finish_reason"] == "length"
     assert attempts[1]["finish_reason"] == "length"
@@ -252,9 +246,7 @@ def test_unterminated_json_with_stop_reason_is_retried_then_fails_clearly() -> N
     with pytest.raises(ReportVerifierOutputError, match="Unterminated string") as raised:
         verifier.verify(_bridge_snapshot())
 
-    raw_output = cast(
-        dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output
-    )
+    raw_output = cast(dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output)
     attempts = raw_output["s_intro"]["attempts"]
     assert completions.calls == 2
     assert attempts[0]["finish_reason"] == "stop"
@@ -294,9 +286,7 @@ def test_complete_long_reason_is_accepted_without_retry() -> None:
                     statement_id="s_fact",
                     text="企业量产时间表与原文一致。",
                     kind="evidence",
-                    candidate_excerpts=[
-                        {"excerpt_id": str(EXCERPT_ID), "text": "候选证据原文。"}
-                    ],
+                    candidate_excerpts=[{"excerpt_id": str(EXCERPT_ID), "text": "候选证据原文。"}],
                 )
             ],
             allowed_excerpt_ids=[EXCERPT_ID],
@@ -317,9 +307,7 @@ def test_report_verifier_passes_evidence_and_derived() -> None:
                         "statement_id": "s_fact",
                         "kind": "evidence",
                         "claim_type": "fact",
-                        "pairs": [
-                            {"excerpt_id": "E1", "relation": "support"}
-                        ],
+                        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
                         "status": "pass",
                         "reason": "原文支持",
                     },
@@ -449,9 +437,7 @@ def test_apply_statement_patches_only_replaces_named_sentences() -> None:
 
 
 def test_patch_assembler_rejects_unlisted_statement() -> None:
-    assembler = ReportPatchAssembler(
-        snapshot=_snapshot(), allowed_statement_ids={"s_fact"}
-    )
+    assembler = ReportPatchAssembler(snapshot=_snapshot(), allowed_statement_ids={"s_fact"})
     outcome = assembler.consume(
         json.dumps(
             {

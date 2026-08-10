@@ -28,9 +28,7 @@ def render_verified_report(
 ) -> RenderedReport:
     """Render a frozen draft; citations come only from verified support excerpts."""
     excerpt_by_id = {
-        excerpt.excerpt_id: excerpt
-        for card in snapshot.evidence_cards
-        for excerpt in card.excerpts
+        excerpt.excerpt_id: excerpt for card in snapshot.evidence_cards for excerpt in card.excerpts
     }
     source_numbers: dict[tuple[str, int], int] = {}
     source_excerpts: dict[tuple[str, int], WriterExcerptRef] = {}

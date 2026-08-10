@@ -56,9 +56,7 @@ def test_follow_events_reconnects_with_last_complete_event_id() -> None:
         def __init__(self) -> None:
             self.cursors: list[int | None] = []
 
-        def stream_events(
-            self, _job_id: object, *, last_event_id: int | None
-        ) -> Iterator[str]:
+        def stream_events(self, _job_id: object, *, last_event_id: int | None) -> Iterator[str]:
             self.cursors.append(last_event_id)
             if len(self.cursors) == 1:
                 yield from _frame(10, "brief.confirmed", {"effort": "standard"})
@@ -89,4 +87,3 @@ def test_follow_events_reconnects_with_last_complete_event_id() -> None:
     assert client.cursors == [None, 10]
     assert sleeps == [1.0]
     assert reconnects == [1.0]
-

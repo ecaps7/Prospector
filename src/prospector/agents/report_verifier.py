@@ -35,9 +35,7 @@ _RETRY_INSTRUCTION = (
     "只输出要求的 JSON 对象；reason 和 inference_note 保持简洁，只说明主要依据。"
 )
 
-StatementDecision = (
-    EvidenceStatementDecision | DerivedStatementDecision | BridgeStatementDecision
-)
+StatementDecision = EvidenceStatementDecision | DerivedStatementDecision | BridgeStatementDecision
 _DECISION_ADAPTER: TypeAdapter[StatementDecision] = TypeAdapter(StatementDecision)
 
 
@@ -90,7 +88,7 @@ def _decode_excerpt_ids(content: str, code_map: dict[str, str]) -> str:
     (e.g. "E1" inside "E10").
     """
     for code, real_id in code_map.items():
-        content = re.sub(rf'\b{re.escape(code)}\b', real_id, content)
+        content = re.sub(rf"\b{re.escape(code)}\b", real_id, content)
     return content
 
 
@@ -222,8 +220,7 @@ class OpenAIReportVerifier:
             )
         if decision.kind != kind:
             raise ReportVerifierOutputError(
-                f"decision kind mismatch for {statement_id}: expected {kind}, "
-                f"got {decision.kind}",
+                f"decision kind mismatch for {statement_id}: expected {kind}, got {decision.kind}",
                 raw,
             )
         if isinstance(decision, EvidenceStatementDecision):

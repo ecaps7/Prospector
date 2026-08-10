@@ -174,7 +174,5 @@ class OpenAIResearchVerifier:
                 assertion_excerpt_map_from_snapshot(snapshot),
             )
         except ValueError as exc:
-            raise VerifierOutputError(
-                f"invalid Verifier conflict binding: {exc}", raw
-            ) from exc
+            raise VerifierOutputError(f"invalid Verifier conflict binding: {exc}", raw) from exc
         return VerifierModelResult(full_prompt=messages, raw_output=raw, decision=decision)

@@ -279,26 +279,20 @@ class ReportStreamAssembler:
 
         # Paragraph ids are handed out in document order, so introduction comes first.
         introduction = [
-            paragraph_payload(paragraph)
-            for paragraph in self._introduction_paragraphs
-            if paragraph
+            paragraph_payload(paragraph) for paragraph in self._introduction_paragraphs if paragraph
         ]
         sections = [
             {
                 "section_id": f"sec_{index:03d}",
                 "title": section.title,
                 "paragraphs": [
-                    paragraph_payload(paragraph)
-                    for paragraph in section.paragraphs
-                    if paragraph
+                    paragraph_payload(paragraph) for paragraph in section.paragraphs if paragraph
                 ],
             }
             for index, section in enumerate(self._sections, start=1)
         ]
         conclusion = [
-            paragraph_payload(paragraph)
-            for paragraph in self._conclusion_paragraphs
-            if paragraph
+            paragraph_payload(paragraph) for paragraph in self._conclusion_paragraphs if paragraph
         ]
         return ReportDraft.model_validate(
             {

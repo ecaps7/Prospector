@@ -129,16 +129,10 @@ def test_report_verifier_writer_loop() -> None:
         print(rendered.markdown)
         return
 
-    print(
-        f"\n{'─' * 60}\n"
-        f" Writer revising {n_failed} failed statement(s) …\n"
-        f"{'─' * 60}"
-    )
+    print(f"\n{'─' * 60}\n Writer revising {n_failed} failed statement(s) …\n{'─' * 60}")
 
     try:
-        writer_result = OpenAIReportWriter().revise(
-            writer_snapshot, draft, findings
-        )
+        writer_result = OpenAIReportWriter().revise(writer_snapshot, draft, findings)
     except ReportWriterOutputError as exc:
         dump_path = Path(f"rv_writer_loop_failure_{str(JOB_ID)[:8]}.json")
         dump_path.write_text(
@@ -150,9 +144,7 @@ def test_report_verifier_writer_loop() -> None:
             ),
             encoding="utf-8",
         )
-        pytest.fail(
-            f"Writer revise failed; raw output dumped to {dump_path}: {exc}"
-        )
+        pytest.fail(f"Writer revise failed; raw output dumped to {dump_path}: {exc}")
 
     revised_draft = writer_result.draft
     revised_revision = revision + 1
@@ -197,11 +189,7 @@ def test_report_verifier_writer_loop() -> None:
     )
 
     # ── 5. Render final report ────────────────────────────────────────
-    print(
-        f"\n{'=' * 60}\n"
-        f" Final report (revision={revised_revision})\n"
-        f"{'=' * 60}"
-    )
+    print(f"\n{'=' * 60}\n Final report (revision={revised_revision})\n{'=' * 60}")
     rendered = render_report_draft(writer_snapshot, revised_draft, verified=True)
     print(rendered.markdown)
 

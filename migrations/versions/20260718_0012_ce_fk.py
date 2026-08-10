@@ -13,9 +13,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE app.claim_evidence DROP CONSTRAINT claim_evidence_excerpt_id_fkey"
-    )
+    op.execute("ALTER TABLE app.claim_evidence DROP CONSTRAINT claim_evidence_excerpt_id_fkey")
     op.execute(
         """
         ALTER TABLE app.claim_evidence
@@ -26,9 +24,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE app.claim_evidence DROP CONSTRAINT claim_evidence_excerpt_id_fkey"
-    )
+    op.execute("ALTER TABLE app.claim_evidence DROP CONSTRAINT claim_evidence_excerpt_id_fkey")
     op.execute(
         """
         ALTER TABLE app.claim_evidence

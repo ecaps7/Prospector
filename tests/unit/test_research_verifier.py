@@ -109,6 +109,7 @@ def _unusable_disposition(assertion_id: UUID = ASSERTION_ID) -> dict[str, object
         "reason": "来源为伪学术 UGC，定量数字不可采信。",
     }
 
+
 def test_decision_requires_major_gap_exactly_when_research_is_needed() -> None:
     with pytest.raises(ValidationError, match="pass must not contain major gaps"):
         _decision("pass", severity="major")
@@ -377,16 +378,16 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
     assert "status=unusable" in prompt
     assert "minor 表示可在报告中披露、但结论仍然成立" in prompt
     assert '"conflict_resolutions"' not in schema
-    conflict_def = VerifierLlmDecision.model_json_schema().get("$defs", {}).get(
-        "ConflictJudgement", {}
+    conflict_def = (
+        VerifierLlmDecision.model_json_schema().get("$defs", {}).get("ConflictJudgement", {})
     )
     conflict_props = conflict_def.get("properties", {})
     assert "assertion_ids" in conflict_props
     assert "winning_assertion_ids" in conflict_props
     assert "excerpt_ids" not in conflict_props
     assert "winning_excerpt_ids" not in conflict_props
-    disposition_def = VerifierLlmDecision.model_json_schema().get("$defs", {}).get(
-        "AssertionDisposition", {}
+    disposition_def = (
+        VerifierLlmDecision.model_json_schema().get("$defs", {}).get("AssertionDisposition", {})
     )
     disposition_props = disposition_def.get("properties", {})
     assert "assertion_id" in disposition_props
