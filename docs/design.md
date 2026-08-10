@@ -1,16 +1,13 @@
 # 深度研究智能体（Deep Research Agent）设计文档
 
 - **版本**：v4.16（草案）
-- **v4.16 变更**：成文链按当前实现收口：每个 revision 全量逐句验证，Writer 最多修订两轮；修订触顶后仍未通过的句子保留在正文中，报告标记为 `partial`，这些句子不生成已验证引用角标；验证后产物以 `draft_rendered` 结束。
-- **v4.15 变更**：成文链重构为 **prose-first**（§5.4 / D5 / §3.1 / §3.3）：Report Writer 以 Brief 核心问题为纲直接产出带稳定 statement id 的结构化正文，Report Verifier 逐句分型验证**这份正文本身**——被验证对象与交付对象合一；Claim 表体系保留但生产方向反转（claim 是从最终正文提取的验证记录，`produced_by: report_verifier`）；Writer↔Verifier 修订环句级、全量重验并设硬上限轮数；成文期不开搜索（换证仅限既有 Excerpt 池）；Outline Builder / Claim Drafter / Narrative Composer / no-new-facts 审计四个模块取消
-- **v4.14 变更**：新增 AssertionDisposition（§4.13）：Research Verifier 可将不可信断言标为 unusable（存储不删）；覆盖判断与成文投影只认 usable 断言；冲突侧 LLM 只点 assertion_id、代码绑定 excerpt（与实现对齐）
-- **v4.13 变更**：与 Planner-Worker 实现对齐：ResearchTask 增加 `subjects`；同批任务只能属于一个研究阶段；`effort` 映射全局 Planner 决策轮和分阶段并发/Worker 决策轮；取消 Worker 工具调用总数上限，单轮并行工具调用固定限 8；联网证据统一通过任务级 DocumentView 中的 Exa highlights 落库
-- **v4.12 变更**：ResearchTask 增加必填 `research_stage`（scout / deep_dive / verify），与 `research_mode`、`source_policy` 正交；跨任务综合仍由 Planner 基于断言投影完成，不设 synthesize Worker；任务目标与局部完成判断统一由 `expected_evidence` 承担
-- **v4.11 变更**：Planner 决策上下文从「每轮无状态从库重建」改为**持久 append-only 消息线程**（随 checkpoint 序列化）：保留强制三选一 schema、决策日志落库与「摘要 = 断言投影」三条纪律不变；有界性改由决策轮上限与限长摘要保证；`reflect.note` 从唯一跨轮记忆通道回调为策略审计记录；「逐字回放某轮 prompt」由确定性重建降级为每轮全量 prompt 随 `decision_log` 持久化的记录性满足（§3.3 / §5.2 / §6.7 / §8）
-- **v4.10 变更**：清除旧 M1 子切片、预算水位与 Redis 预算计数语义；M1 只保留完整主图的单一交付门；当时的工具次数预算已由 v4.13 的分阶段 Worker 决策轮合同替代；NFR-2 改为相对人工真值的 Claim 忠实率
-- **v4.9 变更**：明确 interactive Brief HITL 交互合同（§5.1 / §4.1 / FR-2）：用户可原样确认、直接编辑 Brief，或发送**一条**修订指令由 Scope 改写一轮后即定稿（不再二次确认、不允许多轮模型修订）；确认结果仍是交给 Planner 的输入快照，不是执行合同
-- **v4.8 变更**：纠正 Scope / Brief / Planner 的职责边界：Research Brief 不再被定义为段落合同，而是把用户问题具体化并主动展开研究空间的中间产物；Scope 负责澄清问题、提出候选维度、竞争假设、反例、边界条件与多条证据路径，Planner 负责从中选择实际研究方向并以版本化 Research Plan 形成执行合同。Brief 的用户确认只确认系统对问题的理解与展开方向，不把所有候选角度冻结成必达项；Verifier 以 Planner 已形成的执行合同判断覆盖度，并以 Brief 检查是否偏离原始问题（§4.1 / §4.2 / §5.1 / §5.2 / §5.3 / D4）
-- **v4.6 及更早**：见 git 历史
+- **实现状态**：M0 + M1 已实现（研究主图跑通到 `draft_rendered`，含 API/CLI 闭环）。
+  M2（沙箱计算 / FigureSpec 图表 / PageIndex 建树）与 M4（多用户运行时）为设计草案，
+  章节标题已就地标注；M3 评测见 [docs/future/eval.md](./future/eval.md)。
+  未标注 M2/M4 的章节均对应已实现代码。
+- **设计演进**：本文档经历 v4.6 → v4.16 的多次自我推翻（如 Brief 从"段落合同"改为
+  "研究空间展开产物"、成文链重构为 prose-first 并取消四个模块），完整记录见文末
+  [附录 B](#附录-b设计演进记录)。
 - **日期**：2026-07-19
 - **状态**：待评审
 - **适用项目**：Prospector v2（多智能体深度研究系统）
@@ -205,7 +202,10 @@ Worker 停止后，其产出仍要经过 Verifier 检查；Verifier 可产出缺
 
 模型分档依据：编排与综合类决策（规划委派、验证放行、正文撰写）集中在少数调用上、影响全局，用最强模型；worker、收工摘要与句级验证属于大量局部调用，统一使用中档模型；联网来源视图直接使用 Exa highlights，引用渲染不经过 LLM。
 
-### 3.4 本地文档与 PageIndex
+### 3.4 本地文档与 PageIndex（M2，部分实现）
+
+> 当前仅实现 `kb_read`（`tools/kb_read.py`）。入库建树、`kb_list` / `kb_structure`
+> 与私库落证尚未实现。
 
 私有知识库与研究附件的**唯一**检索后端是 PageIndex。Prospector **不移植** PageIndex 实现，将其作为外部依赖（独立进程 / 可安装库 / MCP 传输均可）；本系统负责鉴权边界、Document 版本与 Evidence 落库。
 
@@ -460,7 +460,9 @@ derived 型 Claim 的支撑关系表——与 ClaimEvidence 平行：evidence �
 
 `status` 枚举覆盖三种 grounding 的失败形态：`unsupported` / `conflicted` 主要来自 evidence 型（无支撑 / 证据打架），`overreach` / `miscalibrated` 来自 derived 型（推理越界 / 校准失当）；computed 型复现失败记为 `unsupported`，忠实检查失败（数值、单位或口径转述失真）记为 `miscalibrated`（§4.11）。判定由该 run 下的关系行聚合 + Verifier 裁决产生，聚合口径：存在 `contradict` 关系且最新 run 中无覆盖该冲突的 ConflictResolution（§4.12）→ `conflicted`；无任何 `support` 关系 → `unsupported`。
 
-### 4.10 Computation（确定性计算记录）
+### 4.10 Computation（确定性计算记录）（M2，未实现）
+
+> Data Worker、沙箱与 Computation 表在当前代码中均无实现。
 
 Data Worker 在沙箱中执行成功后落库的**执行事实**，不可变、内容寻址：`code_hash` + 输入集合共同构成内容哈希，与 Document 的 `content_hash`、Excerpt 的 `excerpt_hash` 同一去重模式。它与 Excerpt 同层——记录"算了什么、怎么算、算出了什么"，与任何验证判断无关；"这次计算是否支撑某条 Claim"是 Verifier 的判断，落在 §4.11 的关系表里。两者混入一张表会重演 §4.7 批评过的层级错误：判断演化时被迫回写事实行。
 
@@ -484,7 +486,7 @@ Data Worker 在沙箱中执行成功后落库的**执行事实**，不可变、�
 - **`output` 是反规范化缓存**：严格说可由 code + inputs 重跑推导，但与 `ClaimPremise.depth`（§4.8）同属输入不可变、永不失效的缓存——忠实检查的热路径不能靠重跑代码来读输出。刻意不设标量输出的 digest：对标量存自身哈希无意义，且哈希只能字节级比对、与数值容差互斥。非标量输出的触发条件已由图表序列数据兑现（§5.5 computation 绑定模式）：表格/序列型输出落对象存储 `output_ref` 并附 digest（大产物的复现比对用字节级哈希），标量输出维持直接比值。
 - Computation 的输入端锚定 Excerpt，因此它接入权威链而**不引入新的叶子类型**：任何支撑树展开到叶子，仍然全部落在 Excerpt → Document version 上。
 
-### 4.11 ClaimComputation（计算支撑关系，版本化）
+### 4.11 ClaimComputation（计算支撑关系，版本化）（M2，未实现）
 
 computed 型 Claim 的支撑关系表，与 ClaimEvidence / ClaimPremise 平行：按 verifier_run 版本化、append-only。
 
@@ -695,7 +697,10 @@ flowchart TD
 - **验证器自身失败不等于正文失败**：只有通过输出契约的有效判定才能产生 `unsupported` 等 finding。单句判定返回残缺 JSON 或违反 schema 时，从原始输入独立重试一次；仍失败则将 Report Verifier Run、Report 与 Job 分别收口为 `failed` / `verification_failed` / `failed`，保存两次原始输出与结束原因，不驱动 Writer 修改正文。
 - **Deterministic Presentation Render**：全部句子通过或修订轮次触顶后，正文文本**冻结**。渲染器按 statement_id 解析每句的验证状态与证据链：通过的 evidence 句插引用角标并生成文末来源列表；失败句保留但不生成已验证引用角标，报告整体标记为 `partial`；derived 句渲染为"基于上述数据，我们认为……"式显式分析标记，附前提索引而非引用编号；computed 句标注计算口径，角标解析到 Computation 记录，来源列表展示其 `input_bindings` 锚定 Excerpt 的原始来源。读者一眼可分"查到的"与"推出来的"——这本身是报告质量的一部分。引用编号、角标与来源列表全由**确定性代码**渲染，LLM 完全退出引用格式化——消灭"引用格式幻觉"这一整类问题。表格与图表同属本层：经声明式 FigureSpec 绑定后确定性渲染（§5.5）。
 
-### 5.5 表格与图表：声明式绑定与确定性渲染
+### 5.5 表格与图表：声明式绑定与确定性渲染（M2，未实现）
+
+> FigureSpec 与图表渲染在当前代码中无实现。已实现的确定性渲染只覆盖正文引用编号与角标
+> （`deterministic/citation_render.py`、`reporting/render.py`）。
 
 图表不是新的事实来源，是**已验证陈述的另一种视图**——散文与图表只在呈现形态上不同，权限模型完全一致。§5.4 消灭引用格式幻觉的模式在此推广：Report Writer 产出的不是图，是**声明式 FigureSpec**——只含 statement/computation 绑定，**没有任何字面数值字段**；数值填充与绘图由确定性代码完成，LLM 彻底退出。"图上的数字与正文对不上"这类问题由此在结构上不可表达（spec 里没有地方写裸数字），而非依赖审计拦截。
 
@@ -1043,7 +1048,9 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 - Tempo ↔ Loki 双向跳转生效，高基数关联键未进入 Loki label；
 - 模拟 Collector/Tempo/Loki 不可用时，API、checkpoint、事件/usage 提交与 RabbitMQ ACK 语义不变。
 
-### 9.2 离线评估
+### 9.2 离线评估（M3，未实现）
+
+> 完整评测设计见 [docs/future/eval.md](./future/eval.md)。下表是目标指标口径，当前无实现。
 
 | 维度 | 方法 | 指标 |
 |------|------|------|
@@ -1067,14 +1074,14 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 | 编排 | LangGraph | 显式图结构与 Planner 决策环 / 版本化 Plan / 受控 Replan 语义吻合；内置 checkpointer；团队已有积累 |
 | 状态与证据库 | PostgreSQL（JSONB） | 承载 checkpoint、Excerpt/Assertion/Claim 元数据；不做向量私有库 |
 | 原始文档存储 | 对象存储（S3 兼容） | Document 快照与 PageIndex 树产物按 version 落桶；debug 诊断负载使用 Workspace 隔离前缀和独立生命周期；PostgreSQL 只存业务对象的 `storage_ref` / `index_ref` |
-| 任务分发 | RabbitMQ | 工作队列语义（逐条 ack、消费者竞争、独立消费池承接 Data Worker 安全边界）；否决方案见 D9 |
-| 热状态 | Redis | 仅两项职责：SSE 事件流（Stream）与带 TTL 的 job debug flag；事件可从 PG 重建，debug flag 可安全丢弃（§13.2） |
+| 任务分发 | RabbitMQ *(M4，未实现)* | 工作队列语义（逐条 ack、消费者竞争、独立消费池承接 Data Worker 安全边界）；否决方案见 D9。当前为单进程内 asyncio 并发 |
+| 热状态 | Redis *(M4，未实现)* | 仅两项职责：SSE 事件流（Stream）与带 TTL 的 job debug flag；事件可从 PG 重建，debug flag 可安全丢弃。当前 SSE 直接读 PG 事件表 |
 | 网页获取 | Exa（search + `/contents`）+ 任务级来源视图 | `web_search` 仅元数据；所有联网来源通过一次 `/contents` 请求取得全文与 task-aware highlights，全文写 Document 快照，带 `hN` 的 highlights 写任务级 DocumentView。运行时向 Worker 暴露唯一 source_ref，并由代码解析至同一 view 的 source_ids 后调用 `save_findings`（D12）；Prospector 不调用额外压缩 LLM |
-| 本地/私有文档 | PageIndex（外依赖） | 入库建树；Worker 经 `kb_list` / `kb_structure` / `kb_read` 导航；不移植实现、不另建向量库 |
-| 计算 | 沙箱化 Python / SQL | 数值结论一律代码算，LLM 不做算术（沿用既有原则） |
+| 本地/私有文档 | PageIndex（外依赖）*(M2，仅 `kb_read` 已实现)* | 入库建树；Worker 经 `kb_list` / `kb_structure` / `kb_read` 导航；不移植实现、不另建向量库 |
+| 计算 | 沙箱化 Python / SQL *(M2，未实现)* | 数值结论一律代码算，LLM 不做算术（沿用既有原则） |
 | 后端 | FastAPI + SSE | 异步并发 + 流式推送 |
 | 遥测埋点 | OpenTelemetry SDK + structlog | OTel 提供统一 trace context 与 GenAI span；structlog 输出带 trace/span 关联键的 JSON 日志 |
-| 观测后端 | OTel Collector + Tempo + Loki + Grafana | 应用只发送一次 OTLP trace；Tempo/Loki 在 Grafana 双向关联；观测故障不影响业务 |
+| 观测后端 | OTel Collector + Tempo + Loki + Grafana *(未部署)* | 应用只发送一次 OTLP trace；Tempo/Loki 在 Grafana 双向关联；观测故障不影响业务。当前应用侧埋点已就绪，本地用 console exporter |
 | LLM 调优 | LangSmith（可选 OTLP 后端） | 仅在调优/离线评估期由 Collector 复制 trace，不在应用内引入第二套 tracing SDK |
 
 ---
@@ -1091,14 +1098,14 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 
 ### 11.2 里程碑表
 
-| 阶段 | 范围 | 验收标准 |
-|------|------|----------|
-| M0（1 周） | 工程基座：repo 骨架与 CI、PostgreSQL + 迁移框架、LangGraph + PG checkpointer 启用、structlog JSON 日志 + 基础 OTel、对象存储接入 | 空流程 job 的状态迁移跑通并落 checkpoint，kill 进程后恢复续跑；日志自动关联 trace/span |
-| M1（7 周） | **深研智能体核心 + CLI**：Research Brief 输入快照；Planner `dispatch/reflect/finish` 决策环；版本化 Plan；并行通用 Research Worker；Document/Excerpt/Assertion 证据链；Verifier/Replan；ConflictResolution；Report Writer 结构化正文 + 逐句验证（evidence/derived）+ 句级修订环；确定性引用渲染；单进程 API、PG 事件 SSE 与 CLI 闭环 | 端到端产出带引用报告；通过句的权威链机器校验 100%；并行不串号；预埋缺口形成新 Plan 版本；空手 finish 和零证据耗尽正确失败；每个 revision 全量逐句验证；修订触顶后生成 `partial` 产物并列出失败 statement，失败句不生成已验证引用角标；CLI 完成提交、跟踪和报告导出 |
-| M2（2 周） | 扩展能力——计算与本地文档（两条相互独立的战役，可按人力并行或对调）：(a) Data Worker 沙箱 + Computation（内容寻址、输入血缘）+ ClaimComputation 复现/忠实检查 + computed 呈现规范；(b) PageIndex 入库建树 + `kb_*` 三原语 + 私库落证；FigureSpec 表格/图表确定性渲染（§5.5，依赖 computed 与 number claim 齐备） | 无 Excerpt 血缘的输入被拒绝进入计算；复现检查跑通（重跑输出值比对）；本地文档经三原语落 Excerpt 且 locator 完整；FigureSpec 仅含绑定字段且渲染前 claim pass 校验生效 |
-| M3（2 周） | 评测基建：题库首版（每类 ≥ 10 题，含冲突/无解陷阱题；经 M1 已交付的 brief-direct 入口提交）+ 录制-回放磁带 + eval_run 表 + 四门禁接入回归流程 + 评估看板。**本里程碑是 M4 多用户化的前置门** | 同一改动可在回放模式跑出可比的 eval_run；四门禁可执行，忠实率以人工真值集度量（评测文档 §6）；SSE 断线重连按 Last-Event-ID 回放（单实例） |
-| M4（2–3 周） | 多用户运行时（第 13 章）：三进程三队列、任务表即 outbox、幂等消费、SSE 跨副本、跨 PG/MQ 遥测传播与 job debug | 两用户并发深研互不饿死；kill 任意 worker 任务被接管；kill Orchestrator 后恢复续跑；SSE 断线重连回放完整；API→Dispatcher→Worker→Orchestrator span link、Tempo↔Loki 跳转与限时 debug 负载指针通过测试 |
-| 持续轨道（M1 完成后启动） | 题库扩至每类 ≥ 30（含时效题/私库题）、裁判校准例行化、成本优化 | NFR-2 的忠实率 ≥ 95% 在题库与真值集达到规模后转为正式发布门禁；成本以"每分质量 token 成本"回归跟踪 |
+| 阶段 | 状态 | 范围 | 验收标准 |
+|------|------|------|----------|
+| M0（1 周） | **已实现** | 工程基座：repo 骨架与 CI、PostgreSQL + 迁移框架、LangGraph + PG checkpointer 启用、structlog JSON 日志 + 基础 OTel、对象存储接入 | 空流程 job 的状态迁移跑通并落 checkpoint，kill 进程后恢复续跑；日志自动关联 trace/span |
+| M1（7 周） | **已实现** | **深研智能体核心 + CLI**：Research Brief 输入快照；Planner `dispatch/reflect/finish` 决策环；版本化 Plan；并行通用 Research Worker；Document/Excerpt/Assertion 证据链；Verifier/Replan；ConflictResolution；Report Writer 结构化正文 + 逐句验证（evidence/derived）+ 句级修订环；确定性引用渲染；单进程 API、PG 事件 SSE 与 CLI 闭环 | 端到端产出带引用报告；通过句的权威链机器校验 100%；并行不串号；预埋缺口形成新 Plan 版本；空手 finish 和零证据耗尽正确失败；每个 revision 全量逐句验证；修订触顶后生成 `partial` 产物并列出失败 statement，失败句不生成已验证引用角标；CLI 完成提交、跟踪和报告导出 |
+| M2（2 周） | 未开始 | 扩展能力——计算与本地文档（两条相互独立的战役，可按人力并行或对调）：(a) Data Worker 沙箱 + Computation（内容寻址、输入血缘）+ ClaimComputation 复现/忠实检查 + computed 呈现规范；(b) PageIndex 入库建树 + `kb_*` 三原语 + 私库落证；FigureSpec 表格/图表确定性渲染（§5.5，依赖 computed 与 number claim 齐备） | 无 Excerpt 血缘的输入被拒绝进入计算；复现检查跑通（重跑输出值比对）；本地文档经三原语落 Excerpt 且 locator 完整；FigureSpec 仅含绑定字段且渲染前 claim pass 校验生效 |
+| M3（2 周） | 未开始 | 评测基建：题库首版（每类 ≥ 10 题，含冲突/无解陷阱题；经 M1 已交付的 brief-direct 入口提交）+ 录制-回放磁带 + eval_run 表 + 四门禁接入回归流程 + 评估看板。**本里程碑是 M4 多用户化的前置门** | 同一改动可在回放模式跑出可比的 eval_run；四门禁可执行，忠实率以人工真值集度量（[评测文档](./future/eval.md) §6）；SSE 断线重连按 Last-Event-ID 回放（单实例） |
+| M4（2–3 周） | 未开始 | 多用户运行时（[docs/future/runtime-scaleout.md](./future/runtime-scaleout.md)）：三进程三队列、任务表即 outbox、幂等消费、SSE 跨副本、跨 PG/MQ 遥测传播与 job debug | 两用户并发深研互不饿死；kill 任意 worker 任务被接管；kill Orchestrator 后恢复续跑；SSE 断线重连回放完整；API→Dispatcher→Worker→Orchestrator span link、Tempo↔Loki 跳转与限时 debug 负载指针通过测试 |
+| 持续轨道（M1 完成后启动） | 未开始 | 题库扩至每类 ≥ 30（含时效题/私库题）、裁判校准例行化、成本优化 | NFR-2 的忠实率 ≥ 95% 在题库与真值集达到规模后转为正式发布门禁；成本以"每分质量 token 成本"回归跟踪 |
 
 ### 11.3 分期说明
 
@@ -1119,93 +1126,16 @@ Collector、Tempo、Loki 或 LangSmith 不可用时，OTel exporter 与日志采
 7. **PageIndex 跨文档召回与可用性**：私有知识库增大后，仅靠 description/元数据选文档可能不够。若评估显示漏检，优先增强 description/元数据与 `seed_document_refs` 优先提示，而不是引入第二套向量索引或恢复 Job 级文档白名单。PageIndex 进程故障应映射为工具失败与可观测告警，不得静默跳过本地证据要求。
 ---
 
-## 13. 运行时架构：多用户多任务
+## 13. 运行时架构：多用户多任务（M4，未实现）
 
-本章描述系统作为多用户服务运行的架构。**§1–§9 的研究控制流不受任何影响**——一个 job 内部仍是 Scope → Planner 决策环 / Plan → 搜集 → 验证 → 成文（写作 + 逐句验证）→ 渲染的流水线，本章只回答"很多个这样的 job 如何在共享基础设施上并发运行"。运行时与研究逻辑正交，是分层正确的证明。
+当前运行时是**单进程** FastAPI + PostgreSQL 事件表 SSE，足以支撑单机深研与 CLI 闭环。
+把它扩展为多用户服务的设计——单写者 Dispatcher、三进程三队列（RabbitMQ）、任务表即
+outbox、幂等消费、Redis Stream 跨副本 SSE、跨进程 trace 传播——抽出到
+[docs/future/runtime-scaleout.md](./future/runtime-scaleout.md)，**尚未实现**。
 
-### 13.1 目标场景
-
-1. **多用户并发**：多成员共用部署，高峰期数十个用户各自提交任务；单任务 fan-out 出 4–8 个 worker 子任务，系统真实并发单位是几十到上百个 ResearchTask。LLM 与搜索 API 配额是全局共享稀缺资源。
-2. **提交-离开-回来**：任务跑 5–30 分钟，用户关页面、换设备是常态。任务生命周期与 HTTP 连接解耦；SSE 断线带 Last-Event-ID 重连回放；任意 API 副本可服务任意任务的进度流。
-3. **异构负载混跑**：快速核查（单 worker、分钟内）与深研（15 倍 token）混跑，大任务的 fan-out 不得饿死小任务。
-4. **运维现实**：滚动发布不杀在跑任务；worker 池按队列深度扩缩容；突发提交被削峰；per-user token 用量可计量。
-
-### 13.2 核心原则
-
-**单写者（single-writer）：所有调度决策收敛到一个 Dispatcher 循环**（理由与否决方案见 D9）。三条铁律：
-
-1. **PostgreSQL 是唯一事实源**——消息只携带 task_id，负载永远在库里；
-2. **Redis 随时可丢**——事件可从 PG 重建，debug flag 可安全丢弃；丢失只降低实时性或诊断能力，不丢正确性；
-3. **RabbitMQ 是 at-least-once**——所有消费者必须幂等（§13.4，v2.2 数据模型使此近乎免费）。
-
-### 13.3 架构与进程
-
-```mermaid
-flowchart TD
-    U[用户 × N] --> API[API 服务 × 副本<br/>写任务行即完成提交]
-    API --> PG[(PostgreSQL<br/>事实源 · 任务表兼 outbox)]
-    API <-. SSE 读流 .-> RD[(Redis<br/>仅：事件流 + debug flag)]
-    PG <--> ORC[Orchestrator 单实例 asyncio<br/>Dispatcher 循环 = 唯一调度点]
-    ORC --> MQ[RabbitMQ<br/>仅 3 队列]
-    MQ --> RW[Research Worker 池<br/>无状态 · 幂等消费]
-    MQ --> DW[Data Worker 池<br/>独立队列 · 沙箱]
-    RW --> PG
-    DW --> PG
-    RW -. 事件 .-> RD
-    MQ -- results --> ORC
-```
-
-三类进程：
-
-| 进程 | 实例数 | 职责 |
-|------|--------|------|
-| API 服务 | N 副本 | 提交（写 task 行即返回）、SSE 推送（读 Redis Stream）、查询 |
-| Orchestrator | 1 实例 | 每 job 一个 asyncio 协程跑 LangGraph；内含 Dispatcher 循环；claim 验证在进程内 asyncio 并发 |
-| Worker 池 | 各自水平扩缩 | Research 池订阅 `tasks.research`；Data 池订阅 `tasks.data`（D8 安全边界的运行时兑现：沙箱池物理上拿不到研究 worker 的凭证与工具权限） |
-
-三条队列：`tasks.research`、`tasks.data`、`results`。消费参数：prefetch=1 + 手动 ack（长活重任务，预取无意义）+ publisher confirms。**没有**优先级队列、TTL 重试队列、DLX 拓扑——它们的职责由更简单的机制承担（§13.4），重新引入的触发条件见 §13.6。
-
-### 13.4 七个关键机制
-
-**任务表即 outbox**。API 提交只写 task 行（status=ready）并返回——落库与投递的双写问题不存在，因为 API 根本不投递。Dispatcher 从 PG 捞 ready 任务 → 投递 → 标记 dispatched；派发后超时未开始的任务自动重新捞起（worker 幂等，重投无害）。这是 outbox 模式的本质（事务性落库 + 异步中继），不需要额外的表和 relay 进程；用 PG LISTEN/NOTIFY 唤醒 Dispatcher 可消除轮询延迟，仍零新组件。task 每次因初次创建、replan 或重试进入 ready 时，任务表的投递元数据列都在同一事务中更新为当前 `traceparent` 与可选 `tracestate`，供 Dispatcher 为本次派发建立 span link；这些字段不进入 ResearchTask 领域 schema，也不参与业务幂等摘要。
-
-**幂等消费是 v2.2 数据模型的红利**。at-least-once 意味着任务可能被重复执行（ack 前崩溃 → 重投，而前次副作用可能已部分落库）。证据侧全部 append-only + 内容哈希：Document 重抓同 hash 幂等、Excerpt 重抽去重、Computation 按 `code_hash` + 输入集合去重（重复执行幂等，§4.10）、Verdict 重验追加新行取最新 run。唯一新增：task 状态机的 CAS 收尾（`running → done` 带条件更新，防双消费者同时收尾）。
-
-**调度与公平全部内聚于 Dispatcher**。出队排序：interactive 类任务优先；准入控制：per-user 并发上限（直接 count PG 中该用户 running 任务）与全局深研任务并发上限。无信号量、无分布式锁、无优先级队列——单写者使它们不必存在。
-
-**限额执行**。§7 无 Worker/Job 工具总帽、无 Job 墙钟硬停：每 Worker 自守 `max_worker_rounds`，单轮最多并行 8 个工具调用；编排侧共享 Planner 决策轮与分阶段并发上限。token 与累计 tool_calls 写入 PG usage，**不**驱动停研究。
-
-**SSE 跨副本**。事件双写：Redis Stream（`events:{job_id}`，任意 API 副本 XREAD 实时推送）+ PG 事件表（归档）。断线重连带 Last-Event-ID：Stream 内先回放，超出 Stream 保留窗口则从 PG 补。
-
-**按 job 增强诊断**。Redis `debug:job:{job_id}` 是必须带 TTL 的临时开关，同时启用该 job 的 DEBUG 日志、完整 trace 保留与负载指针捕获。负载写入 Workspace 隔离的对象存储诊断前缀，日志和 span 只保存 `payload_ref`；开关丢失或到期即停止增强诊断，不回写 PG，也不影响任务推进。
-
-**重试与失败出口**：重试即 task 行的 attempt 计数（Dispatcher 重新派发，退避间隔计算在行上），attempt 耗尽 → failed → 复用 §5.3 的软覆盖 / 重大缺口分流。毒消息的出口就是已有的缺口语义，无新机制。
-
-### 13.5 分布式失败矩阵
-
-| 故障 | 兜底 |
-|------|------|
-| worker 进程崩溃 | 消息未 ack 自动重投；幂等消费吸收半途副作用 |
-| Orchestrator 崩溃 | 进程管理器拉起 → 全部 in-flight job 从 checkpoint 恢复（D7）；恢复窗口内新任务在 PG 排队 |
-| Redis 整体丢失 | SSE 从 PG 事件表回放；debug 自动关闭；研究限制与任务推进不受影响 |
-| RabbitMQ 不可用 | 任务表天然是缓冲区，Dispatcher 恢复后续投；worker 侧连接重试 |
-| 任务反复失败（毒任务） | attempt 上限 → failed → §5.3 缺口分流 |
-
-所有不可丢的业务事实与计量事实都回落到 PG；debug flag 直接安全丢弃——这才是"唯一事实源"的含义。
-
-### 13.6 演化路径（按触发条件守门）
-
-被本设计刻意排除的机制不是被否定，而是各自绑定了重新引入的触发条件：
-
-| 触发条件 | 引入 |
-|----------|------|
-| 单实例 Orchestrator 承载不了并发 job 数（数千级） | LangGraph interrupt-resume 事件驱动 + Orchestrator 多实例（届时才需要分布式锁） |
-| 交互式任务延迟 SLO 被深研持续压垮且准入控制调参无效 | 按量级拆分 `tasks.research.interactive` / `.deep` 队列 |
-| claim 验证成为吞吐瓶颈 | 独立 `tasks.claims` 队列跨池分片 |
-| 需要研究过程全量事件溯源与回放分析 | Kafka 承载事件日志（D9） |
-| MQ 运维成本超出收益 | 降级回 PG SKIP LOCKED 队列（D9） |
-
-这与 D8（删固定角色）、v2.2（删冗余字段）是同一动作：为想象中的需求预付的复杂度，退回到由触发条件守门。
+关键前提在这里重申一次：**运行时与研究逻辑正交**。§1–§9 的研究控制流不依赖任何
+多用户组件，一个 job 内部始终是 Scope → Planner 决策环 / Plan → 搜集 → 验证 → 成文
+→ 渲染。这条边界是分层正确的证明，也是把 M4 整体后置而不影响前面所有里程碑的原因。
 
 ---
 
@@ -1219,3 +1149,21 @@ flowchart TD
 | 引用保障 | 最终正文逐句验证硬闸门（验证对象 = 交付文本）+ 确定性渲染；联网路径另有 D12（持久化 Exa highlight → Excerpt） | 独立 citation pass | 引用内置于生成 | 训练目标约束 |
 | HITL | 前置 Brief 确认 | 无强制卡点 | 前置澄清问答 | 无 |
 | 可复现/审计 | 强（全状态落库） | 中 | 弱（黑盒） | 弱 |
+
+---
+
+## 附录 B：设计演进记录
+
+按版本倒序。记录被推翻的设计与推翻理由；v4.6 及更早见 git 历史。
+
+- **v4.16 变更**：成文链按当前实现收口：每个 revision 全量逐句验证，Writer 最多修订两轮；修订触顶后仍未通过的句子保留在正文中，报告标记为 `partial`，这些句子不生成已验证引用角标；验证后产物以 `draft_rendered` 结束。
+- **v4.15 变更**：成文链重构为 **prose-first**（§5.4 / D5 / §3.1 / §3.3）：Report Writer 以 Brief 核心问题为纲直接产出带稳定 statement id 的结构化正文，Report Verifier 逐句分型验证**这份正文本身**——被验证对象与交付对象合一；Claim 表体系保留但生产方向反转（claim 是从最终正文提取的验证记录，`produced_by: report_verifier`）；Writer↔Verifier 修订环句级、全量重验并设硬上限轮数；成文期不开搜索（换证仅限既有 Excerpt 池）；Outline Builder / Claim Drafter / Narrative Composer / no-new-facts 审计四个模块取消
+- **v4.14 变更**：新增 AssertionDisposition（§4.13）：Research Verifier 可将不可信断言标为 unusable（存储不删）；覆盖判断与成文投影只认 usable 断言；冲突侧 LLM 只点 assertion_id、代码绑定 excerpt（与实现对齐）
+- **v4.13 变更**：与 Planner-Worker 实现对齐：ResearchTask 增加 `subjects`；同批任务只能属于一个研究阶段；`effort` 映射全局 Planner 决策轮和分阶段并发/Worker 决策轮；取消 Worker 工具调用总数上限，单轮并行工具调用固定限 8；联网证据统一通过任务级 DocumentView 中的 Exa highlights 落库
+- **v4.12 变更**：ResearchTask 增加必填 `research_stage`（scout / deep_dive / verify），与 `research_mode`、`source_policy` 正交；跨任务综合仍由 Planner 基于断言投影完成，不设 synthesize Worker；任务目标与局部完成判断统一由 `expected_evidence` 承担
+- **v4.11 变更**：Planner 决策上下文从「每轮无状态从库重建」改为**持久 append-only 消息线程**（随 checkpoint 序列化）：保留强制三选一 schema、决策日志落库与「摘要 = 断言投影」三条纪律不变；有界性改由决策轮上限与限长摘要保证；`reflect.note` 从唯一跨轮记忆通道回调为策略审计记录；「逐字回放某轮 prompt」由确定性重建降级为每轮全量 prompt 随 `decision_log` 持久化的记录性满足（§3.3 / §5.2 / §6.7 / §8）
+- **v4.10 变更**：清除旧 M1 子切片、预算水位与 Redis 预算计数语义；M1 只保留完整主图的单一交付门；当时的工具次数预算已由 v4.13 的分阶段 Worker 决策轮合同替代；NFR-2 改为相对人工真值的 Claim 忠实率
+- **v4.9 变更**：明确 interactive Brief HITL 交互合同（§5.1 / §4.1 / FR-2）：用户可原样确认、直接编辑 Brief，或发送**一条**修订指令由 Scope 改写一轮后即定稿（不再二次确认、不允许多轮模型修订）；确认结果仍是交给 Planner 的输入快照，不是执行合同
+- **v4.8 变更**：纠正 Scope / Brief / Planner 的职责边界：Research Brief 不再被定义为段落合同，而是把用户问题具体化并主动展开研究空间的中间产物；Scope 负责澄清问题、提出候选维度、竞争假设、反例、边界条件与多条证据路径，Planner 负责从中选择实际研究方向并以版本化 Research Plan 形成执行合同。Brief 的用户确认只确认系统对问题的理解与展开方向，不把所有候选角度冻结成必达项；Verifier 以 Planner 已形成的执行合同判断覆盖度，并以 Brief 检查是否偏离原始问题（§4.1 / §4.2 / §5.1 / §5.2 / §5.3 / D4）
+- **v4.6 及更早**：见 git 历史
+

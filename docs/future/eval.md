@@ -1,9 +1,13 @@
 # Prospector 评测设计
 
+> **状态：设计草案，尚未实现。** 本文描述的题库、录制回放磁带、人工真值集、裁判校准与
+> `eval_run` 门禁在当前代码中均无对应实现。仓库中已实现的部分只有 `tools/base.py`
+> 里预留的录制钩子。阅读本文请按"计划"而非"现状"理解。
+
 - **版本**：1.1
 - **日期**：2026-07-14
-- **状态**：M3 实现合同；M1 只预留数据与录制接口
-- **依据**：[设计文档](./design.md)、[M1 实现设计](./implementations/m1.md)、[路线图](./implementations/roadmap.md)
+- **归属里程碑**：M3
+- **依据**：[设计文档](../design.md)、[M1 实现设计](../implementations/m1.md)、[路线图](../implementations/roadmap.md)
 
 ---
 

@@ -147,4 +147,17 @@ src/prospector/
 - **M1 已实现到成文质量门**：Brief 生成、interactive HITL、Planner-Worker、Research Verifier/Replan、Report Writer、Report Verifier、最多两次句级修订，以及验证后确定性引用渲染。
 - 当前每个 revision 都会全量逐句验证。修订用尽后仍失败的句子以 `partial` 标记保留且不附已验证引用；渲染后主图以 `draft_rendered` 结束。
 
-详细设计文档见 [docs/design.md](docs/design.md)，M1 实现合同见 [docs/implementations/m1.md](docs/implementations/m1.md)。
+## 文档
+
+已实现部分：
+
+| 文档 | 内容 |
+|------|------|
+| [docs/design.md](docs/design.md) | 系统设计：架构、数据模型与证据血缘、关键设计决策（ADR）、预算与终止、失败模式 |
+| [docs/implementations/m1.md](docs/implementations/m1.md) | 深研主图的实现合同：模块边界、数据模型、控制流、验收判据 |
+| [docs/implementations/m0.md](docs/implementations/m0.md) | 工程基座：checkpoint、迁移、观测、CI |
+| [docs/cli.md](docs/cli.md) | 服务端 API 契约与 CLI/TUI 交互设计 |
+| [docs/implementations/roadmap.md](docs/implementations/roadmap.md) | 里程碑范围与依赖顺序 |
+
+尚未实现的设计草案（`docs/future/`）：[评测基建](docs/future/eval.md)（M3）、[多用户运行时](docs/future/runtime-scaleout.md)（M4）。
+设计文档中归属 M2 的章节（沙箱计算、FigureSpec 图表、PageIndex 建树）已就地标注未实现。
