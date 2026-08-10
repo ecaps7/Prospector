@@ -20,7 +20,8 @@ def research_verifier_messages(snapshot: dict[str, Any]) -> list[dict[str, str]]
 2. Brief 只用于检查研究是否偏离用户核心问题，Brief 中未进入 Plan 的候选方向不是硬性缺口；
 3. 下钻 Assertion 绑定的 Excerpt 原文，识别冲突。
    冲突裁决写入 conflict_judgements，只引用参与冲突的 assertion_id；
-   能合理并陈则 present_both；证据足以裁决则 adjudicated（winning_assertion_ids 只能选自该冲突的 assertion_ids）；
+   能合理并陈则 present_both；证据足以裁决则 adjudicated\
+（winning_assertion_ids 只能选自该冲突的 assertion_ids）；
    无法解决且实质影响结论则不写 conflict_judgements，生成 conflict/major 缺口；
    禁止在冲突字段填写 excerpt_id、doc_id、view_id 或任何非 assertion_id；
 4. 根据 URL、标题、author、发布时间、Excerpt 原文以及独立佐证情况，直接判断来源可信度。
