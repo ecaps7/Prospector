@@ -202,7 +202,6 @@ def render_findings(
     n_cascade = len(cascade_failures)
 
     sep = "═" * w
-    thin = "─" * w
 
     lines: list[str] = [
         sep,

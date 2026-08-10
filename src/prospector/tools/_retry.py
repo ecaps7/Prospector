@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import random
 import urllib.error
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from prospector.obs.logging import get_logger
 
@@ -23,9 +24,7 @@ def is_retryable(exc: BaseException) -> bool:
         return exc.code in _RETRYABLE_STATUSES
     if isinstance(exc, urllib.error.URLError):
         return True  # DNS, connection refused, timeout, etc.
-    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
-        return True
-    return False
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError))
 
 
 async def retry_async(
