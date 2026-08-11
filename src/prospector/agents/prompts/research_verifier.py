@@ -24,6 +24,11 @@ def research_verifier_messages(snapshot: dict[str, Any]) -> list[dict[str, str]]
 （winning_assertion_ids 只能选自该冲突的 assertion_ids）；
    无法解决且实质影响结论则不写 conflict_judgements，生成 conflict/major 缺口；
    禁止在冲突字段填写 excerpt_id、doc_id、view_id 或任何非 assertion_id；
+   冲突只发生在来源之间：一条 conflict_judgement 引用的 assertion
+   必须至少来自两条不同的 Excerpt。两条断言互相矛盾却绑定同一条 Excerpt 时，
+   那是同一来源内部的转录错误（例如同一篇论文被抄成两个年份），不是来源冲突——
+   此时不要写 conflict_judgements，改为把抄错的那条写入 assertion_dispositions
+  （status=unusable），必要时再开缺口；
 4. 根据 URL、标题、author、发布时间、Excerpt 原文以及独立佐证情况，直接判断来源可信度。
    伪学术、UGC 幻觉或无独立佐证却支撑核心定量结论的断言，必须写入 assertion_dispositions
   （status=unusable，只填 assertion_id）；若实质影响结论，再开 source_credibility 缺口。

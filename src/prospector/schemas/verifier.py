@@ -316,8 +316,18 @@ def materialize_conflict_resolutions(
             ]
         )
         if len(excerpt_ids) < 2:
+            # Named, not just diagnosed: this message is handed straight back to the Verifier
+            # as its retry instruction, and "one of your judgements is illegal" is not
+            # something a model can act on when it submitted several.
+            shared = ", ".join(str(value) for value in excerpt_ids) or "no excerpt at all"
             raise ValueError(
-                "Conflict judgement does not resolve to at least two distinct excerpts"
+                f"Conflict judgement {judgement.disputed_point!r} does not resolve to at "
+                "least two distinct excerpts: assertions "
+                f"{', '.join(str(value) for value in judgement.assertion_ids)} "
+                f"all rest on {shared}. Assertions that contradict each other while resting "
+                "on the same excerpt are a transcription error inside one source, not a "
+                "conflict between sources; drop the judgement and mark the wrong assertion "
+                "unusable in assertion_dispositions instead."
             )
         winning_excerpt_ids = _stable_unique(
             [

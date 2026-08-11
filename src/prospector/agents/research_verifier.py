@@ -131,6 +131,20 @@ class OpenAIResearchVerifier:
     def _parse_llm(content: str) -> VerifierLlmDecision:
         return VerifierLlmDecision.model_validate(json.loads(_strip_code_fences(content)))
 
+    def _decide(self, content: str, snapshot: dict[str, Any]) -> VerifierDecision:
+        """Parse one answer and bind its assertion references to authoritative excerpt ids.
+
+        Binding belongs here rather than after the retry: naming assertions that do not
+        resolve to two distinct excerpts is a reference mistake of exactly the same kind as
+        any other contract violation, and it is repaired the same way -- by telling the model
+        that made it. Left outside, it killed Jobs that had already finished their research.
+        """
+        llm_decision = self._parse_llm(content)
+        return materialize_verifier_decision(
+            llm_decision,
+            assertion_excerpt_map_from_snapshot(snapshot),
+        )
+
     def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
         messages = research_verifier_messages(snapshot)
         content = self._stream_content(messages)
@@ -138,14 +152,14 @@ class OpenAIResearchVerifier:
         if not content.strip():
             raise VerifierOutputError("Verifier returned empty content", raw)
         try:
-            llm_decision = self._parse_llm(content)
+            decision = self._decide(content, snapshot)
         except json.JSONDecodeError as syntax_error:
             # Broken JSON is a formatting failure: the cheap model can close the braces
             # without seeing the snapshot, because no judgement changes.
             repaired = self._repair_content(content, str(syntax_error))
             raw = {"role": "assistant", "content": content, "repaired_content": repaired}
             try:
-                llm_decision = self._parse_llm(repaired)
+                decision = self._decide(repaired, snapshot)
             except (ValidationError, TypeError, ValueError) as exc:
                 raise VerifierOutputError(
                     f"malformed Verifier JSON: {syntax_error}; repair failed: {exc}", raw
@@ -163,16 +177,9 @@ class OpenAIResearchVerifier:
             retried = self._stream_content(retry_messages)
             raw = {"role": "assistant", "content": content, "retried_content": retried}
             try:
-                llm_decision = self._parse_llm(retried)
+                decision = self._decide(retried, snapshot)
             except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise VerifierOutputError(
                     f"invalid Verifier decision: {contract_error}; retry failed: {exc}", raw
                 ) from exc
-        try:
-            decision = materialize_verifier_decision(
-                llm_decision,
-                assertion_excerpt_map_from_snapshot(snapshot),
-            )
-        except ValueError as exc:
-            raise VerifierOutputError(f"invalid Verifier conflict binding: {exc}", raw) from exc
         return VerifierModelResult(full_prompt=messages, raw_output=raw, decision=decision)

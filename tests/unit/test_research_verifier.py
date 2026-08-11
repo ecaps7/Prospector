@@ -507,6 +507,50 @@ def test_verifier_binds_conflict_judgements_to_excerpt_ids() -> None:
     assert resolution.decision == "present_both"
 
 
+def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_job() -> None:
+    """Two assertions disagreeing while resting on one excerpt is a repairable slip.
+
+    Binding used to run after the retry block, so a Job that had already finished its
+    research died the first time the model filed a same-excerpt contradiction as a source
+    conflict. It now returns to the Verifier like any other contract violation.
+    """
+    snapshot = {
+        "assertions": [
+            {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
+            {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_A)]},
+        ]
+    }
+    illegal_payload = _llm_decision().model_dump(mode="json")
+    illegal_payload["conflict_judgements"] = [
+        {
+            "disputed_point": "论文发表年份是 2024 还是 2025",
+            "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
+            "decision": "present_both",
+            "winning_assertion_ids": [],
+            "rationale": "两条断言的年份不一致。",
+        }
+    ]
+    illegal = json.dumps(illegal_payload, ensure_ascii=False)
+    legal = json.dumps(
+        _llm_decision(dispositions=[_unusable_disposition(ASSERTION_B)]).model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    completions = _FakeCompletions([illegal, legal])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+
+    result = verifier.verify(snapshot)
+
+    assert result.decision.conflict_resolutions == []
+    assert [item.assertion_id for item in result.decision.assertion_dispositions] == [ASSERTION_B]
+    # Judgement errors go to the model that made them, never to the snapshot-blind repair model.
+    assert [request["model"] for request in completions.requests] == ["strong", "strong"]
+    retry = completions.requests[1]["messages"][-1]["content"]
+    # Named, so the model can tell which of several judgements to drop, and told where to put it.
+    assert "论文发表年份是 2024 还是 2025" in retry
+    assert "assertion_dispositions" in retry
+
+
 def test_verifier_raises_when_structural_repair_is_still_invalid() -> None:
     completions = _FakeCompletions("not json", repaired='{"release_decision":"pass"}')
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
