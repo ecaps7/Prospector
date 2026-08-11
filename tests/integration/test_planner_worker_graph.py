@@ -933,13 +933,15 @@ def test_report_verifier_contract_failure_closes_every_persisted_state() -> None
     try:
         with checkpointer_session() as checkpointer:
             graph = build_research_graph(checkpointer, services)
-            result = graph.invoke(
-                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
-                thread_config(str(job_id)),
-            )
+            # The contract failure propagates instead of returning a terminal state: a
+            # returned one would drive the checkpoint to END and leave `job resume` nothing
+            # to re-enter, stranding a finished research run over a repairable slip.
+            with pytest.raises(ReportVerifierOutputError):
+                graph.invoke(
+                    initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                    thread_config(str(job_id)),
+                )
 
-        assert result["outcome"] == "failed"
-        assert result["error_code"] == "report_verifier_contract_error"
         with repository.engine.connect() as conn:
             row = (
                 conn.execute(

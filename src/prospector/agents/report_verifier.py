@@ -34,6 +34,14 @@ _RETRY_INSTRUCTION = (
     "上一次调用没有产生可读取的判定。请根据同一输入重新独立判断。"
     "只输出要求的 JSON 对象；reason 和 inference_note 保持简洁，只说明主要依据。"
 )
+# A contract violation is a different situation from a truncated or unparseable answer: the
+# verdict was readable, so the model needs to be told which rule it broke rather than simply
+# asked again. Temperature is 0, so an unchanged prompt would reproduce the same answer.
+_CONTRACT_RETRY_INSTRUCTION = (
+    "上一次调用的判定可以读取，但不满足契约：{failure}\n"
+    "请根据同一输入重新独立判断，并修正上述问题。"
+    "只输出要求的 JSON 对象；reason 和 inference_note 保持简洁，只说明主要依据。"
+)
 
 StatementDecision = EvidenceStatementDecision | DerivedStatementDecision | BridgeStatementDecision
 _DECISION_ADAPTER: TypeAdapter[StatementDecision] = TypeAdapter(StatementDecision)
@@ -92,12 +100,58 @@ def _decode_excerpt_ids(content: str, code_map: dict[str, str]) -> str:
     return content
 
 
-def _retry_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Retry from the original input, never from a truncated or malformed answer."""
+def _retry_messages(
+    messages: list[dict[str, str]],
+    *,
+    contract_failure: str | None = None,
+) -> list[dict[str, str]]:
+    """Retry from the original input, never from a truncated or malformed answer.
+
+    ``contract_failure`` names a rule the previous verdict broke. It is the one case where
+    the retry has to say what went wrong, because the answer itself was fine to read.
+    """
+    instruction = (
+        _RETRY_INSTRUCTION
+        if contract_failure is None
+        else _CONTRACT_RETRY_INSTRUCTION.format(failure=contract_failure)
+    )
     return [
-        {"role": "system", "content": f"{messages[0]['content']}\n\n{_RETRY_INSTRUCTION}"},
+        {"role": "system", "content": f"{messages[0]['content']}\n\n{instruction}"},
         messages[1],
     ]
+
+
+def _contract_violation(
+    statement_id: str,
+    kind: str,
+    decision: StatementDecision,
+    excerpt_code_map: dict[str, str],
+) -> str | None:
+    """Describe how *decision* breaks the verdict contract, or None when it holds.
+
+    Returned rather than raised so the caller can spend its remaining attempt on it. These
+    are repairable slips -- a mistyped id, a pair set that misses one excerpt -- and each
+    statement is one of a hundred-odd riding on the same run.
+    """
+    if decision.statement_id != statement_id:
+        return (
+            f"decision statement_id mismatch: expected {statement_id}, got {decision.statement_id}"
+        )
+    if decision.kind != kind:
+        return f"decision kind mismatch for {statement_id}: expected {kind}, got {decision.kind}"
+    if isinstance(decision, EvidenceStatementDecision):
+        code_by_id = {UUID(real_id): code for code, real_id in excerpt_code_map.items()}
+        allowed = set(code_by_id)
+        reported = {pair.excerpt_id for pair in decision.pairs}
+        if reported != allowed:
+            # Named in the short codes the model was shown, not the UUIDs it never saw.
+            missing = sorted(code_by_id[value] for value in allowed - reported)
+            unexpected = sorted(str(value) for value in reported - allowed)
+            return (
+                f"evidence pairs must cover exactly the candidate excerpts for {statement_id}："
+                f"缺少 {missing or '无'}，多出 {unexpected or '无'}"
+            )
+    return None
 
 
 def materialize_findings(
@@ -177,26 +231,41 @@ class OpenAIReportVerifier:
         attempts: list[dict[str, object]] = []
         parse_errors: list[str] = []
         decision: StatementDecision | None = None
-        for attempt_messages in (messages, _retry_messages(messages)):
+        attempt_messages = messages
+        for attempt_index in range(2):
             content, finish_reason = self._complete(attempt_messages)
             attempt: dict[str, object] = {
                 "content": content,
                 "finish_reason": finish_reason,
             }
             attempts.append(attempt)
+            failure: str | None
+            contract_failure: str | None = None
             if finish_reason == "length":
-                parse_errors.append("answer was cut off")
-                continue
-            if not content.strip():
-                parse_errors.append("empty content")
-                continue
-            decoded_content = _decode_excerpt_ids(content, excerpt_code_map)
-            try:
-                decision = self._parse(decoded_content)
-                break
-            except (ValidationError, TypeError, ValueError) as exc:
-                attempt["parse_error"] = str(exc)
-                parse_errors.append(str(exc))
+                failure = "answer was cut off"
+            elif not content.strip():
+                failure = "empty content"
+            else:
+                decoded_content = _decode_excerpt_ids(content, excerpt_code_map)
+                try:
+                    candidate = self._parse(decoded_content)
+                except (ValidationError, TypeError, ValueError) as exc:
+                    failure = str(exc)
+                else:
+                    # Checked here rather than after the loop: a readable verdict that breaks
+                    # the contract is one correction away from usable, and every statement
+                    # shares a Job with a hundred others that already passed.
+                    contract_failure = _contract_violation(
+                        statement_id, kind, candidate, excerpt_code_map
+                    )
+                    if contract_failure is None:
+                        decision = candidate
+                        break
+                    failure = contract_failure
+            attempt["parse_error"] = failure
+            parse_errors.append(failure)
+            if attempt_index == 0:
+                attempt_messages = _retry_messages(messages, contract_failure=contract_failure)
 
         raw: object = {"attempts": attempts}
         if decision is None:
@@ -212,25 +281,6 @@ class OpenAIReportVerifier:
                     f"second attempt failed: {parse_errors[1]}"
                 )
             raise ReportVerifierOutputError(message, raw)
-        if decision.statement_id != statement_id:
-            raise ReportVerifierOutputError(
-                f"decision statement_id mismatch: expected {statement_id}, "
-                f"got {decision.statement_id}",
-                raw,
-            )
-        if decision.kind != kind:
-            raise ReportVerifierOutputError(
-                f"decision kind mismatch for {statement_id}: expected {kind}, got {decision.kind}",
-                raw,
-            )
-        if isinstance(decision, EvidenceStatementDecision):
-            allowed = {UUID(real_id) for real_id in excerpt_code_map.values()}
-            reported = {pair.excerpt_id for pair in decision.pairs}
-            if reported != allowed:
-                raise ReportVerifierOutputError(
-                    f"evidence pairs must cover exactly the candidate excerpts for {statement_id}",
-                    raw,
-                )
         return statement_id, decision, raw
 
     def verify(self, snapshot: ReportVerifierSnapshot) -> ReportVerifierModelResult:

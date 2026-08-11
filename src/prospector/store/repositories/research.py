@@ -2133,6 +2133,37 @@ class ResearchRepository:
                             },
                         )
 
+    def fail_report_revision(
+        self,
+        report_id: UUID,
+        revision: int,
+        *,
+        raw_output: object,
+        error: str,
+    ) -> None:
+        """Park what the Writer actually said when its output could not be accepted.
+
+        The row stays 'prompted': nothing valid was produced, and resume only reuses
+        'generated' revisions, so leaving the status alone keeps replay correct. What changes
+        is that raw_output is no longer NULL -- without the rejected answer, a contract
+        failure can only be reconstructed by elimination.
+        """
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.report_revisions
+                    SET raw_output=CAST(:raw AS JSONB)
+                    WHERE report_id=:report_id AND revision=:revision AND status='prompted'
+                    """
+                ),
+                {
+                    "raw": _json({"error": error, "turns": raw_output}),
+                    "report_id": report_id,
+                    "revision": revision,
+                },
+            )
+
     def set_report_status(self, report_id: UUID, status: str) -> None:
         now = datetime.now(UTC)
         with self.engine.begin() as conn:

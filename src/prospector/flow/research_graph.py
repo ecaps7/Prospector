@@ -790,6 +790,11 @@ def _writer_node(services: ResearchGraphServices):
             raise RuntimeError("Report Writer services are not configured")
         services.repository.record_phase_changed(job_id, "writing")
 
+        # Set as soon as a revision row exists so a contract failure can still park the
+        # model's actual answer on it. Without that artifact a rejection can only be
+        # reconstructed by elimination from the previous revision.
+        pending_revision: tuple[UUID, int] | None = None
+
         try:
             snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
             stored = services.repository.get_report_revision(job_id)
@@ -838,6 +843,7 @@ def _writer_node(services: ResearchGraphServices):
                     full_prompt,
                     bump=True,
                 )
+                pending_revision = (report_id, revision)
                 with (
                     tracer.start_as_current_span(
                         "llm.call",
@@ -876,6 +882,7 @@ def _writer_node(services: ResearchGraphServices):
                 verifier_run_id,
                 full_prompt,
             )
+            pending_revision = (report_id, revision)
             # Replay: revision already prompted/generated.
             stored_after = services.repository.get_report_revision(job_id)
             if (
@@ -910,6 +917,12 @@ def _writer_node(services: ResearchGraphServices):
                 revision=revision,
             )
         except (ReportWriterOutputError, ValueError) as exc:
+            if pending_revision is not None:
+                services.repository.fail_report_revision(
+                    *pending_revision,
+                    raw_output=getattr(exc, "raw_output", None),
+                    error=str(exc),
+                )
             services.repository.set_research_outcome(
                 job_id,
                 outcome="failed",
@@ -917,12 +930,12 @@ def _writer_node(services: ResearchGraphServices):
                 phase="failed",
             )
             log.error("writer.contract_error", job_id=str(job_id), message=str(exc))
-            return {
-                "phase": "failed",
-                "outcome": "failed",
-                "error_code": "writer_contract_error",
-                "route": "end",
-            }
+            # Raise rather than return a terminal state. Returning one lets LangGraph record
+            # the node as done and route to END, so the checkpoint reaches a final state and
+            # `job resume` has nothing left to re-enter -- the research is stranded. Raising
+            # leaves the checkpoint standing before this node, which is what makes the
+            # failure recoverable once the contract bug is fixed.
+            raise
 
         return {
             "phase": "verifying",
@@ -1074,13 +1087,9 @@ def _report_verifier_node(services: ResearchGraphServices):
                         job_id=str(job_id),
                         message=str(exc),
                     )
-                    return {
-                        "phase": "failed",
-                        "outcome": "failed",
-                        "error_code": "report_verifier_contract_error",
-                        "report_id": str(report_id),
-                        "route": "end",
-                    }
+                    # Raise for the same reason the Writer does: a returned terminal state
+                    # drives the checkpoint to END and strands the run beyond `job resume`.
+                    raise
                 findings = result.findings
                 next_status = _post_verify_status(findings, revision)
                 log.info(
