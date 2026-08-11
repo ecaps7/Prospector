@@ -1,0 +1,178 @@
+[研究] Brief 已确认（standard）
+[研究] 开始
+[轮 1] Planner 派发 4 个任务（Plan v1，余 11 轮）：首轮 scout 铺设四个独立筛选维度：学术原义来源、网络流行时间线、微观竞争场景用例、误用争议材料；群体差异、躺平/佛系对比及社会背景驱动因素留待后续轮次。
+  ├─ T1 确认'内卷（involution）/内卷化'在格尔茨《农业内卷化》（Agricultural Involution）与黄宗智中国经济史研究中的经典定义是否存在可及的一手或高可信学术来源；只确认定义要点（如'没有发展的增长'、'过密化'）和来源可及性，不研究语义演变或传播机制。
+  ├─ T2 确认'内卷'作为中文网络流行语是否存在可查的关键传播时间窗口（初步候选为2019-2020年，需验证）及代表性传播事件（如社交媒体热词、知名自媒体文章）；只筛查传播时间起点和关键事件的证据存在性，不分析传播机制或语义内容。
+  ├─ T3 确认'内卷'在中文网络语境中用于教育、职场、科研等微观个体竞争场景的典型用例是否存在可查来源；只筛查语义泛化到微观竞争领域的用例存在性，不分析语义转变的原因或机制。
+  └─ T4 确认是否存在明确讨论'内卷'网络流行用法偏离或合理延伸其学术原意的学术论文、媒体评论或公开辩论；只筛查这类争议讨论材料的存在性，不评价争议双方观点。
+[T1] 开始：探索阶段 / 事实核验（Worker 决策轮预算 24 轮） · 对象：格尔茨《农业内卷化》（Agricultural Involution）、黄宗智中国经济史研究
+[T2] 开始：探索阶段 / 时间线（Worker 决策轮预算 24 轮） · 对象：'内卷'流行时间节点、'内卷'代表性传播事件
+[T4] 开始：探索阶段 / 反证（Worker 决策轮预算 24 轮） · 对象：'内卷'网络用法偏离学术原意的争议讨论
+[T3] 开始：探索阶段 / 事实核验（Worker 决策轮预算 24 轮） · 对象：教育领域的'内卷'用例、职场领域的'内卷'用例、科研学术领域的'内卷'用例
+[T1] 搜索 "What is the classic definition of involution in Clifford Geertz's Agricultural Involution?" → 8 条结果
+[T2] 搜索 "内卷 2019年 知乎 微博 最早出现 流行 时间" → 8 条结果
+[T3] 搜索 "职场中“内卷”一词的典型使用案例有哪些可查来源？" → 8 条结果
+[T3] 搜索 "科研学术领域“内卷”一词的典型使用案例有哪些可查来源？" → 8 条结果
+[T4] 搜索 "内卷一词的网络流行用法与学术原意之间是否存在偏离或延伸的讨论？" → 8 条结果
+[T1] 搜索 "How does Philip Huang define involution or involutionary growth in his studies of Chinese economic history?" → 8 条结果
+[T3] 搜索 "教育领域里“内卷”一词的典型使用案例有哪些可查来源？" → 8 条结果
+[T2] 搜索 "内卷 2020年 网络热词 百度指数 微信指数 传播时间" → 8 条结果
+[T2] 搜索 "内卷 2020年 年度热词 媒体 报道 传播事件" → 8 条结果
+[T2] 搜索 "内卷 作为中文网络流行语 是什么时候开始流行的 时间节点" → 8 条结果
+[T4] 搜索 "有哪些学术论文或媒体评论讨论内卷网络用语的泛化与学术概念原意的关系？" → 8 条结果
+[T3] 网页快照已保存 https://news.sciencenet.cn/htmlnews/2021/1/452636.shtm → 98c6d3c6
+[T3] 网页快照已保存 https://epc.swu.edu.cn/info/1193/4523.htm → 09bca7c6
+[T2] 网页快照已保存 http://www.knowcat.cn/p/20250603/2512639.html → 2d4660e2
+[T2] 网页快照已保存 https://www.thepaper.cn/newsDetail_forward_9782795 → c7300324
+[T3] 网页快照已保存 https://www.bbc.com/zhongwen/articles/cvg7502x7r0o/simp → be5243b9
+[T4] 网页快照已保存 http://www.shehui.pku.edu.cn/upload/editor/file/20210311/20210311090117_3131.pdf → 56b71332
+[T2] 网页快照已保存 https://www.bbc.com/zhongwen/simp/chinese-news-57304453 → 99132a68
+[T4] 网页快照已保存 https://www.bjnews.com.cn/detail/160331896215702.html → 66df0c6f
+[T1] 网页快照已保存 https://en.lishiyushehui.cn/article/download/279 → aef56588
+[T1] 网页快照已保存 https://garfield.library.upenn.edu/classics1991/A1991FA58100001.pdf → 65d1aed5
+[T2] web_fetch 失败：HTTP Error 429: Too Many Requests
+[T4] 落证 2 条断言（1 段原文）
+[T4] 落证 1 条断言（1 段原文）
+[T1] 落证 1 条断言（1 段原文）
+[T1] 落证 1 条断言（1 段原文）
+[T3] 落证 1 条断言（1 段原文）
+[T3] 落证 1 条断言（1 段原文）
+[T3] 落证 1 条断言（1 段原文）
+[T2] 落证 1 条断言（1 段原文）
+[T2] 落证 1 条断言（1 段原文）
+[T2] 落证 1 条断言（1 段原文）
+[T1] 收工：证据目标满足（轮 2/24，工具 5 次，累计断言 2 条）：已落库断言覆盖格尔茨和黄宗智关于内卷定义的可靠来源及要点
+[T4] 收工：证据目标满足（轮 2/24，工具 5 次，累计断言 3 条）：已落库断言覆盖了必需证据：新京报文章明确讨论网络用法与学术原意偏离，并体现泛化延伸，同时学术争议材料亦存在。
+[T3] 收工：证据目标满足（轮 2/24，工具 7 次，累计断言 3 条）：已落库断言覆盖教育、职场、科研三领域典型用例，满足全部必需证据。
+[T2] 收工：证据目标满足（轮 2/24，工具 8 次，累计断言 3 条）：已落库断言覆盖关键时间窗口与代表性传播事件
+[轮 2] Planner 派发 3 个任务（Plan v2，余 10 轮）：scout 已确认学术原义、传播时间线、微观领域用例与争议材料，足以进入 deep_dive；本轮聚焦语义转变三大机制（领域迁移、情感色彩、泛化弱化），群体视角差异、躺平/佛系对比、社会背景驱动及误用/延伸规范评价留待后续轮次。
+  ├─ T5 分析'内卷'一词从学术语境中的宏观社会经济描述（如农业劳动密集化、没有发展的增长）向中国网络语境中微观个体竞争场景（教育、职场、科研等）迁移的过程如何被学界和媒体描述；只研究语义适用范围从宏观/集体向微观/个体转移的证据链，不研究情感色彩转变、泛化滥用或社会背景驱动。
+  ├─ T6 分析'内卷'在中文网络流行用法中相比学术用法的情感评价色彩变化（从学术中性描述转向伴随焦虑、不满、无奈或自嘲的负面化表达）是否有可靠来源支持；只研究情感与评价色彩转变的证据链，不研究语义适用范围迁移、泛化滥用或社会背景驱动。
+  └─ T7 分析'内卷'在网络传播中因过度泛化使用导致语义模糊、弱化或解释力下降的现象是否被媒体与学者明确批评；只研究泛化滥用现象及其批评的证据链，不评判网络用法相对学术原意是否合理，也不研究社会背景驱动。
+[T6] 开始：深挖阶段 / 对比（Worker 决策轮预算 64 轮） · 对象：'内卷'网络流行语义
+[T7] 开始：深挖阶段 / 反证（Worker 决策轮预算 64 轮） · 对象：'内卷'网络流行语义
+[T5] 开始：深挖阶段 / 对比（Worker 决策轮预算 64 轮） · 对象：'内卷'网络流行语义
+[T7] 搜索 "媒体评论指出内卷一词被过度泛化使用导致概念模糊解释力下降" → 8 条结果
+[T7] 搜索 "学者批评内卷被滥用什么都往里装语义弱化" → 8 条结果
+[T6] 搜索 "网络流行语“内卷”是否带有焦虑、不满、自嘲或戏谑的情绪色彩？" → 8 条结果
+[T7] 网页快照已保存 https://www.bjnews.com.cn/detail/160331896215702.html → 66df0c6f
+[T5] 搜索 "内卷 involution 语义从宏观社会经济概念向网络流行语微观竞争场景转移，学界如何描述这一过程？" → 8 条结果
+[T5] 搜索 "内卷一词如何从农业劳动密集化扩展到教育职场科研等微观个体竞争领域，有哪些学术论文或媒体分析描述这一语义迁移过程？" → 8 条结果
+[T6] 搜索 "“内卷”一词在社交媒体上的情感色彩与学术定义有何不同？" → 8 条结果
+[T7] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?id=7103456348 → 7a1cbcf3
+[T7] 网页快照已保存 https://paper.people.com.cn/zgjjzk/pc/content/202503/30/content_30068687.html → e26c1348
+[T6] web_fetch 失败：HTTP Error 412: Precondition Failed
+[T6] 网页快照已保存 https://www.bjnews.com.cn/detail/160331896215702.html → 66df0c6f
+[T7] 网页快照已保存 https://chinadigitaltimes.net/chinese/712823.html → 4054ebd3
+[T5] 网页快照已保存 https://www.hanspub.org/journal/paperinformation?paperid=78927 → 8147bdf3
+[T5] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?id=00002FKIL5387JP0MLD88JP167R → 89c353f3
+[T5] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MHDO4JP06HR → e0e7634e
+[T5] 网页快照已保存 https://soe.sjtu.edu.cn/kindeditor/Upload/file/20220621/202206211542033497524.pdf → 88dcd732
+[T6] web_fetch 失败：(psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "documents_workspace_id_source_uri_content_hash_key"
+[T6]   DETAIL:  Key (workspace_id, source_uri, content_hash)=(00000000-0000-4000-8000-000000000001, https://www.hanspub.org/journal/paperinformation?paperid=78927, sha256:da68eeb5cc7274e57c43f8e6266846430281275c902bb86a7e699ecc8473e8d8) already exists.
+[T6]   [SQL:
+[T6]   INSERT INTO app.documents
+[T6]   (id, workspace_id, source_ref, source_uri, content_hash, version,
+[T6]   retrieved_at, media_type, storage_ref, index_ref, source_meta)
+[T6]   VALUES
+[T6]   (%(id)s, %(workspace_id)s, CAST(%(source_ref)s AS JSONB), %(source_uri)s,
+[T6]   %(content_hash)s, %(version)s, %(retrieved_at)s, %(media_type)s, %(storage_ref)s,
+[T6]   NULL, CAST(%(source_meta)s AS JSONB))
+[T6]   ]
+[T6]   [parameters: {'id': UUID('944661c2-9931-4069-9e3a-258f246e7948'), 'workspace_id': UUID('00000000-0000-4000-8000-000000000001'), 'source_ref': '{"kind": "url", "uri": "https://www.hanspub.org/journal/paperinformation?paperid=78927"}', 'source_uri': 'https://www.hanspub.org/journal/paperinformation?paperid=78927', 'content_hash': 'sha256:da68eeb5cc7274e57c43f8e6266846430281275c902bb86a7e699ecc8473e8d8', 'version': 1, 'retrieved_at': datetime.datetime(2026, 8, 10, 14, 52, 24, 609481, tzinfo=datetime.timezone.utc), 'media_type': 'html', 'storage_ref': 's3://prospector/00000000-0000-4000-8000-000000000001/docs/944661c2-9931-4069-9e3a-258f246e7948/v1.txt', 'source_meta': '{"title": "网络流行语“内卷”语义及语用分析", "author": "中文学术期刊,汉斯出版社,Hans Publishers", "published_at": "2024-01-10T08:51:30.000Z"}'}]
+[T6]   (Background on this error at: https://sqlalche.me/e/20/gkpj)
+[T6] 网页快照已保存 https://www.hanspub.org/journal/paperinformation?paperid=92319 → 3399e194
+[T6] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MLDG4JPXM9R → c15643e7
+[T6] 网页快照已保存 https://pdf.hanspub.org/ml20240100000_54927408.pdf → c624292f
+[T5] 网页快照已保存 https://journal.kci.go.kr/ksclc/archive/articlePdf?artiId=ART003139730 → 0b5ac336
+[T7] 落证 1 条断言（1 段原文）
+[T7] 落证 1 条断言（1 段原文）
+[T7] 落证 1 条断言（1 段原文）
+[T6] 落证 1 条断言（1 段原文）
+[T6] 落证 1 条断言（1 段原文）
+[T5] 落证 1 条断言（1 段原文）
+[T5] 落证 1 条断言（1 段原文）
+[T5] 落证 1 条断言（1 段原文）
+[T7] 收工：证据目标满足（轮 2/64，工具 7 次，累计断言 3 条）：已落库断言覆盖媒体与学者对泛化滥用及概念模糊的明确批评，满足两个独立来源要求。
+[T6] 收工：证据目标满足（轮 2/64，工具 7 次，累计断言 2 条）：两个独立来源（学术论文与媒体评论）均明确说明网络语境中'内卷'带有焦虑、不满、自嘲等情绪色彩，并与学术中性描述形成对比。
+[T5] 收工：证据目标满足（轮 2/64，工具 8 次，累计断言 3 条）：已落库断言覆盖了从宏观到微观的迁移过程，且来源独立，满足两条独立证据要求。
+[轮 3] Planner 派发 3 个任务（Plan v3，余 9 轮）：核心语义转变三机制已建链；本轮补齐三个重要边界：2020年共鸣的社会驱动、政策话语迁移（语义再延伸）、三群体视角差异。躺平/佛系对比因多对象拆分成本高且非核心结论必需，暂不研究。
+  ├─ T8 考察'内卷'在2020年前后成为中文网络热词的社会心理与社会结构驱动因素，即教育焦虑、职场竞争压力、阶层固化感知等如何在来源中被解释为广泛共鸣的背景；只研究共鸣驱动因素的解释证据链，不研究语义本身的转变、泛化滥用或与其他流行语的对比。
+  ├─ T9 考察'内卷'从网络流行语向官方与政策话语迁移的现象，即官方媒体、政府文件或高层会议（如中央经济工作会议提出'综合整治内卷式竞争'）是否将'内卷'用作政策术语；只研究政策话语迁移的时间节点与使用方式，不研究其政策效果或社会背景。
+  └─ T10 考察学术界、媒体评论与普通网民三组群体在'内卷'概念使用上的视角差异（如学术强调概念辨析与误用批评、媒体强调社会情绪、网络使用者强调个体体验），是否存在可引用的来源将这种差异明确呈现；只研究三组群体使用视角差异的证据链，不研究政策话语、传播机制或社会背景驱动。
+[T8] 开始：深挖阶段 / 事实核验（Worker 决策轮预算 64 轮） · 对象：'内卷'（中文网络流行语）
+[T10] 开始：深挖阶段 / 对比（Worker 决策轮预算 64 轮） · 对象：'内卷'（中文网络流行语）
+[T9] 开始：深挖阶段 / 时间线（Worker 决策轮预算 64 轮） · 对象：'内卷'（中文网络流行语）
+[T9] 搜索 "中央经济工作会议提出综合整治内卷式竞争是哪一年哪次会议" → 8 条结果
+[T9] 搜索 "官方媒体首次使用内卷式竞争一词的报道" → 8 条结果
+[T9] 搜索 "人民日报或新华社何时将内卷作为政策术语使用" → 8 条结果
+[T8] 搜索 "内卷 成为 网络热词 社会背景 教育焦虑 职场竞争 阶层固化 原因 分析" → 8 条结果
+[T8] 搜索 "内卷 共鸣 社会结构 阶层固化 媒体分析 2020" → 8 条结果
+[T8] 搜索 "内卷 流行 社会心理 驱动因素 学术论文 教育焦虑 就业压力" → 8 条结果
+[T10] 搜索 "学术界 媒体 普通网民 对“内卷”概念 使用差异 有哪些研究或评论？" → 8 条结果
+[T10] 搜索 "“内卷”一词 学术批评 媒体使用 网络流行语 差异 有哪些文献？" → 8 条结果
+[T8] web_fetch 失败：HTTP Error 412: Precondition Failed
+[T8] 网页快照已保存 https://www.hanspub.org/journal/paperinformation?paperid=78927 → 8147bdf3
+[T8] 网页快照已保存 https://www.bbc.com/zhongwen/simp/chinese-news-57304453 → 99132a68
+[T9] 网页快照已保存 http://paper.people.com.cn/rmrb/pc/content/202603/20/content_30146246.html → a2266050
+[T10] 网页快照已保存 https://www.hanspub.org/journal/paperinformation?paperid=78927 → 8147bdf3
+[T10] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?id=00002FKIL5387JP0MLD88JP167R → 89c353f3
+[T10] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MLDG4JPXM9R → c15643e7
+[T9] 网页快照已保存 https://paper.people.com.cn/rmrb/pc/content/202503/28/content_30064596.html → 544f3978
+[T9] 网页快照已保存 https://www.news.cn/politics/20250308/1f0dd45eb06a4e9593feff245dfb7b02/c.html → 7ef1833a
+[T9] 网页快照已保存 https://www.cls.cn/detail/1887589 → a7c077e1
+[T9] 网页快照已保存 https://www.21jingji.com/article/20241213/herald/dd4ed45bb3b2aeec2dd2d85ef0e7b6ea.html → d3ef248b
+[T9] 网页快照已保存 https://www.zaobao.com.sg/realtime/china/story20241212-5583397 → 9801f1cb
+[T9] 网页快照已保存 https://www.zaochenbao.com/news/opinion/202408/0923326.html → cf149b9c
+[T9] 网页快照已保存 https://www.zaobao.com.sg/news/china/story20240803-4418749 → 813998f4
+[T8] 网页快照已保存 https://ptextold.nju.edu.cn/13/da/c13164a594906/page.htm → 0209fbfa
+[T8] 网页快照已保存 https://journal.psych.ac.cn/xlxb/article/2024/0439-755X/0439-755X-56-1-107.shtml → 35f51f18
+[T8] 网页快照已保存 https://www.huxiu.com/article/397631.html → 27832d48
+[T8] 网页快照已保存 https://chinadigitaltimes.net/chinese/657483.html → 1ccd7111
+[T9] 网页快照已保存 https://cn.chinadaily.com.cn/a/202503/20/WS67dbdda4a310510f19eecd89.html → 3dfaf3ca
+[T10] 网页快照已保存 http://www.shehui.pku.edu.cn/upload/editor/file/20210311/20210311090117_3131.pdf → 56b71332
+[T8] 网页快照已保存 https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2025.1628064/full → 5f72c7de
+[T8] web_fetch 失败：HTTP Error 429: Too Many Requests
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T9] 落证 1 条断言（1 段原文）
+[T10] 落证 1 条断言（1 段原文）
+[T10] 落证 1 条断言（1 段原文）
+[T10] 落证 1 条断言（1 段原文）
+[T10] 落证 1 条断言（1 段原文）
+[T8] 落证 1 条断言（1 段原文）
+[T8] 落证 1 条断言（1 段原文）
+[T8] 落证 1 条断言（1 段原文）
+[T8] 落证 1 条断言（1 段原文）
+[T8] 落证 1 条断言（1 段原文）
+[T9] 收工：证据目标满足（轮 2/64，工具 13 次，累计断言 8 条）：已落库断言覆盖了中央经济工作会议、政治局会议及政府工作报告等官方表述，满足两个独立来源要求。
+[T10] 收工：证据目标满足（轮 2/64，工具 7 次，累计断言 4 条）：已落库断言覆盖学术、媒体与网民三组群体使用差异，满足至少两个独立来源的要求。
+[T8] 收工：证据目标满足（轮 2/64，工具 11 次，累计断言 5 条）：已落库断言覆盖教育焦虑、职场竞争、阶层固化等共鸣动因，且来源相互独立。
+[轮 4] Planner 派发 1 个任务（Plan v4，余 8 轮）：补齐 brief 直觉一中'合理延伸/再创造'面向的缺口，避免结论单边化；'躺平/佛系'对比因多对象拆分成本高且对核心结论增益有限，暂不研究，留作报告边界披露。
+  └─ T11 考察是否存在来源将'内卷'的网络流行用法论证为对学术原意的合理延伸、通俗化再创造或概念连续性体现（而非单纯误用或偏离），如有，其论证内容是什么；只检验'合理延伸/再创造'这一对立面向的证据存在性，不重新评价'误用/偏离'观点，也不研究社会背景驱动或与其他流行语的对比。
+[T11] 开始：深挖阶段 / 反证（Worker 决策轮预算 64 轮） · 对象：'内卷'网络流行语义
+[T11] 搜索 "内卷的网络流行用法是否是对学术原意的合理延伸或通俗化再创造？有哪些学者或文章正面论证这种关系？" → 8 条结果
+[T11] 搜索 "Which scholars argue that the internet slang usage of involution (neijuan) is a reasonable extension or popularization of the academic concept?" → 8 条结果
+[T11] 网页快照已保存 https://pdf.hanspub.org/ml20240100000_54927408.pdf → c624292f
+[T11] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MHDO4JP06HR → e0e7634e
+[T11] 网页快照已保存 http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MLDG4JPXM9R → c15643e7
+[T11] 网页快照已保存 https://www.hanspub.org/journal/paperinformation?paperid=49707 → 1c09d0f7
+[T11] 网页快照已保存 https://www.icsin.org/uploads/2021/09/13/b075a2fab526188350b5fdf4ac30b72c.pdf → ac0f62e4
+[T11] 网页快照已保存 https://languagelog.ldc.upenn.edu/nll/?p=57675 → a25c970a
+[T11] 落证 1 条断言（1 段原文）
+[T11] 落证 1 条断言（1 段原文）
+[T11] 落证 1 条断言（1 段原文）
+[T11] 收工：证据目标满足（轮 2/64，工具 9 次，累计断言 3 条）：已落库断言正面论证了网络用法为合理延伸、通俗化或概念连续性，覆盖全部必需证据。
+[轮 5] Planner finish：学术原义、传播时间线、宏观到微观迁移、情感负面化、泛化弱化、群体差异、社会动因、政策话语迁移及误用/延伸双向争议均已建链并有独立来源交叉验证；'躺平/佛系'等同类流行语对比属可选旁证且涉及多对象合规限制，已记录为边界缺口，继续研究预期增益低，可交 Verifier。
+[研究] 研究阶段结束，等待核验（Plan v4，触发：Planner finish）
+[核验] Plan v4 通过（重大缺口 0，冲突裁决 0，废证 0）
+[核验] 收工：各任务证据均已满足且来源基本可靠，无重大缺口。
+[成文] Research Verifier 已放行，等待 Writer
+[成文] Writer 正在组织深度研究报告
+[成文] 报告已渲染：s3://prospector/00000000-0000-4000-8000-000000000001/reports/d8238be2-ac32-42c7-b3a1-f832057aedbd/3/report.md
+[成文] 报告渲染完成

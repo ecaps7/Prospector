@@ -1,0 +1,64 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────── Job 状态 ──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Job   d6588690-fbc3-4768-ae0b-ced47ade2d8a                                                                                                                                                           │
+│ 问题  社交媒体导致青少年心理健康恶化的因果证据到底有多强？                                                                                                                                           │
+│ 状态  completed                                                                                                                                                                                      │
+│ 阶段  draft_rendered                                                                                                                                                                                 │
+│ Plan  v10                                                                                                                                                                                            │
+│ 结果  draft_rendered                                                                                                                                                                                 │
+│ 错误  -                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                  任务                                                                                                  
+ task_id                               问题                                                                                                                阶段       模式             状态    工具调用 
+ 27d3cf97-a113-484d-b2a2-036afa244d19  针对以下候选准实验类型，确认是否存在已发表的利用青少年/学生网络暴露外生变化（平台推出、手机禁令、断网/宽带）估计 …  scout      factual          done    49       
+ 443a79fe-502e-4dc3-aa78-b1c6602a3b40  确认是否存在以青少年或新兴成年人为对象、以限制社交媒体平台使用为干预并测量心理健康结果的高质量随机对照实验；报告 …  scout      factual          done    11       
+ 7fb7294a-a3b8-4f99-a515-df8f23fdf85d  确认在青少年纵向研究中，是否存在检验双向因果方向（心理健康→后续社交媒体使用）或第三变量/选择效应的证据；识别出1-3…  scout      factual          done    14       
+ d0f89110-aaa4-42c5-9891-917dd557208d  对下列候选综述/元分析，逐篇确认是否存在、证据设计类型（元分析/规范曲线/叙述综述/横断面）及其对‘社交媒体使用→青少 …  scout      factual          done    30       
+ 38ca3729-edaf-42cd-b3e9-d2ef6b1e9856  在已识别的因果设计研究（Facebook大学扩张、宽带扩展、手机禁令）及关键纵向研究中，确认性别（女孩vs男孩）是否一致地 …  scout      comparison       done    50       
+ 470b8dad-3d8b-417f-887f-97cf90188695  对下列候选研究/研究类型，逐项确认是否存在区分被动（浏览/消费）与主动（发布/互动）社交媒体使用并测量心理健康或幸福…  scout      factual          done    10       
+ 57457222-c0ac-4b98-a6a2-f5c8c21d1518  在青少年社交媒体/数字屏幕时间与心理健康关系的已发表元分析或大型综述中，确认是否存在报告了发表偏差检验（如漏斗图不…  scout      factual          done    11       
+ b366b10a-b55e-4b79-975f-5bf1cf93b5b4  针对中国或韩国青少年，确认是否存在至少一篇2018年后发表的大样本（n>1000）、纵向或重复截面设计、直接测量社交媒体（ …  scout      factual          done    6        
+ bad7cdca-9fd7-467b-a35b-4ee9818d1802  确认是否存在至少一项采用家庭固定效应（兄弟姐妹对照）、双生子设计或遗传易感性控制（如多基因分数）的研究，估计儿童/…  scout      factual          done    5        
+ dba8961b-3935-40fb-ab7e-7d9324dd3787  系统评估限制社交媒体使用的RCT（有焦虑/抑郁症状青少年的每日1小时限制、欧洲大学生三平台每日10分钟限制、健康学生屏幕…  deep_dive  comparison       done    30       
+ f1da321f-f95d-4c90-9643-73ab95ee23d4  深入核查Braghieri, Levy & Makarin 2022（Facebook大学扩张自然实验）的研究设计（staggered                             deep_dive  factual          done    18       
+                                       DiD、样本与年龄范围、处理强度定义、平行趋势与估计方法）及其主要结果（心理健康负面效应、学业受损），并评估该证据对…                                               
+ f85fc23a-6275-44f0-8223-fd3fca1f5802  深入核查遗传知情研究（英国TEDS双胞胎样本及多基因分数分析）如何估计媒体使用与青少年心理健康关联中遗传因素的影响： …  deep_dive  counterargument  done    10       
+ 11ced597-fbac-4a5f-963d-b4c4294245d3  综合评估学校手机禁令/限制类研究（南澳手机禁令自然实验、美国州级禁令合成DID、Yondr手机袋全国证据、英国中学限制政策…  deep_dive  comparison       done    17       
+ 69ffed13-22a1-4751-9de6-d33c26ecd2f6  深入核查Arenas-Arroyo等关于西班牙光纤到户（FTTH）部署与青少年心理健康的研究（含JHE                                  deep_dive  factual          done    8        
+                                       2025发表版），确认其识别策略（外生光纤部署变异、样本与年龄段、DID设定）、主要结果（心理健康诊断/自杀、性别差异） …                                               
+ a609a0af-e651-453c-b917-b9ad583e9376  深入核查Heffer et al.                                                                                               deep_dive  counterargument  done    19       
+                                       2019两项纵向研究（青少年样本与大学生样本）关于社交媒体使用与抑郁症状方向性的发现：确认样本、测量工具、随访时长、 …                                               
+ 434ef419-9e4e-48cd-82a3-daede143ab9c  核查Przybylski & Weinstein 2017及后续对该Goldilocks/非线性假说的复制与检验（如Orben & Przybylski                    deep_dive  factual          done    52       
+                                       2019、Beyens等），确认社交媒体使用时长与青少年心理健康关联的函数形态（线性/倒U型/阈值）、效应量方向及该非线性结论…                                               
+ 6db759a0-f222-46e8-b066-56ae5aea11b6  核查睡眠时长减少或离线社交时间被替代（与家人朋友面对面时间）作为青少年社交媒体/互联网使用→心理健康因果路径的中介 …  deep_dive  factual          done    79       
+ f75a3103-9b96-46fb-9768-fd4b3866ffab  核查社会比较（含嫉妒、上行比较）作为社交媒体使用→青少年/新兴成人心理健康关联中可识别中介的证据：确认是否存在实验 …  deep_dive  factual          done    24       
+ 556e4df9-f5e0-4103-9ca3-dc66d88f5a0c  核验ABCD研究中“个体内社交媒体使用增加预测随后抑郁症状升高（第1-2年β=0.07，第2-3年β=0.09）”这一关键结果：确认该研 …  verify     factual          done    3        
+ 5b4ab158-6f43-43c6-925d-63efe202bf97  核验Donati, Durante, Sobbrio &                                                                                      verify     factual          failed  11       
+                                       Zejcirovic宽带与青少年心理健康研究的发表渠道、数据来源与关键数字：该研究是基于美国YRBS                                                                           
+                                       2009-2019与全美宽带扩展（报告自杀意念增加约9.3%-16.5%），还是基于意大利或其他来源的医院记录（报告抑郁、焦虑等诊断…                                               
+ af5d72b5-2652-4551-b6fc-72168c9602c2  核验 Donati, Durante, Sobbrio & Zejcirovic 关于宽带互联网与青少年心理健康的研究《Lost in the net? Broadband         verify     factual          failed  6        
+                                       internet and youth mental health》的发表渠道与数据来源：该研究是否使用意大利医院行政数据（约2001-2013年）并发表于                                                
+                                       Journal of Health Economics，而非基于美国 YRBS 2009-2019                                                                                                         
+                                       数据报告自杀意念增加9.3%-16.5%？给出最终归属结论并报告其核心效应数字（如精神障碍患病率变化幅度）。                                                               
+ fa955813-4995-4d2c-9419-f935d64537af  核验一篇美国青少年宽带接入与心理健康研究（线索为 NBER Working Paper 34614，作者 Brandyn F. Churchill 与 Kathryn R…  verify     factual          done    6        
+                                       Johnson）是否存在：是否使用 2009-2019 年 Youth Risk Behavior Survey                                                                                              
+                                       与全美宽带扩展数据，报告宽带接入每增加一个标准差与青少年自杀意念增加9.3%-16.5%相关且女孩影响最显著；确认作者、年 …                                               
+ 8450bd1b-c7cc-44d8-a635-3e5eabf62226  核验 Donati, Durante, Sobbrio & Zejcirovic《Lost in the net? Broadband internet and youth mental                    verify     factual          done    8        
+                                       health》的数据国别与发表信息：该研究是否使用意大利医院行政数据（约2001-2013年）并发表于 Journal of Health                                                        
+                                       Economics，而非基于美国 YRBS 2009-2019                                                                                                                           
+                                       数据？请基于论文原文或权威来源给出最终归属结论，并报告其对宽带接入影响精神障碍患病率的核心效应数字；若无法确认， …                                               
+ cd8177bc-ebc2-4903-9af9-4bc7a1344c21  核验 Braghieri, Levy & Makarin（2022, AER）是否在发表论文中报告了 Facebook 引入对大学生心理健康效应的性别（女性 v…  verify     factual          done    7        
+                                       男性）异质性估计：检索论文正文、附录与补充材料，确认是否存在按性别分组或性别交互的效应结果；若不存在，确认作者实 …                                               
+ 1ed9615e-5a34-4058-a8a3-f8b2ff1a2050  核验Davis & Goldfield (2024) 限制青少年社交媒体使用的RCT（Psychology of Popular                                     verify     factual          done    52       
+                                       Media）的结局变量与主要发现：确认该RCT的主要结局是否为孤独感（UCLA孤独感量表，β=-0.11），并核实‘抑郁下降20%、焦虑…                                               
+ d20b8396-5bd3-4a7e-a1fa-e015f6033b1b  核验Valkenburg, Meier & Beyens (2022, Current Opinion in Psychology)                                                verify     factual          done    13       
+                                       伞形综述关于‘一般社交媒体使用（SMU）与青少年心理健康关联弱且不一致、问题性使用与不良状态一致相关’的核心表述，并确…                                               
+                              用量                              
+ component              input tokens  output tokens  tool calls 
+ planner                217709        40811          0          
+ report_verifier        491545        37049          0          
+ report_writer          484726        84019          0          
+ research_verifier      605035        52544          0          
+ research_worker        1720024       59295          0          
+ research_worker_tools  0             0              848        
+ TOTAL                  3519039       273718         848        
+报告：draft_rendered · verification=partial

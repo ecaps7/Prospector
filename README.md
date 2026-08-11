@@ -103,6 +103,33 @@ Planner-Worker 研究 → Research Verifier → Report Writer → Report Verifie
 uv run --env-file .env prospector-local job events <job-id> --follow
 ```
 
+### 服务端模式
+
+`prospector-local` 是单进程入口，跑完直接把 Markdown 打到终端。若要拿到结构化产物（报告
+JSON、用量小计），改用服务端模式——先起服务：
+
+```bash
+uv run --env-file .env prospector serve
+```
+
+另开一个终端进入交互控制台，输入研究问题即可；Brief 确认与时间线跟随同上：
+
+```bash
+uv run --env-file .env prospector --effort standard --language zh
+```
+
+跑完后按 job_id 取产物：
+
+```bash
+uv run --env-file .env prospector job status <job-id>
+uv run --env-file .env prospector report export <job-id> --format md --output report.md
+uv run --env-file .env prospector report export <job-id> --format json --output report.json
+```
+
+`report.json` 携带 `verification_status`、`failed_statement_ids`，以及
+`citation_excerpt_ids`（statement → Excerpt UUID）和 `sources[].excerpt_ids` +
+`document_version`——引用血缘在这里是机器可读的。
+
 ## 测试
 
 ```bash

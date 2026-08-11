@@ -1,0 +1,1538 @@
+{
+  "verification_status": "verified",
+  "failed_statement_ids": [],
+  "job_id": "d8238be2-ac32-42c7-b3a1-f832057aedbd",
+  "draft": {
+    "title": "从“没有发展的增长”到“凡不如意皆可卷”：一个学术概念的跨语境语义变迁",
+    "introduction": [
+      {
+        "paragraph_id": "p_001",
+        "statements": [
+          {
+            "statement_id": "s_01",
+            "text": "澎湃新闻美数课的文章援引百度指数记录的搜索趋势指出，“内卷”的广受关注是近半年内的事，即大约从2020年年中开始。",
+            "kind": "evidence",
+            "candidate_excerpt_ids": [
+              "48e97515-2b61-4e79-b233-aaf96201905a"
+            ],
+            "premise_statement_ids": []
+          },
+          {
+            "statement_id": "s_02",
+            "text": "也是在2020年，几张清华大学学生用功读书的照片（如边骑车边用笔记本电脑写论文）在网络上流传，引发关于“内卷”的讨论，“清华卷王”的说法开始传出。",
+            "kind": "evidence",
+            "candidate_excerpt_ids": [
+              "2ab489c0-0c51-4185-8aed-c00200d1352f"
+            ],
+            "premise_statement_ids": []
+          },
+          {
+            "statement_id": "s_03",
+            "text": "学术论文《网络流行语“内卷”的语义演变及流行成因》在总结其传播结果时指出，“内卷”已经成为2020年十大网络流行语之一。",
+            "kind": "evidence",
+            "candidate_excerpt_ids": [
+              "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+            ],
+            "premise_statement_ids": []
+          }
+        ]
+      },
+      {
+        "paragraph_id": "p_002",
+        "statements": [
+          {
+            "statement_id": "s_04",
+            "text": "三条相互独立的时间线索共同指向2020年：一个长期停留在学术讨论中的专业术语，在这一年前后完成了向大众流行语的转变，并进入了年度流行语的序列。",
+            "kind": "derived",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": [
+              "s_01",
+              "s_02",
+              "s_03"
+            ]
+          },
+          {
+            "statement_id": "s_05",
+            "text": "下文将沿着“内卷”的语义旅行路径，从学术源头与内在争议、进入中文网络的传播过程、语义转变的具体维度、不同群体的使用差异、走红的社会土壤、进入政策话语的过程，以及围绕“误读还是延伸”的评价之争几个方面依次展开。",
+            "kind": "elaboration",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": []
+          }
+        ]
+      }
+    ],
+    "sections": [
+      {
+        "section_id": "sec_001",
+        "title": "稻田里的“静态扩张”：学术概念的原初定义与内部争议",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_003",
+            "statements": [
+              {
+                "statement_id": "s_06",
+                "text": "“内卷”的学术源头是美国人类学家克利福德·格尔茨1963年出版的《农业内卷化》。格尔茨在该书中提出，爪哇湿稻农业通过劳动密集型方法的过度精细化而发展，导致“静态扩张”（static expansion）；他借用Goldenweiser的“内卷”（involution）概念来描述这种“没有进步的变化”（change without progress）。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "307ed9c7-4735-4a1c-a0db-0893595772b9"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_07",
+                "text": "在中国经济史研究中，黄宗智将“内卷”定义为“亩产增长但没有劳动生产率发展”，即“没有发展的增长”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "06021790-00f0-46d9-b903-4dee387a063e"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_004",
+            "statements": [
+              {
+                "statement_id": "s_08",
+                "text": "两代学者的定义共享同一个核心判断：投入在增加，产出也在增加，但人均效率或发展质量并未同步提升。“内卷”在学术原初语境中最关键的内涵，正是这种“增长”与“发展”的分离。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_06",
+                  "s_07"
+                ]
+              },
+              {
+                "statement_id": "s_09",
+                "text": "然而这一概念在学术内部从未获得稳固共识。刘世定和邱泽奇在《“内卷化”概念辨析》中指出，“内卷化”概念在学术使用中存在歧义，学术界远未达成共识；他们批评黄宗智以边际收益递减来界定格尔茨的概念是一种误解，改变了分析的基本方向。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "39a1cc16-a667-4b64-9130-982ee52d613b"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_005",
+            "statements": [
+              {
+                "statement_id": "s_10",
+                "text": "换言之，“内卷”在进入公共舆论之前就已经是一个多义、含混且充满学术争论的概念。网络流行语对其语义的改造，并非发生在一个定义清晰的术语之上，而是叠加在一场尚未结束的学术论辩之上。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_09"
+                ]
+              },
+              {
+                "statement_id": "s_11",
+                "text": "刘世定和邱泽奇还梳理了学术界的相关批评，其中包含“概念定义不当”“完全不起作用”等严厉措辞；他们同时提到，“几乎所有的批评都没有针对概念本身”，并且“大众媒体也用此概念进行讨论”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "eb746af3-6eb8-404d-84bf-eab1623ca66e"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_12",
+                "text": "学术界的批评与大众媒体的使用在概念扩散早期就已并存；而在公共舆论大规模介入之前，该概念在学术内部本就缺乏共识。因此网络流行语对新义的塑造，叠加在一个早已多义且充满争论的术语之上。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_09",
+                  "s_10",
+                  "s_11"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_002",
+        "title": "破圈之路：低热度积累与2020年的引爆",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_006",
+            "statements": [
+              {
+                "statement_id": "s_13",
+                "text": "关于“内卷”进入中文网络讨论的时间线，《网络流行语“内卷”的语义演变及流行成因》一文提出，2012年知乎论坛已出现关于“内卷化”的早期讨论，2019年微博上已有相关评论，2020年随着清华大学学生边骑车边操作笔记本的新闻“出圈”，“内卷”成为舆论场热词。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "8362e6f9-908f-409a-ab65-1c2eb2688b7f"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_007",
+            "statements": [
+              {
+                "statement_id": "s_14",
+                "text": "将这一时间线与此前百度指数反映的热度曲线放在一起看，“内卷”在2020年之前仅有零散的学术与网络讨论，其广受关注始于2020年年中；清华学生新闻“出圈”与这一关注度上升发生在同一时期，但现有材料只能说明时间上的重合，尚不足以确证两者之间存在直接的因果引爆关系。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_01",
+                  "s_02",
+                  "s_13"
+                ]
+              },
+              {
+                "statement_id": "s_15",
+                "text": "需要说明的是，关于2012年知乎和2019年微博的早期时间线索，可及来源是《网络流行语“内卷”的语义演变及流行成因》一文，该文经论文聚合网站（knowcat.cn）转载，独立性与权威性有限；这两条早期时间点未获其他可靠来源直接佐证。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "8362e6f9-908f-409a-ab65-1c2eb2688b7f"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_008",
+            "statements": [
+              {
+                "statement_id": "s_16",
+                "text": "同样在《网络流行语“内卷”的语义演变及流行成因》的论述中，“内卷”最初是源自文化人类学领域的学术用语，近年经由媒体的使用和传播后获得大众广泛认同；其语义经过互联网语境和人们认知的塑造和挑选发生转移和泛化。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_17",
+                "text": "这条传播路径显示，媒体在“内卷”从学术术语变为网络热词的过程中扮演了枢纽角色：正是经由媒体的使用和传播，“内卷”获得了大众层面的广泛认同。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_16"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_003",
+        "title": "指涉对象的下移：从宏观系统到微观个体",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_009",
+            "statements": [
+              {
+                "statement_id": "s_18",
+                "text": "在语义学分析中，叶彬彬的《术语网络化：“内卷”的语义跨层投射》指出，“内卷”在术语网络化过程中产生语义跨层投射，其理性义投射串联起“内向消耗导致无法进步的宏观系统描述”与“资源有限引起努力收益比下降的微观个体经验”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "8c1e43fe-1799-4361-a689-19f96cdded48"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_19",
+                "text": "《现代汉语“卷”的语义与认知研究》进一步勾勒了扩展路径：“内卷化”最初是主要用于农业领域的专业术语，后作为理论从农业领域扩大运用到组织管理、教育管理、经济、社会等其他多个学术领域；网络流行语“内卷”则从专业术语扩散到学校、职场等社会生活的各个方面，实现了术语网络化。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "f780c66e-c1c7-4f52-855a-71f8e847f004"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_010",
+            "statements": [
+              {
+                "statement_id": "s_20",
+                "text": "在教育领域，西南大学学者王卫华、肖林根将“教育中的‘内卷’”界定为“目标上、价值评价体系上和竞争方式上的高度单一化”，其表现被描述为应试教育现状或“五唯”（唯分数、唯升学、唯文凭、唯论文、唯帽子）评价现状。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "806e9ba6-07b6-47dd-9f5d-0e5282dcfb86"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_21",
+                "text": "在职场领域，BBC中文2025年4月的报道将“内卷”定义为内部过度竞争、过度竞争或逐底竞争（race to the bottom）的现象，并举例说最常见的“内卷”形式之一是七千字的文书报告被上司要求扩展到两万字以显示投入度，与之伴生的就是加班文化。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "fb9b377b-23a6-48c0-81de-edb986e73af4"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_22",
+                "text": "在科研领域，科学网2021年1月的报道称，科研圈的竞赛只有两种名次：第一或其他；科学家为避免被竞争对手抢先或成果被剽窃而永远在赶时间，这种“内卷”现象近来一直是讨论热点。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "dbb890d7-0e9b-4ac1-a6d6-6dd685e35770"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_23",
+                "text": "《“内卷化”冲击下的中国学术职业》一文则描述了概念向学术职业的迁移：“内卷化”最初被人类学家用来描述某些农业社会的人口增长与人均财富减少之间的联系，当迁移到学术职业时，它指大多数大学研究人员更加努力工作并发表更多论文、而中国高等教育创新实力没有显著增长的矛盾情况。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "19185354-b8bb-4f21-a485-fd459f0f7317"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_011",
+            "statements": [
+              {
+                "statement_id": "s_24",
+                "text": "从农业社会到学校、职场、科研机构，“内卷”的指涉对象发生了明显的下移：分析单位从宏观的社会经济系统变成了微观的个体竞争场景。语义学的“跨层投射”概念解释了这一迁移何以可能——原有的理性义被保留并嫁接到新的对象上，宏观与微观两个层面得以在同一个词下贯通。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_18",
+                  "s_19",
+                  "s_20",
+                  "s_21",
+                  "s_22",
+                  "s_23"
+                ]
+              },
+              {
+                "statement_id": "s_25",
+                "text": "根据现有材料可以观察到，职场中“以字数显示投入度”的加班文化、科研中“第一或其他”的排名竞赛，以及学术职业研究中“发表更多论文而高等教育创新实力没有显著增长”的矛盾，都不同程度地带有“投入增加而未获得相应收益”的意味；但这些都是个案层面的观察，尚不能据此断定“内卷”的下移完整保留了学术内核。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_21",
+                  "s_22",
+                  "s_23"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_004",
+        "title": "语用色彩的转变：从学术描述到情绪表达",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_012",
+            "statements": [
+              {
+                "statement_id": "s_26",
+                "text": "朱海溶在《网络流行语“内卷”语义及语用分析》中指出，“内卷”在网络上流行后语义发生三次转变：由学术名词到贬义色彩浓厚的非理性竞争义，再到中性色彩的自嘲及内部竞争义。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "6ffda0fa-0d39-45b6-8160-2b26cc27ffbc"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_27",
+                "text": "新京报评论文章对网络用法的观察强化了这一情绪转向：人们是在吐槽、批判或反思的情况下使用“内卷化”的，描述者是他们自己，表达诉求、渴望改变，带有强烈的价值判断。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "f09a0db4-5907-4cf6-a2c2-1068721f63d1"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_013",
+            "statements": [
+              {
+                "statement_id": "s_28",
+                "text": "同一研究者还总结了“内卷”的四大语用功能：叙述评价、表达情感、语言习惯塑造、引发社会思考。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "29c57a3c-e77c-457b-8848-f28352994e64"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_29",
+                "text": "从学术语境中的描述性概念到网络语境中的评价性词汇，“内卷”的语用位置发生了根本变化。关键变量是描述者：学术定义中的“内卷”是由外部观察者对一个社会经济形态作出的判断，网络用法中的“内卷”则是身处竞争中的个体对自身处境的表达。描述者从旁观者变为当事人，概念随之从分析工具变为情绪语言。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_06",
+                  "s_26",
+                  "s_27"
+                ]
+              },
+              {
+                "statement_id": "s_30",
+                "text": "三次语义转变中的最后一环——从贬义色彩浓厚的非理性竞争义走向中性色彩的自嘲及内部竞争义——表明“内卷”的语用色彩并非单向的负面化；同一研究还归纳出表达情感等语用功能，它由此成为网民表达竞争压力的一种方式。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_26",
+                  "s_28"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_005",
+        "title": "概念边界的消融：泛化使用与解释力的损耗",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_014",
+            "statements": [
+              {
+                "statement_id": "s_31",
+                "text": "新京报文章在描述“内卷化”2020年破圈后的使用状况时写道，网络用法将“凡是不如意的、存在问题的、被扭曲的议题”都纳入“卷”的范畴，体现了对学术概念的泛化延伸。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "ffe7ebf4-273d-4936-b7b4-6175e9eed597"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_32",
+                "text": "媒体评论人倪刃在《被滥用的“内卷”一词，本意早已被扭曲》中批评，“内卷”在网络的推波助澜下逐渐被简单化和滥用，变成一个粗浅的词；其意涵变得简单化和粗糙化，退化成了“竞争”的网红代名词，导致学术成果被幼稚化和忘记。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "7bab8f0c-fdcc-4958-95ea-03d6f9e07327"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_015",
+            "statements": [
+              {
+                "statement_id": "s_33",
+                "text": "《中国经济周刊》的文章同样指出，当前“内卷”一词存在概念泛化的现象，词义已泛化为“无效内耗”的代名词。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "088d6d6c-9591-4c01-bea6-60705b5cec22"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_34",
+                "text": "学术期刊《专业术语不可被误用和滥用》的摘要也表达了对滥用的担忧：“内卷化”本是社会科学界讨论小农经济理论和社会转型问题的术语，近年来在学术界乃至网络上出现了被滥用的倾向，各类滥用“内卷化”概念的文章未能构建完整理论解释，不利于学术研究推进。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "a91900f0-6f3f-41b6-b990-237de636c71a"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_016",
+            "statements": [
+              {
+                "statement_id": "s_35",
+                "text": "来自媒体和学术界的多条独立批评都指向概念泛化：新京报文章批评网络用法将一切“不如意”的议题都纳入“卷”的范畴，媒体评论人倪刃批评其意涵变得简单化和粗糙化，《中国经济周刊》指出其词义泛化为“无效内耗”的代名词，学术期刊则担忧滥用倾向不利于学术研究推进。这些批评共同表达了对概念边界模糊与解释力削弱的担忧。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_31",
+                  "s_32",
+                  "s_33",
+                  "s_34"
+                ]
+              },
+              {
+                "statement_id": "s_36",
+                "text": "这些批评并非简单地反对“内卷”流行本身，而是担忧概念的泛化与滥用会损害其作为学术术语的分析价值；这种担忧在学术共同体内部同样存在——《专业术语不可被误用和滥用》一文明确指出，滥用“内卷化”概念的文章未能构建完整理论解释，不利于学术研究推进。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_34",
+                  "s_35"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_006",
+        "title": "“调制”与“解调”：学术、媒体与网民的三种使用逻辑",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_017",
+            "statements": [
+              {
+                "statement_id": "s_37",
+                "text": "姚少宝在《学术概念何以“出圈”——以“内卷化”的网络传播为例》中提供了一个分析框架：“内卷化”成为网络热词后，经媒体“调制”被赋予总体化、动词化、模糊化和情境式书写的媒介形象特征，在网络传播中又经受众“解调”，成为表达现实性集体焦虑情感的载体。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "03651e8c-a2c6-4663-b54d-62211f4de44d"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_38",
+                "text": "刘世定、邱泽奇在《“内卷化”概念辨析》中同时呈现了两种使用方式：学术界对“内卷化”概念存在“概念定义不当”“完全不起作用”等批评，而“大众媒体也用此概念进行讨论”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "eb746af3-6eb8-404d-84bf-eab1623ca66e"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_018",
+            "statements": [
+              {
+                "statement_id": "s_39",
+                "text": "《网络流行语“内卷”的语义演变及流行成因》则描述了普通网民在其中的角色：“内卷”的语义经过互联网语境和人们认知的塑造和挑选发生转移和泛化——网民不是被动的接受者，而是语义改造的参与者。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_40",
+                "text": "在个体使用层面，网民赋予“内卷”鲜明的情感色彩：人们使用这个词时隐含着对社会现实的不满，以及无法改变现状的疲惫与无奈，并常以调侃和戏谑方式抒发对“内卷”大环境的不满与对抗。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "6ffda0fa-0d39-45b6-8160-2b26cc27ffbc"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_41",
+                "text": "综合来看，这些观察呈现了三组群体对“内卷”的不同加工方式：学术界关注概念的定义边界与使用规范，媒体在传播中重塑概念的叙事形象，普通网民则将概念用于表达个体处境与感受。姚少宝的“调制—解调”隐喻描述的是这一过程：媒体为概念装配了可传播的形象，受众则在其中安放自己的现实感受。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_37",
+                  "s_38",
+                  "s_39",
+                  "s_40"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_007",
+        "title": "共鸣的土壤：社会结构压力、功绩体制与竞争焦虑",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_019",
+            "statements": [
+              {
+                "statement_id": "s_42",
+                "text": "澎湃新闻的分析指出，内卷化话题的主要参与者是受雇于学术机构、金融领域与互联网行业等部门的青年白领群体。他们面对就业形势严峻、“996”工作模式普遍化、社会阶层固化与不平等加剧等问题，基于晋升困难、劳动权益难以保障、暴露于经济与健康风险却无力改变的处境，在“没有发展的增长”这一学术描述中取得了情感共鸣。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "af09e2cb-32f4-4fb0-b2cf-a3643d0161f9"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_43",
+                "text": "清华大学社会学系副教授严飞在访谈中将“卷”的本质归结为社会结构带来的竞争性朝向：中产阶层在过去20年不断增加，他们面临如何延续中产身份、让孩子也成为中产的问题，教育成为重要赛道，从补习班到大学绩点再到工作KPI，社会结构让人不得不“卷”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "589580ca-fe84-4c96-9456-10bb2fd10ee6"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_020",
+            "statements": [
+              {
+                "statement_id": "s_44",
+                "text": "南京大学蓝江教授提供了另一种理论解释：当代社会内卷的实质是主体在身体承受范围内最大限度消耗自己以创造更多绩效；功绩社会下绩效竞争和内卷体制是焦虑社会的根源，内卷催生出充满焦虑的社会，年轻人为了不被淘汰而不断学习和加班。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "89beae11-edd2-4eb6-96bf-0986aedb87db"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_45",
+                "text": "BBC中文2021年的报道援引牛津大学项飙的分析称，“内卷在中国的语义与竞争白热化高度联系在一起，年轻人不断感受到竞争的压力，如果不努力、不竞争就会落后、淘汰、出局”；报道还指出，讨论背后是中产阶级年轻人面对错过机会窗口期的挫折感。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "a00abaaf-fa08-43af-8544-a24aa5b198e2"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_46",
+                "text": "《心理学报》2024年发表的研究通过扎根理论提出，中国社会中“内卷”的心理内涵包含资源稀缺、社会规范、心理压力、竞争行为四个特征维度：当个体面临匮乏的社会资源时会因争夺资源而引发竞争行为，并受社会规范影响担心被群体淘汰，产生焦虑等不良情绪。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "aefe46cd-b533-4a67-8906-4d03d0258d4b"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_021",
+            "statements": [
+              {
+                "statement_id": "s_47",
+                "text": "来自不同学科背景的解释从各自角度指向了相似的驱动因素：严飞强调社会结构带来的竞争性朝向，蓝江将内卷置于功绩社会的绩效竞争之下，项飙将之与竞争白热化、害怕淘汰的心理联系在一起，《心理学报》的研究则归纳出资源稀缺、社会规范、心理压力与竞争行为四个维度；澎湃新闻的分析也指出青年白领在严峻就业形势与阶层固化中的处境与这一概念产生了情感共鸣。这些解释分别呈现了“内卷”引发共鸣的可能背景，但现有材料并未就它们之间的因果关系给出直接证据。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_42",
+                  "s_43",
+                  "s_44",
+                  "s_45",
+                  "s_46"
+                ]
+              },
+              {
+                "statement_id": "s_48",
+                "text": "《心理学报》的研究从扎根理论归纳出资源稀缺、社会规范、心理压力与竞争行为四个维度，其中既涉及“资源稀缺导致不得不竞争”的外部处境，也涉及“担心被群体淘汰”的焦虑感受；这一维度划分为理解“内卷”何以被广泛使用提供了一种可能的解释框架，但其与广泛共鸣之间的因果联系仍待进一步检验。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_46"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_008",
+        "title": "进入政策语汇：“内卷式竞争”的官方接引",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_022",
+            "statements": [
+              {
+                "statement_id": "s_49",
+                "text": "2024年7月30日，中央政治局会议公告首次提出“防止‘内卷式’恶性竞争”。联合早报的评论文章称，这是“内卷”一词首次在中国政府最高层正式语言中出现。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "63d64967-9535-4921-ac1e-de994858b5e7"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_50",
+                "text": "另一篇联合早报文章同样确认了这一节点：2024年7月30日中央政治局会议首次使用民间广为流传的网络用语“内卷”，提出“强化行业自律，防止‘内卷式’恶性竞争”，这是“内卷”首次在决定经济政策的高层会议上被正式提及。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "1824a5e5-0042-4e60-85b8-b3514ccd9e25"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_023",
+            "statements": [
+              {
+                "statement_id": "s_51",
+                "text": "2024年12月11日至12日举行的中央经济工作会议进一步提出“综合整治‘内卷式’竞争，规范地方政府和企业行为”。21经济网的解读称，这是“综合整治‘内卷式’竞争”首次出现在中央经济工作会议表述中，也是2024年7月30日中央政治局会议“防止‘内卷式’恶性竞争”的延续。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "9982756f-ce52-4a00-8a4d-ff9413984891"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_52",
+                "text": "财联社的报道亦确认，中央经济工作会议确定的明年重点任务包括“综合整治‘内卷式’竞争，规范地方政府和企业行为”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "a6908baa-7470-45a2-8942-b4d3d388d627"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_024",
+            "statements": [
+              {
+                "statement_id": "s_53",
+                "text": "2025年3月5日提请十四届全国人大三次会议审议的政府工作报告明确提出“综合整治‘内卷式’竞争”。新华网的评述指出，从2024年7月30日中央政治局会议提出“防止”，到2024年12月中央经济工作会议提出“综合整治”，再到政府工作报告的相关表述，整治“内卷式”竞争将综合施策、更有力度。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "cc2b108c-f8db-4d62-ab80-493450ebbf84"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_54",
+                "text": "人民日报的文章也确认，“综合整治‘内卷式’竞争”已写进2025年《政府工作报告》。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "166daac3-308d-4a97-b764-72b4dda2e17d"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_55",
+                "text": "2025年3月5日，习近平在参加十四届全国人大三次会议江苏代表团审议时强调，要深化要素市场化配置改革，主动破除地方保护、市场分割和“内卷式”竞争。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "43b0afe1-a398-41dd-bdb4-c03c052c97f7"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_025",
+            "statements": [
+              {
+                "statement_id": "s_56",
+                "text": "从2024年7月到2025年3月，“内卷”在不到九个月的时间里完成了从网络流行语到政策关键词的跃迁。官方话语的介入并不是简单借用网络热词，而是将“内卷式竞争”重新定义为需要“规范地方政府和企业行为”的治理议题，其行为主体从网络讨论中的个体学生、职员和研究者，变成了地方政府与企业。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_49",
+                  "s_51",
+                  "s_53"
+                ]
+              },
+              {
+                "statement_id": "s_57",
+                "text": "由此形成了一个耐人寻味的对照：网络流行语中的“内卷”指向教育、职场和科研中的个体竞争，官方表述中的“内卷式竞争”则指向地方保护、市场分割和行业自律等宏观治理问题。同一个词在两个话语场中分别承担着“个体情绪表达”与“宏观治理对象”两种功能——这正是“内卷”语义在跨语境旅行中不断分化的最新一环。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_20",
+                  "s_21",
+                  "s_22",
+                  "s_56"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "section_id": "sec_009",
+        "title": "误读还是延伸：概念旅行的两种评价与一个公共符号",
+        "paragraphs": [
+          {
+            "paragraph_id": "p_026",
+            "statements": [
+              {
+                "statement_id": "s_58",
+                "text": "与“误用”“滥用”的批评相对，朱海溶正面论证了网络用法与学术原意之间的连续性：网络流行语“内卷”的语义演变途径包括隐喻、语义的解构、词语的扩大与泛化；“内卷”本义与新义之间的关系由隐喻性理据关系连接，抽象意义向现实意义转变，描述对象由农业扩展到学术、政治、教育及现实生活的人，含义越来越贴近生活。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "e96c89ad-05ee-4045-b8bd-a2fe67147252"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_59",
+                "text": "叶彬彬同样以正面方式论证了网络用法的再创造性质：“内卷”一词打破了术语和网络流行语之间的壁垒，在术语网络化过程中语义产生跨层投射；理性义投射利用方向隐喻和容器隐喻串联起宏观系统描述与微观个体经验，色彩义投射继承了术语的书面色彩，体现了网络受众强大的再解释、再加工传播能力。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "7f7173fb-6368-45cd-9071-e52351777de4"
+                ],
+                "premise_statement_ids": []
+              },
+              {
+                "statement_id": "s_60",
+                "text": "《“Involution”与“内卷”概念的翻译对等度考察》则把这一变化置于“理论旅行”的框架中理解：2020年，“内卷”这一能指挣脱原来的所指范畴，产生“内耗式内部竞争”这一新的社会心理学所指意义；这一跨文化旅行带来的符号意义增加，是理论旅行中文化语境参数变化带来的概念变异，也是模因传播模仿和复制时产生的语义迁徙。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "cc8fa947-6dd8-4f58-a49a-0fe5ba76f7c0"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_027",
+            "statements": [
+              {
+                "statement_id": "s_61",
+                "text": "三条来自语言学与翻译研究的论述指向同一个判断：网络用法并非对学术概念的偶然破坏，而是语义演变的正常机制在起作用。隐喻让抽象概念获得具体的日常所指，语义跨层投射沟通了宏观与微观两个层面，理论旅行中的语境参数变化则解释了概念进入新文化后必然发生的变异。在这些框架下，“内卷”的网络用法是概念生命史的延续而非断裂。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_58",
+                  "s_59",
+                  "s_60"
+                ]
+              },
+              {
+                "statement_id": "s_62",
+                "text": "持“偏离”判断的新京报文章则提醒我们注意另一个方向的事实：网络高频词“内卷”形容工作或考试的非理性内部竞争、内部消耗或停滞不前，这与黄宗智界定后的“内卷化”相契合；但原来的involution并不必然意味着停滞、下坠或非理性内部竞争，甚至可能意味着“知足”。",
+                "kind": "evidence",
+                "candidate_excerpt_ids": [
+                  "ffe7ebf4-273d-4936-b7b4-6175e9eed597"
+                ],
+                "premise_statement_ids": []
+              }
+            ]
+          },
+          {
+            "paragraph_id": "p_028",
+            "statements": [
+              {
+                "statement_id": "s_63",
+                "text": "将两组论述并置可以看出，“误用说”与“延伸说”的分歧在于如何评价网络用法带来的语义变化：批评一方认为这种变化使概念被简单化、泛化甚至滥用，偏离了学术原意；语言学与翻译研究一方则认为这是跨语境旅行中语义演变的正常机制，是概念生命史的延续。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_32",
+                  "s_34",
+                  "s_61",
+                  "s_62"
+                ]
+              },
+              {
+                "statement_id": "s_64",
+                "text": "偏离与延伸两种叙事并存这一事实本身，也构成“内卷”概念史的一部分：它同时被学术界和媒体评论批评为“被滥用”、被语言学研究描述为“语义扩展”，又被大众广泛使用，处在多种话语的交叉之中。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": [
+                  "s_32",
+                  "s_34",
+                  "s_58",
+                  "s_62"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "conclusion": [
+      {
+        "paragraph_id": "p_029",
+        "statements": [
+          {
+            "statement_id": "s_65",
+            "text": "将前文关于学术定义与网络用法的分析并置，可以归纳出三重关键转变。其一，指涉对象从宏观社会经济系统扩展到微观个体竞争，从农业经济延伸到教育、职场与科研；其二，语用功能从学术描述转为情绪表达，研究者观察到从贬义到自嘲的语义演变；其三，概念边界走向媒体批评所指出的泛化使用，出现“凡不如意皆可卷”的用法。",
+            "kind": "derived",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": [
+              "s_18",
+              "s_24",
+              "s_26",
+              "s_29",
+              "s_31"
+            ]
+          },
+          {
+            "statement_id": "s_66",
+            "text": "回顾学术、网络与政策场域的使用，可以看到一条相对稳定的语义内核：投入增加而有效收益不成比例。学术语境把它表述为“没有发展的增长”，网络语境则把它体验为“努力了也没有用”的个体困境；内核相对稳定，而分析单位、情感色彩与话语场域不断漂移——这一图景贯穿“内卷”在学术、网络与政策场域中的使用。",
+            "kind": "derived",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": [
+              "s_08",
+              "s_18",
+              "s_29",
+              "s_40",
+              "s_49"
+            ]
+          }
+        ]
+      },
+      {
+        "paragraph_id": "p_030",
+        "statements": [
+          {
+            "statement_id": "s_67",
+            "text": "本报告基于的冻结材料在若干维度存在边界：关于“内卷”更早期网络讨论的具体时间线（2012年知乎、2019年微博）仅有低可信度来源，未能独立确证；学术概念网络传播的具体机制，如平台算法、社群互动对语义的塑造，几乎没有被现有材料覆盖；“内卷”与“躺平”“佛系”等其他流行语之间的关系，材料中仅有并置提及而缺乏系统的比较分析。",
+            "kind": "limitation",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": []
+          },
+          {
+            "statement_id": "s_68",
+            "text": "“内卷”的案例显示，学术概念进入公共领域并非单向的通俗化过程，而涉及多主体的参与：学者通过概念辨析与滥用批评维护概念的学术边界，媒体在传播中重塑叙事框架，网民注入个体经验，政策话语则将之重新定义为治理对象。概念的意义在多种使用之间不断生成与流变。",
+            "kind": "derived",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": [
+              "s_09",
+              "s_34",
+              "s_37",
+              "s_40",
+              "s_49"
+            ]
+          }
+        ]
+      },
+      {
+        "paragraph_id": "p_031",
+        "statements": [
+          {
+            "statement_id": "s_69",
+            "text": "从“没有发展的增长”到“凡不如意皆可卷”，“内卷”的语义变迁既记录了中国社会竞争焦虑的语言投影，也展示了一个学术概念在跨语境旅行中被反复书写的生命力。它未来是继续泛化直至失去解释力，还是在新的使用中沉淀出更稳固的公共含义，取决于上述多组话语力量此后的互动。",
+            "kind": "elaboration",
+            "candidate_excerpt_ids": [],
+            "premise_statement_ids": []
+          }
+        ]
+      }
+    ]
+  },
+  "statement_citations": {
+    "s_01": [
+      1
+    ],
+    "s_02": [
+      2
+    ],
+    "s_03": [
+      3
+    ],
+    "s_04": [],
+    "s_05": [],
+    "s_06": [
+      4
+    ],
+    "s_07": [
+      5
+    ],
+    "s_08": [],
+    "s_09": [
+      6
+    ],
+    "s_10": [],
+    "s_11": [
+      6
+    ],
+    "s_12": [],
+    "s_13": [
+      7
+    ],
+    "s_14": [],
+    "s_15": [
+      7
+    ],
+    "s_16": [
+      3
+    ],
+    "s_17": [],
+    "s_18": [
+      8
+    ],
+    "s_19": [
+      9
+    ],
+    "s_20": [
+      10
+    ],
+    "s_21": [
+      11
+    ],
+    "s_22": [
+      12
+    ],
+    "s_23": [
+      13
+    ],
+    "s_24": [],
+    "s_25": [],
+    "s_26": [
+      14
+    ],
+    "s_27": [
+      15
+    ],
+    "s_28": [
+      16
+    ],
+    "s_29": [],
+    "s_30": [],
+    "s_31": [
+      15
+    ],
+    "s_32": [
+      17
+    ],
+    "s_33": [
+      18
+    ],
+    "s_34": [
+      19
+    ],
+    "s_35": [],
+    "s_36": [],
+    "s_37": [
+      20
+    ],
+    "s_38": [
+      6
+    ],
+    "s_39": [
+      3
+    ],
+    "s_40": [
+      14
+    ],
+    "s_41": [],
+    "s_42": [
+      21
+    ],
+    "s_43": [
+      22
+    ],
+    "s_44": [
+      23
+    ],
+    "s_45": [
+      2
+    ],
+    "s_46": [
+      24
+    ],
+    "s_47": [],
+    "s_48": [],
+    "s_49": [
+      25
+    ],
+    "s_50": [
+      26
+    ],
+    "s_51": [
+      27
+    ],
+    "s_52": [
+      28
+    ],
+    "s_53": [
+      29
+    ],
+    "s_54": [
+      30
+    ],
+    "s_55": [
+      31
+    ],
+    "s_56": [],
+    "s_57": [],
+    "s_58": [
+      14
+    ],
+    "s_59": [
+      8
+    ],
+    "s_60": [
+      32
+    ],
+    "s_61": [],
+    "s_62": [
+      15
+    ],
+    "s_63": [],
+    "s_64": [],
+    "s_65": [],
+    "s_66": [],
+    "s_67": [],
+    "s_68": [],
+    "s_69": []
+  },
+  "citation_excerpt_ids": {
+    "s_01": [
+      "48e97515-2b61-4e79-b233-aaf96201905a"
+    ],
+    "s_02": [
+      "2ab489c0-0c51-4185-8aed-c00200d1352f"
+    ],
+    "s_03": [
+      "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+    ],
+    "s_06": [
+      "307ed9c7-4735-4a1c-a0db-0893595772b9"
+    ],
+    "s_07": [
+      "06021790-00f0-46d9-b903-4dee387a063e"
+    ],
+    "s_09": [
+      "39a1cc16-a667-4b64-9130-982ee52d613b"
+    ],
+    "s_11": [
+      "eb746af3-6eb8-404d-84bf-eab1623ca66e"
+    ],
+    "s_13": [
+      "8362e6f9-908f-409a-ab65-1c2eb2688b7f"
+    ],
+    "s_15": [
+      "8362e6f9-908f-409a-ab65-1c2eb2688b7f"
+    ],
+    "s_16": [
+      "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+    ],
+    "s_18": [
+      "8c1e43fe-1799-4361-a689-19f96cdded48"
+    ],
+    "s_19": [
+      "f780c66e-c1c7-4f52-855a-71f8e847f004"
+    ],
+    "s_20": [
+      "806e9ba6-07b6-47dd-9f5d-0e5282dcfb86"
+    ],
+    "s_21": [
+      "fb9b377b-23a6-48c0-81de-edb986e73af4"
+    ],
+    "s_22": [
+      "dbb890d7-0e9b-4ac1-a6d6-6dd685e35770"
+    ],
+    "s_23": [
+      "19185354-b8bb-4f21-a485-fd459f0f7317"
+    ],
+    "s_26": [
+      "6ffda0fa-0d39-45b6-8160-2b26cc27ffbc"
+    ],
+    "s_27": [
+      "f09a0db4-5907-4cf6-a2c2-1068721f63d1"
+    ],
+    "s_28": [
+      "29c57a3c-e77c-457b-8848-f28352994e64"
+    ],
+    "s_31": [
+      "ffe7ebf4-273d-4936-b7b4-6175e9eed597"
+    ],
+    "s_32": [
+      "7bab8f0c-fdcc-4958-95ea-03d6f9e07327"
+    ],
+    "s_33": [
+      "088d6d6c-9591-4c01-bea6-60705b5cec22"
+    ],
+    "s_34": [
+      "a91900f0-6f3f-41b6-b990-237de636c71a"
+    ],
+    "s_37": [
+      "03651e8c-a2c6-4663-b54d-62211f4de44d"
+    ],
+    "s_38": [
+      "eb746af3-6eb8-404d-84bf-eab1623ca66e"
+    ],
+    "s_39": [
+      "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+    ],
+    "s_40": [
+      "6ffda0fa-0d39-45b6-8160-2b26cc27ffbc"
+    ],
+    "s_42": [
+      "af09e2cb-32f4-4fb0-b2cf-a3643d0161f9"
+    ],
+    "s_43": [
+      "589580ca-fe84-4c96-9456-10bb2fd10ee6"
+    ],
+    "s_44": [
+      "89beae11-edd2-4eb6-96bf-0986aedb87db"
+    ],
+    "s_45": [
+      "a00abaaf-fa08-43af-8544-a24aa5b198e2"
+    ],
+    "s_46": [
+      "aefe46cd-b533-4a67-8906-4d03d0258d4b"
+    ],
+    "s_49": [
+      "63d64967-9535-4921-ac1e-de994858b5e7"
+    ],
+    "s_50": [
+      "1824a5e5-0042-4e60-85b8-b3514ccd9e25"
+    ],
+    "s_51": [
+      "9982756f-ce52-4a00-8a4d-ff9413984891"
+    ],
+    "s_52": [
+      "a6908baa-7470-45a2-8942-b4d3d388d627"
+    ],
+    "s_53": [
+      "cc2b108c-f8db-4d62-ab80-493450ebbf84"
+    ],
+    "s_54": [
+      "166daac3-308d-4a97-b764-72b4dda2e17d"
+    ],
+    "s_55": [
+      "43b0afe1-a398-41dd-bdb4-c03c052c97f7"
+    ],
+    "s_58": [
+      "e96c89ad-05ee-4045-b8bd-a2fe67147252"
+    ],
+    "s_59": [
+      "7f7173fb-6368-45cd-9071-e52351777de4"
+    ],
+    "s_60": [
+      "cc8fa947-6dd8-4f58-a49a-0fe5ba76f7c0"
+    ],
+    "s_62": [
+      "ffe7ebf4-273d-4936-b7b4-6175e9eed597"
+    ]
+  },
+  "sources": [
+    {
+      "citation_number": 1,
+      "source_uri": "https://www.thepaper.cn/newsDetail_forward_9782795",
+      "document_version": 1,
+      "title": "我们在谈论“内卷”时，究竟在谈论什么？_美数课_澎湃新闻-The Paper",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "48e97515-2b61-4e79-b233-aaf96201905a"
+      ]
+    },
+    {
+      "citation_number": 2,
+      "source_uri": "https://www.bbc.com/zhongwen/simp/chinese-news-57304453",
+      "document_version": 1,
+      "title": "“内卷”与“躺平”之间挣扎的中国年轻人 - BBC News 中文",
+      "author": null,
+      "published_at": "2021-06-02T01:24:16.000Z",
+      "excerpt_ids": [
+        "2ab489c0-0c51-4185-8aed-c00200d1352f",
+        "a00abaaf-fa08-43af-8544-a24aa5b198e2"
+      ]
+    },
+    {
+      "citation_number": 3,
+      "source_uri": "http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MLDG4JPXM9R",
+      "document_version": 1,
+      "title": "网络流行语“内卷”的语义演变及流行成因-维普期刊 中文期刊服务平台",
+      "author": "作者 \n                     黄西西",
+      "published_at": null,
+      "excerpt_ids": [
+        "e70b4ae3-60d8-4fdb-a790-c7e59bf30291"
+      ]
+    },
+    {
+      "citation_number": 4,
+      "source_uri": "https://garfield.library.upenn.edu/classics1991/A1991FA58100001.pdf",
+      "document_version": 1,
+      "title": "Geertz C.\"Agricultural involution: the processes of ecological change in Indonesia\" Berkeley, CA:University of California Press, 1963. 176 p.",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "307ed9c7-4735-4a1c-a0db-0893595772b9"
+      ]
+    },
+    {
+      "citation_number": 5,
+      "source_uri": "https://en.lishiyushehui.cn/article/download/279",
+      "document_version": 1,
+      "title": "",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "06021790-00f0-46d9-b903-4dee387a063e"
+      ]
+    },
+    {
+      "citation_number": 6,
+      "source_uri": "http://www.shehui.pku.edu.cn/upload/editor/file/20210311/20210311090117_3131.pdf",
+      "document_version": 1,
+      "title": "“内卷化”概念辨析",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "39a1cc16-a667-4b64-9130-982ee52d613b",
+        "eb746af3-6eb8-404d-84bf-eab1623ca66e"
+      ]
+    },
+    {
+      "citation_number": 7,
+      "source_uri": "http://www.knowcat.cn/p/20250603/2512639.html",
+      "document_version": 1,
+      "title": "“内卷”的语义演变与使用规范 - 文化论文",
+      "author": "知猫",
+      "published_at": "2025-06-03T00:00:00.000Z",
+      "excerpt_ids": [
+        "8362e6f9-908f-409a-ab65-1c2eb2688b7f"
+      ]
+    },
+    {
+      "citation_number": 8,
+      "source_uri": "http://dianda.cqvip.com/Qikan/Article/Detail?from=Qikan_Article_Detail&id=00002GOCKB387JP0MHDO4JP06HR",
+      "document_version": 1,
+      "title": "术语网络化:“内卷”的语义跨层投射-维普期刊 中文期刊服务平台",
+      "author": "作者 \n                     叶彬彬",
+      "published_at": null,
+      "excerpt_ids": [
+        "8c1e43fe-1799-4361-a689-19f96cdded48",
+        "7f7173fb-6368-45cd-9071-e52351777de4"
+      ]
+    },
+    {
+      "citation_number": 9,
+      "source_uri": "https://journal.kci.go.kr/ksclc/archive/articlePdf?artiId=ART003139730",
+      "document_version": 1,
+      "title": "现代汉语“卷”的语义与认知研究",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "f780c66e-c1c7-4f52-855a-71f8e847f004"
+      ]
+    },
+    {
+      "citation_number": 10,
+      "source_uri": "https://epc.swu.edu.cn/info/1193/4523.htm",
+      "document_version": 1,
+      "title": "教育内卷化的实质及现象学的破解之道 王卫华 肖林根-西南大学西南民族教育与心理研究中心",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "806e9ba6-07b6-47dd-9f5d-0e5282dcfb86"
+      ]
+    },
+    {
+      "citation_number": 11,
+      "source_uri": "https://www.bbc.com/zhongwen/articles/cvg7502x7r0o/simp",
+      "document_version": 1,
+      "title": "反内卷：“实际上谁能不加班？” 中国风口行业雇员看口号与现实 - BBC News 中文",
+      "author": null,
+      "published_at": "2025-04-04T00:24:53.000Z",
+      "excerpt_ids": [
+        "fb9b377b-23a6-48c0-81de-edb986e73af4"
+      ]
+    },
+    {
+      "citation_number": 12,
+      "source_uri": "https://news.sciencenet.cn/htmlnews/2021/1/452636.shtm",
+      "document_version": 1,
+      "title": "停止内卷，对科学家也有好处—新闻—科学网",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "dbb890d7-0e9b-4ac1-a6d6-6dd685e35770"
+      ]
+    },
+    {
+      "citation_number": 13,
+      "source_uri": "https://soe.sjtu.edu.cn/kindeditor/Upload/file/20220621/202206211542033497524.pdf",
+      "document_version": 1,
+      "title": "“内卷化”冲击下的中国学术职业",
+      "author": "xiaofei li",
+      "published_at": null,
+      "excerpt_ids": [
+        "19185354-b8bb-4f21-a485-fd459f0f7317"
+      ]
+    },
+    {
+      "citation_number": 14,
+      "source_uri": "https://pdf.hanspub.org/ml20240100000_54927408.pdf",
+      "document_version": 1,
+      "title": "Semantic and Pragmatic Analysis of Network",
+      "author": "朱海溶",
+      "published_at": null,
+      "excerpt_ids": [
+        "6ffda0fa-0d39-45b6-8160-2b26cc27ffbc",
+        "e96c89ad-05ee-4045-b8bd-a2fe67147252"
+      ]
+    },
+    {
+      "citation_number": 15,
+      "source_uri": "https://www.bjnews.com.cn/detail/160331896215702.html",
+      "document_version": 1,
+      "title": "现在流行的“内卷”，从34年前就开始被误读 — 新京报",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "f09a0db4-5907-4cf6-a2c2-1068721f63d1",
+        "ffe7ebf4-273d-4936-b7b4-6175e9eed597"
+      ]
+    },
+    {
+      "citation_number": 16,
+      "source_uri": "https://www.hanspub.org/journal/paperinformation?paperid=78927",
+      "document_version": 1,
+      "title": "网络流行语“内卷”语义及语用分析",
+      "author": "中文学术期刊,汉斯出版社,Hans Publishers",
+      "published_at": "2024-01-10T08:51:30.000Z",
+      "excerpt_ids": [
+        "29c57a3c-e77c-457b-8848-f28352994e64"
+      ]
+    },
+    {
+      "citation_number": 17,
+      "source_uri": "https://chinadigitaltimes.net/chinese/712823.html",
+      "document_version": 1,
+      "title": "",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "7bab8f0c-fdcc-4958-95ea-03d6f9e07327"
+      ]
+    },
+    {
+      "citation_number": 18,
+      "source_uri": "https://paper.people.com.cn/zgjjzk/pc/content/202503/30/content_30068687.html",
+      "document_version": 1,
+      "title": "读懂“内卷”和“内卷式”竞争",
+      "author": "第005版",
+      "published_at": null,
+      "excerpt_ids": [
+        "088d6d6c-9591-4c01-bea6-60705b5cec22"
+      ]
+    },
+    {
+      "citation_number": 19,
+      "source_uri": "http://dianda.cqvip.com/Qikan/Article/Detail?id=7103456348",
+      "document_version": 1,
+      "title": "专业术语不可被误用和滥用-维普期刊 中文期刊服务平台",
+      "author": "作者 \n                     章舜粤",
+      "published_at": null,
+      "excerpt_ids": [
+        "a91900f0-6f3f-41b6-b990-237de636c71a"
+      ]
+    },
+    {
+      "citation_number": 20,
+      "source_uri": "http://dianda.cqvip.com/Qikan/Article/Detail?id=00002FKIL5387JP0MLD88JP167R",
+      "document_version": 1,
+      "title": "学术概念何以“出圈”——以“内卷化”的网络传播为例-维普期刊 中文期刊服务平台",
+      "author": "作者 \n                     姚少宝",
+      "published_at": null,
+      "excerpt_ids": [
+        "03651e8c-a2c6-4663-b54d-62211f4de44d"
+      ]
+    },
+    {
+      "citation_number": 21,
+      "source_uri": "https://chinadigitaltimes.net/chinese/657483.html",
+      "document_version": 1,
+      "title": "界面新闻 | 内卷化：一个学术名词如何赢得考生、社畜和时代的共鸣",
+      "author": null,
+      "published_at": "2020-10-10T07:17:07.000Z",
+      "excerpt_ids": [
+        "af09e2cb-32f4-4fb0-b2cf-a3643d0161f9"
+      ]
+    },
+    {
+      "citation_number": 22,
+      "source_uri": "https://www.huxiu.com/article/397631.html",
+      "document_version": 1,
+      "title": "严飞：社会结构让人不得不“内卷化”-虎嗅网",
+      "author": "虎嗅网",
+      "published_at": "2020-12-03T07:11:00.000Z",
+      "excerpt_ids": [
+        "589580ca-fe84-4c96-9456-10bb2fd10ee6"
+      ]
+    },
+    {
+      "citation_number": 23,
+      "source_uri": "https://ptextold.nju.edu.cn/13/da/c13164a594906/page.htm",
+      "document_version": 1,
+      "title": "蓝江 | 功绩社会下的倦怠：内卷和焦虑现象的社会根源",
+      "author": "作者：蓝江",
+      "published_at": null,
+      "excerpt_ids": [
+        "89beae11-edd2-4eb6-96bf-0986aedb87db"
+      ]
+    },
+    {
+      "citation_number": 24,
+      "source_uri": "https://journal.psych.ac.cn/xlxb/article/2024/0439-755X/0439-755X-56-1-107.shtml",
+      "document_version": 1,
+      "title": "中国社会中“内卷”现象的个体心理内涵及其特征维度",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "aefe46cd-b533-4a67-8906-4d03d0258d4b"
+      ]
+    },
+    {
+      "citation_number": 25,
+      "source_uri": "https://www.zaochenbao.com/news/opinion/202408/0923326.html",
+      "document_version": 1,
+      "title": "郭良平：中共政治局首提“内卷”背后（上）_联合早报网",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "63d64967-9535-4921-ac1e-de994858b5e7"
+      ]
+    },
+    {
+      "citation_number": 26,
+      "source_uri": "https://www.zaobao.com.sg/news/china/story20240803-4418749",
+      "document_version": 1,
+      "title": "陈婧：政治局会议也谈“防内卷” | 联合早报",
+      "author": null,
+      "published_at": "2024-08-02T21:00:00.000Z",
+      "excerpt_ids": [
+        "1824a5e5-0042-4e60-85b8-b3514ccd9e25"
+      ]
+    },
+    {
+      "citation_number": 27,
+      "source_uri": "https://www.21jingji.com/article/20241213/herald/dd4ed45bb3b2aeec2dd2d85ef0e7b6ea.html",
+      "document_version": 1,
+      "title": "新质生产力部署再加码，首提整治“内卷式”竞争丨中央经济工作会议深解读 - 21经济网",
+      "author": null,
+      "published_at": "2024-12-13T00:00:00.000Z",
+      "excerpt_ids": [
+        "9982756f-ce52-4a00-8a4d-ff9413984891"
+      ]
+    },
+    {
+      "citation_number": 28,
+      "source_uri": "https://www.cls.cn/detail/1887589",
+      "document_version": 1,
+      "title": "中央经济工作会议：综合整治“内卷式”竞争 规范地方政府和企业行为",
+      "author": null,
+      "published_at": null,
+      "excerpt_ids": [
+        "a6908baa-7470-45a2-8942-b4d3d388d627"
+      ]
+    },
+    {
+      "citation_number": 29,
+      "source_uri": "https://www.news.cn/politics/20250308/1f0dd45eb06a4e9593feff245dfb7b02/c.html",
+      "document_version": 1,
+      "title": "两会新华解码丨“内卷式”竞争如何破局？_2025全国两会大型融媒体专题_新华网",
+      "author": null,
+      "published_at": "2025-03-08T00:00:00.000Z",
+      "excerpt_ids": [
+        "cc2b108c-f8db-4d62-ab80-493450ebbf84"
+      ]
+    },
+    {
+      "citation_number": 30,
+      "source_uri": "https://paper.people.com.cn/rmrb/pc/content/202503/28/content_30064596.html",
+      "document_version": 1,
+      "title": "“内卷式”竞争为啥不可取？（读者点题·共同关注）",
+      "author": "第001版",
+      "published_at": null,
+      "excerpt_ids": [
+        "166daac3-308d-4a97-b764-72b4dda2e17d"
+      ]
+    },
+    {
+      "citation_number": 31,
+      "source_uri": "https://cn.chinadaily.com.cn/a/202503/20/WS67dbdda4a310510f19eecd89.html",
+      "document_version": 1,
+      "title": "每日一词 | 破除内卷式竞争 elimination of \"rat race\" competition - 中国日报网",
+      "author": "陈丹妮",
+      "published_at": null,
+      "excerpt_ids": [
+        "43b0afe1-a398-41dd-bdb4-c03c052c97f7"
+      ]
+    },
+    {
+      "citation_number": 32,
+      "source_uri": "https://www.hanspub.org/journal/paperinformation?paperid=49707",
+      "document_version": 1,
+      "title": "“Involution”与“内卷”概念的翻译对等度考察",
+      "author": "中文学术期刊,汉斯出版社,Hans Publishers",
+      "published_at": "2022-03-25T09:40:28.000Z",
+      "excerpt_ids": [
+        "cc8fa947-6dd8-4f58-a49a-0fe5ba76f7c0"
+      ]
+    }
+  ]
+}
