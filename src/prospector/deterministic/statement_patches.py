@@ -9,6 +9,23 @@ class StatementPatchError(ValueError):
     """Raised when a patch violates the sentence-level revision contract."""
 
 
+def preceding_statement_ids(draft: ReportDraft) -> dict[str, set[str]]:
+    """For each statement, the ids a patch replacing it may legally cite as premises.
+
+    A premise has to stand earlier in the report than the sentence resting on it. While
+    streaming a first draft that is self-evident -- nothing later exists yet -- but revision
+    hands the model the finished draft and asks it to rewrite sentences in place, so every
+    sentence looks equally available. Computing the legal set here lets the patch assembler
+    reject a backwards reference on the turn it arrives.
+    """
+    seen: set[str] = set()
+    legal: dict[str, set[str]] = {}
+    for statement in draft.statements():
+        legal[statement.statement_id] = set(seen)
+        seen.add(statement.statement_id)
+    return legal
+
+
 def apply_statement_patches(
     draft: ReportDraft,
     patches: list[ReportStatement],

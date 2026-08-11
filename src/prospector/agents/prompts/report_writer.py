@@ -131,6 +131,20 @@ def retry_message(error: str, last_accepted: str) -> str:
     )
 
 
+def patch_restart_message(error: str) -> str:
+    """Ask for the whole patch set again after the assembled draft was rejected.
+
+    Unlike ``retry_message`` this throws away what was already accepted: the rejection is a
+    property of the patches taken together, so resuming from a checkpoint inside the set
+    would only rebuild the same illegal draft.
+    """
+    return (
+        f"你提交的补丁逐条看都合法，但整体应用到草稿后不通过：{error}\n"
+        "这一轮补丁已全部作废。请重新输出完整的补丁集并修正上述问题，"
+        '同样以 {"record": "end"} 单独一行收尾。'
+    )
+
+
 def report_writer_revision_messages(
     snapshot: WriterSnapshot,
     draft: ReportDraft,
@@ -170,8 +184,14 @@ def report_writer_revision_messages(
           "premise_statement_ids": []
         }
         kind 约束与初稿相同：evidence 必须带候选 excerpt 且不带 premise；
-        derived 必须以此前的 evidence 或 derived 句为 premise 且不带 excerpt，推理链最多两层；
+        derived 必须以 evidence 或 derived 句为 premise 且不带 excerpt，推理链最多两层；
         elaboration / limitation 两个引用字段皆空。
+
+        ## premise 的顺序（修订时最容易踩的坑）
+        premise 只能引用在草稿中排在该句之前的句子。你看到的是完整草稿，
+        但读者是顺序读下来的：把根据挂在后面才出现的句子上，读者读到该句时它还不存在。
+        给某句找依据时只在它前面的句子里找；前面没有合适依据，
+        就改用 evidence 直接挂 excerpt，或降级为 limitation 如实说明。
 
         ## 怎么改
         elaboration / limitation 被判不合格，说明它承载了需要核对的事实或判断。

@@ -18,12 +18,16 @@ from pydantic import ValidationError
 from prospector.agents.llm import get_openai_client, strong_model
 from prospector.agents.prompts.report_writer import (
     continuation_message,
+    patch_restart_message,
     report_writer_messages,
     report_writer_revision_messages,
     retry_message,
 )
 from prospector.agents.usage import record_usage_value
-from prospector.deterministic.statement_patches import apply_statement_patches
+from prospector.deterministic.statement_patches import (
+    apply_statement_patches,
+    preceding_statement_ids,
+)
 from prospector.schemas.claims import ReportVerifierFindings
 from prospector.schemas.report import ReportDraft, WriterSnapshot, validate_writer_draft
 from prospector.schemas.report_patch import ReportPatchAssembler
@@ -133,7 +137,16 @@ class OpenAIReportWriter:
             raise ReportWriterOutputError("revision requested with empty findings", findings)
         messages = report_writer_revision_messages(snapshot, draft, findings)
         allowed = {item.statement_id for item in findings.failures}
-        assembler = ReportPatchAssembler(snapshot=snapshot, allowed_statement_ids=allowed)
+        legal_premise_ids = preceding_statement_ids(draft)
+
+        def new_assembler() -> ReportPatchAssembler:
+            return ReportPatchAssembler(
+                snapshot=snapshot,
+                allowed_statement_ids=allowed,
+                legal_premise_ids=legal_premise_ids,
+            )
+
+        assembler = new_assembler()
         turns: list[str] = []
         error_feedbacks = 0
         for _ in range(MAX_WRITER_TURNS):
@@ -143,32 +156,41 @@ class OpenAIReportWriter:
                 raise ReportWriterOutputError("Report Writer revise returned empty content", turns)
             messages.append({"role": "assistant", "content": content})
             outcome = assembler.consume(content)
-            if assembler.done:
-                break
-            if outcome.error is not None:
+            error = outcome.error
+            restart = False
+            if error is None and assembler.done:
+                try:
+                    patched = apply_statement_patches(
+                        draft, assembler.patches, allowed_statement_ids=allowed
+                    )
+                    validate_writer_draft(snapshot, patched)
+                except (ValidationError, ReportStreamError, ValueError) as exc:
+                    # Invariants that only hold across the finished draft -- a reasoning chain
+                    # deepened by a patch, say -- cannot be judged until every patch is in.
+                    # Feeding the rejection back costs one turn; raising here used to cost the
+                    # entire Job, research included.
+                    error = str(exc)
+                    restart = True
+                    assembler = new_assembler()
+                else:
+                    return ReportWriterResult(full_prompt=messages, raw_output=turns, draft=patched)
+            if error is not None:
                 error_feedbacks += 1
                 if error_feedbacks > MAX_ERROR_FEEDBACKS:
                     raise ReportWriterOutputError(
-                        f"invalid Report Writer revise output after retries: {outcome.error}",
+                        f"invalid Report Writer revise output after retries: {error}",
                         turns,
                     )
-                feedback = retry_message(outcome.error, assembler.last_accepted)
+                feedback = (
+                    patch_restart_message(error)
+                    if restart
+                    else retry_message(error, assembler.last_accepted)
+                )
                 messages.append({"role": "user", "content": feedback})
             else:
                 messages.append(
                     {"role": "user", "content": continuation_message(assembler.last_accepted)}
                 )
-        else:
-            raise ReportWriterOutputError(
-                f"Report Writer revise did not finish within {MAX_WRITER_TURNS} turns", turns
-            )
-        try:
-            patched = apply_statement_patches(
-                draft, assembler.patches, allowed_statement_ids=allowed
-            )
-            validate_writer_draft(snapshot, patched)
-        except (ValidationError, ReportStreamError, ValueError) as exc:
-            raise ReportWriterOutputError(
-                f"invalid Report Writer revise output: {exc}", turns
-            ) from exc
-        return ReportWriterResult(full_prompt=messages, raw_output=turns, draft=patched)
+        raise ReportWriterOutputError(
+            f"Report Writer revise did not finish within {MAX_WRITER_TURNS} turns", turns
+        )

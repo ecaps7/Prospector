@@ -53,6 +53,11 @@ class ReportPatchAssembler:
 
     snapshot: WriterSnapshot
     allowed_statement_ids: set[str]
+    # statement_id -> the ids a patch for it may use as premises, i.e. everything standing
+    # earlier in the draft (see deterministic.statement_patches.preceding_statement_ids).
+    # Checked here rather than only on the assembled draft so that a backwards reference is
+    # answered by the turn-level feedback loop instead of failing the whole revision.
+    legal_premise_ids: dict[str, set[str]]
     patches: list[ReportStatement] = field(default_factory=list)
     done: bool = False
     last_accepted: str = "（尚未接受任何补丁）"
@@ -119,6 +124,14 @@ class ReportPatchAssembler:
             raise ReportStreamError(
                 "candidate_excerpt_ids 引用了研究材料之外的 excerpt："
                 + ", ".join(sorted(unknown_excerpts))
+            )
+        legal = self.legal_premise_ids.get(record.statement_id, set())
+        backwards = sorted(set(record.premise_statement_ids) - legal)
+        if backwards:
+            raise ReportStreamError(
+                f"{record.statement_id} 的 premise_statement_ids 引用了排在它之后的句子："
+                + "、".join(backwards)
+                + "；premise 只能引用草稿中位于该句之前的 evidence 或 derived 句"
             )
         self.patches.append(record.to_statement(self._alias_to_id))
         self._seen.add(record.statement_id)

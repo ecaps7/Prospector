@@ -14,7 +14,10 @@ from prospector.agents.report_verifier import (
     ReportVerifierOutputError,
 )
 from prospector.agents.report_writer import OpenAIReportWriter
-from prospector.deterministic.statement_patches import apply_statement_patches
+from prospector.deterministic.statement_patches import (
+    apply_statement_patches,
+    preceding_statement_ids,
+)
 from prospector.schemas.claims import (
     ReportVerifierFindings,
     ReportVerifierSnapshot,
@@ -183,6 +186,21 @@ class _MalformedCompletions:
         )
 
 
+class _SequencedCompletions:
+    """Answers a fixed sequence of payloads, recording the system prompt each was asked with."""
+
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self.payloads = payloads
+        self.calls = 0
+        self.systems: list[str] = []
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.systems.append(kwargs["messages"][0]["content"])
+        payload = self.payloads[min(self.calls, len(self.payloads) - 1)]
+        self.calls += 1
+        return _completion(json.dumps(payload, ensure_ascii=False))
+
+
 def _bridge_snapshot(statement_id: str = "s_intro") -> ReportVerifierSnapshot:
     return ReportVerifierSnapshot(
         job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -296,6 +314,62 @@ def test_complete_long_reason_is_accepted_without_retry() -> None:
     assert result.findings.all_passed
     assert result.decisions[0].reason == reason
     assert completions.calls == 1
+
+
+def test_incomplete_evidence_pairs_are_retried_with_the_rule_that_was_broken() -> None:
+    """A readable verdict that misses one candidate excerpt is repairable, not fatal.
+
+    The contract checks used to sit after the retry loop, so a single slip on any one
+    statement ended a Job carrying a hundred-odd verdicts that had already passed.
+    """
+    second_excerpt = UUID("10000000-0000-0000-0000-000000000002")
+    covers_one: dict[str, object] = {
+        "statement_id": "s_fact",
+        "kind": "evidence",
+        "claim_type": "fact",
+        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+        "status": "pass",
+        "reason": "第一条候选支持该句。",
+    }
+    covers_both: dict[str, object] = {
+        **covers_one,
+        "pairs": [
+            {"excerpt_id": "E1", "relation": "support"},
+            {"excerpt_id": "E2", "relation": "support"},
+        ],
+    }
+    completions = _SequencedCompletions([covers_one, covers_both])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="两条候选都支持该句。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "候选一。"},
+                        {"excerpt_id": str(second_excerpt), "text": "候选二。"},
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID, second_excerpt],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert completions.calls == 2
+    # The retry names the broken rule, in the short codes the model was actually shown.
+    retry_system = completions.systems[1]
+    assert "不满足契约" in retry_system
+    assert "缺少 ['E2']" in retry_system
 
 
 def test_report_verifier_passes_evidence_and_derived() -> None:
@@ -437,7 +511,11 @@ def test_apply_statement_patches_only_replaces_named_sentences() -> None:
 
 
 def test_patch_assembler_rejects_unlisted_statement() -> None:
-    assembler = ReportPatchAssembler(snapshot=_snapshot(), allowed_statement_ids={"s_fact"})
+    assembler = ReportPatchAssembler(
+        snapshot=_snapshot(),
+        allowed_statement_ids={"s_fact"},
+        legal_premise_ids={"s_fact": set()},
+    )
     outcome = assembler.consume(
         json.dumps(
             {
@@ -453,6 +531,103 @@ def test_patch_assembler_rejects_unlisted_statement() -> None:
     )
     assert outcome.error is not None
     assert "不在审稿失败列表" in outcome.error
+
+
+def test_patch_assembler_rejects_a_premise_that_comes_later_in_the_draft() -> None:
+    """Revision shows the model the whole report, so "earlier" stops being self-evident.
+
+    Grounding an early sentence on evidence further down reads fine to a model holding the
+    finished draft, and produces a report whose reader meets the conclusion before its basis.
+    """
+    assembler = ReportPatchAssembler(
+        snapshot=_snapshot(),
+        allowed_statement_ids={"s_intro"},
+        legal_premise_ids=preceding_statement_ids(_draft()),
+    )
+    outcome = assembler.consume(
+        json.dumps(
+            {
+                "record": "patch_statement",
+                "statement_id": "s_intro",
+                "text": "引言直接下了结论。",
+                "kind": "derived",
+                "candidate_excerpt_ids": [],
+                "premise_statement_ids": ["s_fact"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    assert outcome.error is not None
+    assert "排在它之后" in outcome.error
+    assert "s_fact" in outcome.error
+
+
+def test_writer_revise_retries_when_the_assembled_draft_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariants that span the finished draft cannot be judged patch by patch.
+
+    Grounding a sentence on an elaboration passes every per-patch check -- the premise does
+    stand earlier -- and only fails once the draft is rebuilt, because an elaboration carries
+    no evidence for the chain to bottom out in. Raising there used to end the Job outright.
+    """
+    writer = OpenAIReportWriter(client=SimpleNamespace(), model="fake-model")  # type: ignore[arg-type]
+
+    def patch(**fields: object) -> str:
+        return "\n".join(
+            [
+                json.dumps({"record": "patch_statement", **fields}, ensure_ascii=False),
+                '{"record":"end"}',
+            ]
+        )
+
+    turns = iter(
+        [
+            patch(
+                statement_id="s_fact",
+                text="由引言推出的说法。",
+                kind="derived",
+                candidate_excerpt_ids=[],
+                premise_statement_ids=["s_intro"],
+            ),
+            patch(
+                statement_id="s_fact",
+                text="补丁事实",
+                kind="evidence",
+                candidate_excerpt_ids=["e_01"],
+                premise_statement_ids=[],
+            ),
+        ]
+    )
+    prompts: list[list[dict[str, str]]] = []
+
+    def fake_stream(messages: list[dict[str, str]]) -> str:
+        prompts.append([dict(message) for message in messages])
+        return next(turns)
+
+    monkeypatch.setattr(writer, "_stream_content", fake_stream)
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        failures=[
+            StatementFailure(
+                statement_id="s_fact",
+                kind="evidence",
+                status="unsupported",
+                reason="数字对不上",
+                allowed_excerpt_ids=[EXCERPT_ID],
+            )
+        ],
+    )
+
+    result = writer.revise(_snapshot(), _draft(), findings)
+
+    assert _text_of(result.draft, "s_fact") == "补丁事实"
+    assert len(prompts) == 2
+    # The whole set is re-requested: the rejection belongs to the patches taken together.
+    restart = prompts[1][-1]["content"]
+    assert "整体应用到草稿后不通过" in restart
+    assert "重新输出完整的补丁集" in restart
 
 
 def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
