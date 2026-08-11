@@ -824,6 +824,11 @@ class ResearchRepository:
     ) -> Document:
         retrieved_at = datetime.now(UTC)
         with self.engine.begin() as conn:
+            # Idempotent by (workspace_id, source_uri, content_hash). Callers look the
+            # document up before fetching, but two workers can pass that check for the same
+            # URL concurrently and both arrive here. Raising on the loser turned a document
+            # that had been retrieved successfully into a reported web_fetch failure, and the
+            # evidence was dropped. Whoever loses now gets the winner's row instead.
             conn.execute(
                 text(
                     """
@@ -834,6 +839,7 @@ class ResearchRepository:
                       (:id, :workspace_id, CAST(:source_ref AS JSONB), :source_uri,
                        :content_hash, :version, :retrieved_at, :media_type, :storage_ref,
                        NULL, CAST(:source_meta AS JSONB))
+                    ON CONFLICT (workspace_id, source_uri, content_hash) DO NOTHING
                     """
                 ),
                 {
@@ -849,6 +855,26 @@ class ResearchRepository:
                     "source_meta": _json(source_meta),
                 },
             )
+            # Read back rather than trust the local values: on a lost race the stored row is
+            # the winner's, and the event below must name the doc_id that actually exists.
+            document = self._document_from_row(
+                conn.execute(
+                    text(
+                        """
+                        SELECT * FROM app.documents
+                        WHERE workspace_id=:workspace_id AND source_uri=:source_uri
+                          AND content_hash=:content_hash
+                        """
+                    ),
+                    {
+                        "workspace_id": self.settings.workspace_id,
+                        "source_uri": source_ref.uri,
+                        "content_hash": content_hash,
+                    },
+                )
+                .mappings()
+                .one()
+            )
             self._event(
                 conn,
                 job_id=job_id,
@@ -859,19 +885,10 @@ class ResearchRepository:
                     "tool": "web_fetch",
                     "tool_call_id": tool_call_id,
                     "url": source_ref.uri,
-                    "doc_id": str(doc_id),
+                    "doc_id": str(document.doc_id),
                 },
             )
-        return Document(
-            doc_id=doc_id,
-            source_ref=source_ref,
-            content_hash=content_hash,
-            version=version,
-            retrieved_at=retrieved_at,
-            media_type=media_type,
-            storage_ref=storage_ref,
-            source_meta=source_meta,
-        )
+        return document
 
     def get_document(self, doc_id: UUID) -> Document:
         with self.engine.connect() as conn:

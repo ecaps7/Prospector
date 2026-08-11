@@ -41,7 +41,7 @@ from prospector.flow.state import ResearchState, initial_research_state
 from prospector.runtime.timeline import ResearchTimelineRenderer, drain_timeline
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
-from prospector.schemas.evidence import Assertion
+from prospector.schemas.evidence import Assertion, Document, SourceRef
 from prospector.schemas.report import ReportDraft, WriterSnapshot
 from prospector.schemas.verifier import AssertionDisposition, VerifierDecision, VerifierGap
 from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
@@ -558,6 +558,70 @@ def _services(
         exa,
         model,
     )
+
+
+@pytest.mark.integration
+def test_two_workers_snapshotting_one_url_keep_the_document() -> None:
+    """Losing the insert race must not look like a failed fetch.
+
+    Both workers pass the pre-fetch existence check, both reach save_document, and the second
+    insert collides on (workspace_id, source_uri, content_hash). Raising there reported a
+    document that had in fact been retrieved as a web_fetch failure, and its evidence was lost.
+    """
+    job_id, _, repository = _create_research_job("quick")
+    draft = PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "dispatch": {"tasks": [_task("并发抓取同一来源")], "reason": "验证幂等落库"},
+        }
+    ).dispatch
+    assert draft is not None
+    plan = repository.create_plan(
+        job_id,
+        1,
+        [inject_task_budget(draft.tasks[0], "quick")],
+        reason="验证幂等落库",
+    )
+    task_id = plan.task_ids[0]
+    url = "https://example.test/contested-snapshot.html"
+    content_hash = "sha256:" + "b" * 64
+
+    def _save(storage_ref: str, tool_call_id: str) -> Document:
+        return repository.save_document(
+            job_id=job_id,
+            task_id=task_id,
+            doc_id=uuid4(),
+            source_ref=SourceRef(kind="url", uri=url),
+            content_hash=content_hash,
+            version=1,
+            media_type="html",
+            storage_ref=storage_ref,
+            source_meta={"title": "同一份快照"},
+            tool_call_id=tool_call_id,
+        )
+
+    try:
+        winner = _save("s3://bucket/first.txt", "fetch-a")
+        loser = _save("s3://bucket/second.txt", "fetch-b")
+
+        # The loser gets the stored row, not the arguments it passed in.
+        assert loser.doc_id == winner.doc_id
+        assert loser.storage_ref == "s3://bucket/first.txt"
+        with repository.engine.connect() as conn:
+            stored = conn.execute(
+                text(
+                    """
+                    SELECT count(*) FROM app.documents
+                    WHERE source_uri=:url AND content_hash=:content_hash
+                    """
+                ),
+                {"url": url, "content_hash": content_hash},
+            ).scalar_one()
+        assert stored == 1
+    finally:
+        with repository.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.documents WHERE source_uri=:url"), {"url": url})
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
 
 
 def _create_research_job(effort: str = "standard") -> tuple[UUID, UUID, ResearchRepository]:
