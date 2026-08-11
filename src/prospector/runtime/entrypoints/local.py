@@ -37,7 +37,7 @@ from prospector.schemas.brief import EffortLevel, ResearchBrief, ScopeOutcome
 from prospector.store.checkpoint import checkpointer_session, close_pool, setup_checkpointer
 from prospector.store.jobs import create_job
 from prospector.store.object_store import ObjectStore
-from prospector.store.repositories import ResearchRepository
+from prospector.store.repositories import JobRepository, ResearchRepository
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 job_app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -134,11 +134,20 @@ def _run_research_graph(
     )
     follower.start()
     try:
-        with checkpointer_session() as checkpointer:
-            graph = build_research_graph(checkpointer)
-            result = graph.invoke(initial_state, thread_config(str(job_id)))
-    finally:
-        follower.stop()
+        try:
+            with checkpointer_session() as checkpointer:
+                graph = build_research_graph(checkpointer)
+                result = graph.invoke(initial_state, thread_config(str(job_id)))
+        finally:
+            follower.stop()
+    except Exception:
+        # Close the job row the way the API scheduler does. Nothing else can: create_job
+        # writes 'running' and set_research_outcome's status clause only ever writes
+        # 'failed', so without this a local run leaves the row claiming to be running --
+        # and a run that failed once stays 'failed' even after a successful resume.
+        JobRepository().finalize_failure(job_id, fallback_error_code="job_execution_error")
+        raise
+    JobRepository().finalize_success(job_id, result)
     typer.echo(
         f"RESEARCH_STOPPED: outcome={result['outcome']} phase={result['phase']}",
         err=True,
