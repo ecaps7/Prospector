@@ -7,33 +7,6 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: prospector
-          POSTGRES_PASSWORD: prospector
-          POSTGRES_DB: prospector
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U prospector -d prospector"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-
     env:
       DATABASE_URL: postgresql://prospector:prospector@localhost:5432/prospector
       S3_ENDPOINT: http://localhost:9000
@@ -65,15 +38,8 @@ jobs:
       - name: Unit tests
         run: uv run pytest tests/unit -q -m "not live"
 
-      - name: Ensure MinIO bucket
-        run: |
-          pip install minio
-          python - <<'PY'
-          from minio import Minio
-          c = Minio("localhost:9000", access_key="minioadmin", secret_key="minioadmin", secure=False)
-          if not c.bucket_exists("prospector"):
-              c.make_bucket("prospector")
-          PY
+      - name: Start integration services
+        run: docker compose up -d --wait postgres minio minio-init
 
       - name: Migrate + checkpointer setup
         run: |
@@ -81,4 +47,4 @@ jobs:
           uv run prospector-local setup
 
       - name: Integration tests
-        run: uv run pytest tests/integration -q -m integration
+        run: uv run pytest tests/integration -q -m "integration and not live"
