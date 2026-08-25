@@ -10,6 +10,7 @@ from prospector.api.app import ApiServices, create_app, parse_storage_uri
 from prospector.api.scheduler import JobScheduler
 from prospector.api.sse import encode_event, heartbeat
 from prospector.schemas.brief import ResearchBrief, ScopeOutcome
+from prospector.schemas.events import sse_event_adapter
 
 
 class FakeObjectStore:
@@ -122,6 +123,13 @@ def test_storage_uri_must_match_configured_bucket() -> None:
             raise AssertionError(f"expected invalid storage URI: {uri}")
 
 
+def _sse_data(frame: str) -> str:
+    for line in frame.split("\n"):
+        if line.startswith("data: "):
+            return line[6:]
+    raise AssertionError(f"SSE frame is missing data: {frame!r}")
+
+
 def test_sse_frame_contains_persisted_id_type_and_structured_data() -> None:
     frame = encode_event(
         {
@@ -135,7 +143,67 @@ def test_sse_frame_contains_persisted_id_type_and_structured_data() -> None:
     )
     assert frame.startswith("id: 7\nevent: job.phase_changed\ndata: ")
     assert '"event_type":"job.phase_changed"' in frame
+    sse_event_adapter.validate_json(_sse_data(frame))
     assert heartbeat() == ": heartbeat\n\n"
+
+
+def test_encoded_job_stopped_matches_published_event_schema() -> None:
+    frame = encode_event(
+        {
+            "id": 2,
+            "event_type": "job.stopped",
+            "payload": {
+                "status": "completed",
+                "phase": "draft_rendered",
+                "outcome": "draft_rendered",
+                "error_code": None,
+                "report_markdown_ref": "s3://reports/workspace/report.md",
+                "report_json_ref": None,
+            },
+            "task_id": None,
+            "decision_round": None,
+            "created_at": datetime(2026, 7, 19, tzinfo=UTC),
+        }
+    )
+    sse_event_adapter.validate_json(_sse_data(frame))
+
+
+def test_sse_openapi_documents_event_envelope_and_reconnect() -> None:
+    repository = FakeRepository()
+    app = create_app(_services(repository), validate_startup=False)
+    spec = app.openapi()
+    operation = spec["paths"]["/api/jobs/{job_id}/events"]["get"]
+
+    header = next(item for item in operation["parameters"] if item["name"] == "Last-Event-ID")
+    assert "non-negative integer" in header["description"]
+    assert "job.stopped" in header["description"]
+
+    response_200 = operation["responses"]["200"]
+    assert "text/event-stream" in response_200["content"]
+    assert "application/json" not in response_200["content"]
+    assert response_200["content"]["text/event-stream"]["schema"] == {
+        "$ref": "#/components/schemas/SseEvent"
+    }
+    assert "job.stopped" in response_200["description"]
+    assert operation["responses"]["400"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+
+    schemas = spec["components"]["schemas"]
+    assert schemas["SseEvent"]["discriminator"]["propertyName"] == "event_type"
+    assert "job.stopped" in schemas["SseEvent"]["discriminator"]["mapping"]
+    stopped = schemas["JobStoppedEvent"]
+    for field in ("event_type", "payload", "task_id", "decision_round", "created_at"):
+        assert field in stopped["properties"]
+    payload = schemas["JobStoppedPayload"]
+    assert set(payload["required"]) == {"status", "phase"}
+    assert set(payload["properties"]["status"]["enum"]) == {
+        "completed",
+        "failed",
+        "cancelled",
+    }
+    assert "report_markdown_ref" in payload["properties"]
+    assert "report_json_ref" in payload["properties"]
 
 
 def test_scope_validation_and_error_body_are_stable() -> None:

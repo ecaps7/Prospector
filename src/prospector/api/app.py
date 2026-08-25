@@ -37,12 +37,26 @@ from prospector.flow.research_graph import build_research_graph, thread_config
 from prospector.flow.state import initial_research_state
 from prospector.obs.logging import get_logger
 from prospector.schemas.brief import ResearchBrief, ScopeOutcome
+from prospector.schemas.events import SseEvent
 from prospector.store.checkpoint import checkpointer_session
 from prospector.store.object_store import ObjectStore
 from prospector.store.repositories.jobs import JobRepository
 
 POLL_INTERVAL_SECONDS = 0.2
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+LAST_EVENT_ID_DESCRIPTION = (
+    "Exclusive replay cursor. Send the SSE `id` of the last event the client "
+    "committed; only events with a greater id are returned. Must be a "
+    "non-negative integer. Omit to replay from the start. After `job.stopped` "
+    "has been received, reconnecting with that id returns an empty stream."
+)
+SSE_STREAM_DESCRIPTION = (
+    "Server-Sent Events stream of persisted research events. Each `data:` line "
+    "is an `SseEvent` JSON object (`event_type`, `task_id`, `decision_round`, "
+    "`created_at`, `payload`). The SSE `id` is the persisted event id used with "
+    "`Last-Event-ID`. The stream ends after `job.stopped`. Heartbeats are "
+    "comment lines (`: heartbeat`) and have no id."
+)
 log = get_logger("prospector.api")
 
 ScopeFn = Callable[..., ScopeOutcome]
@@ -85,6 +99,15 @@ def parse_storage_uri(uri: str, expected_bucket: str) -> str:
     if not key:
         raise ValueError("report reference has no object key")
     return key
+
+
+def _publish_sse_as_event_stream(schema: dict[str, Any]) -> None:
+    """FastAPI documents StreamingResponse models as JSON; the wire format is SSE."""
+    response = schema["paths"]["/api/jobs/{job_id}/events"]["get"]["responses"]["200"]
+    content = response.setdefault("content", {})
+    json_body = content.pop("application/json", None)
+    if json_body is not None:
+        content["text/event-stream"] = json_body
 
 
 def create_app(
@@ -239,12 +262,24 @@ def create_app(
 
     @router.get(
         "/jobs/{job_id}/events",
-        responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+        responses={
+            200: {
+                "model": SseEvent,
+                "description": SSE_STREAM_DESCRIPTION,
+            },
+            400: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
     )
     async def job_events(
         job_id: UUID,
         request: Request,
-        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+        last_event_id: str | None = Header(
+            default=None,
+            alias="Last-Event-ID",
+            description=LAST_EVENT_ID_DESCRIPTION,
+            examples=["42"],
+        ),
     ) -> StreamingResponse:
         repository = runtime(request).repository
         if not await run_in_threadpool(repository.job_exists, job_id):
@@ -334,4 +369,12 @@ def create_app(
         return HealthResponse(status="ok")
 
     app.include_router(router)
+    original_openapi = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        schema = original_openapi()
+        _publish_sse_as_event_stream(schema)
+        return schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
     return app
