@@ -191,7 +191,7 @@ export function MonitorPage() {
         started_at: null,
         finished_at: null,
       })),
-      usage: [],
+      usage: view.usage,
       report: null,
     });
     viewRef.current = snapshot;
