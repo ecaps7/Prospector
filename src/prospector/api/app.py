@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from pathlib import Path
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import Response as StarletteResponse
 
 from prospector.agents.llm import LlmNotConfiguredError, require_llm_settings
 from prospector.agents.scope import run_scope, write_research_brief
@@ -22,6 +25,7 @@ from prospector.api.errors import ApiError
 from prospector.api.scheduler import JobScheduler
 from prospector.api.schemas import (
     ErrorResponse,
+    ExcerptView,
     HealthResponse,
     JobCancelResponse,
     JobCreateRequest,
@@ -43,6 +47,7 @@ from prospector.store.repositories.jobs import JobRepository
 
 POLL_INTERVAL_SECONDS = 0.2
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+WEB_DIST = Path(__file__).resolve().parents[3] / "web" / "dist"
 log = get_logger("prospector.api")
 
 ScopeFn = Callable[..., ScopeOutcome]
@@ -87,10 +92,59 @@ def parse_storage_uri(uri: str, expected_bucket: str) -> str:
     return key
 
 
+def _is_document_navigation(request: Request) -> bool:
+    return request.method == "GET" and request.headers.get("sec-fetch-dest") == "document"
+
+
+def _mount_web_app(app: FastAPI, dist: Path) -> None:
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="web-assets")
+
+    @app.middleware("http")
+    async def spa_document_navigation(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[StarletteResponse]],
+    ) -> StarletteResponse:
+        path = request.url.path
+        if (
+            _is_document_navigation(request)
+            and not path.startswith("/api/")
+            and path
+            not in {
+                "/api",
+                "/docs",
+                "/redoc",
+                "/openapi.json",
+                "/healthz",
+            }
+        ):
+            index = dist / "index.html"
+            if index.is_file():
+                return FileResponse(index)
+        return await call_next(request)
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        if full_path:
+            candidate = (dist / full_path).resolve()
+            try:
+                candidate.relative_to(dist.resolve())
+            except ValueError as exc:
+                raise ApiError(404, "not_found", "Not found") from exc
+            if candidate.is_file():
+                return FileResponse(candidate)
+        index = dist / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+        raise ApiError(404, "web_ui_missing", "Web UI is not built")
+
+
 def create_app(
     services: ApiServices | None = None,
     *,
     validate_startup: bool = True,
+    web_dist: Path | None = WEB_DIST,
 ) -> FastAPI:
     supplied_services = services
 
@@ -108,6 +162,7 @@ def create_app(
             await runtime.scheduler.stop()
 
     app = FastAPI(title="Prospector API", version="0.1.0", lifespan=lifespan)
+    router = APIRouter()
 
     def runtime(request: Request) -> ApiServices:
         return request.app.state.services
@@ -145,7 +200,7 @@ def create_app(
         except LlmNotConfiguredError as exc:
             raise ApiError(503, "llm_not_configured", str(exc)) from exc
 
-    @app.post(
+    @router.post(
         "/scope",
         response_model=ScopeOutcome,
         responses={503: {"model": ErrorResponse}},
@@ -167,7 +222,7 @@ def create_app(
         except Exception as exc:
             raise ApiError(503, "service_unavailable", "Scope service unavailable") from exc
 
-    @app.post(
+    @router.post(
         "/scope/revise",
         response_model=ScopeReviseResponse,
         responses={503: {"model": ErrorResponse}},
@@ -190,7 +245,7 @@ def create_app(
             raise ApiError(503, "service_unavailable", "Scope revision unavailable") from exc
         return ScopeReviseResponse(brief=brief)
 
-    @app.post(
+    @router.post(
         "/jobs",
         response_model=JobCreateResponse,
         status_code=201,
@@ -204,11 +259,11 @@ def create_app(
         except Exception as exc:
             raise ApiError(503, "service_unavailable", "Job submission unavailable") from exc
 
-    @app.get("/jobs", response_model=list[JobListItem])
+    @router.get("/jobs", response_model=list[JobListItem])
     async def list_jobs(request: Request) -> list[dict[str, Any]]:
         return await run_in_threadpool(runtime(request).repository.list_jobs)
 
-    @app.post(
+    @router.post(
         "/jobs/{job_id}/cancel",
         response_model=JobCancelResponse,
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
@@ -225,7 +280,7 @@ def create_app(
             return JobCancelResponse(job_id=job_id, status="cancelled")
         raise ApiError(503, "service_unavailable", "Cancellation state is invalid")
 
-    @app.get(
+    @router.get(
         "/jobs/{job_id}",
         response_model=JobDetail,
         responses={404: {"model": ErrorResponse}},
@@ -236,7 +291,7 @@ def create_app(
             raise ApiError(404, "job_not_found", "Job not found")
         return job
 
-    @app.get(
+    @router.get(
         "/jobs/{job_id}/events",
         responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     )
@@ -286,7 +341,37 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.get(
+    @router.get(
+        "/jobs/{job_id}/excerpts",
+        response_model=list[ExcerptView],
+        responses={404: {"model": ErrorResponse}},
+    )
+    async def list_excerpts(
+        job_id: UUID,
+        request: Request,
+        ids: Annotated[list[UUID], Query(min_length=1)],
+    ) -> list[dict[str, Any]]:
+        repository = runtime(request).repository
+        if not await run_in_threadpool(repository.job_exists, job_id):
+            raise ApiError(404, "job_not_found", "Job not found")
+        rows = await run_in_threadpool(repository.list_excerpts, job_id, ids)
+        if rows is None:
+            raise ApiError(404, "excerpt_not_found", "Excerpt not found for this job")
+        return [
+            {
+                "excerpt_id": row["excerpt_id"],
+                "text": row["text"],
+                "source_uri": row["source_uri"],
+                "document_version": row["doc_version"],
+                "title": row["title"],
+                "author": row["author"],
+                "published_at": row["published_at"],
+                "locator": row["locator"] or {},
+            }
+            for row in rows
+        ]
+
+    @router.get(
         "/jobs/{job_id}/report",
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
     )
@@ -312,13 +397,14 @@ def create_app(
             if report_format == "md"
             else "application/json; charset=utf-8"
         )
+        disposition = "inline" if report_format == "json" else "attachment"
         return Response(
             content=content,
             media_type=media_type,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
         )
 
-    @app.get(
+    @router.get(
         "/healthz",
         response_model=HealthResponse,
         responses={503: {"model": ErrorResponse}},
@@ -332,4 +418,8 @@ def create_app(
             raise ApiError(503, "service_unavailable", "Service dependencies unavailable") from exc
         return HealthResponse(status="ok")
 
+    app.include_router(router)
+    app.include_router(router, prefix="/api", include_in_schema=False)
+    if web_dist is not None and (web_dist / "index.html").is_file():
+        _mount_web_app(app, web_dist)
     return app

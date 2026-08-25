@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -19,8 +20,11 @@ class FakeObjectStore:
         pass
 
     def get_bytes(self, key: str) -> bytes:
-        assert key == "workspace/report.md"
-        return b"# report"
+        if key == "workspace/report.md":
+            return b"# report"
+        if key == "workspace/report.json":
+            return b'{"title":"ok"}'
+        raise AssertionError(key)
 
 
 class FakeRepository:
@@ -52,6 +56,7 @@ class FakeRepository:
             },
         ]
         self.ready_report = False
+        self.excerpts: list[dict[str, Any]] = []
 
     def health_check(self) -> None:
         pass
@@ -69,15 +74,26 @@ class FakeRepository:
 
     def report_ref(self, job_id: UUID, report_format: str) -> str | None:
         assert job_id == self.job_id
-        if self.ready_report and report_format == "md":
+        if not self.ready_report:
+            return None
+        if report_format == "md":
             return "s3://reports/workspace/report.md"
-        return None
+        return "s3://reports/workspace/report.json"
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return []
 
     def get_job(self, job_id: UUID) -> dict[str, Any] | None:
         return None
+
+    def list_excerpts(self, job_id: UUID, excerpt_ids: list[UUID]) -> list[dict[str, Any]] | None:
+        if job_id != self.job_id:
+            return None
+        found = [item for item in self.excerpts if item["excerpt_id"] in excerpt_ids]
+        if len(found) != len(list(dict.fromkeys(excerpt_ids))):
+            return None
+        by_id = {item["excerpt_id"]: item for item in found}
+        return [by_id[excerpt_id] for excerpt_id in excerpt_ids]
 
 
 class FakeScheduler:
@@ -190,6 +206,11 @@ def test_invalid_sse_cursor_and_report_states_use_structured_errors() -> None:
         assert response.content == b"# report"
         assert response.headers["content-disposition"] == 'attachment; filename="report.md"'
 
+        response = client.get(f"/jobs/{repository.job_id}/report?format=json")
+        assert response.status_code == 200
+        assert response.content == b'{"title":"ok"}'
+        assert response.headers["content-disposition"] == 'inline; filename="report.json"'
+
 
 def test_cancel_endpoint_returns_structured_terminal_status() -> None:
     repository = FakeRepository()
@@ -200,3 +221,87 @@ def test_cancel_endpoint_returns_structured_terminal_status() -> None:
             "job_id": str(repository.job_id),
             "status": "cancelled",
         }
+
+
+def test_api_prefix_aliases_existing_health_and_job_routes() -> None:
+    repository = FakeRepository()
+    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
+        assert client.get("/api/jobs").status_code == 200
+        response = client.get(f"/api/jobs/{repository.job_id}/events")
+        assert response.status_code == 200
+        assert "event: job.stopped" in response.text
+
+
+def test_excerpts_are_scoped_to_the_job() -> None:
+    repository = FakeRepository()
+    excerpt_id = uuid4()
+    foreign_id = uuid4()
+    repository.excerpts = [
+        {
+            "excerpt_id": excerpt_id,
+            "text": "archived quote",
+            "doc_version": 1,
+            "locator": {"h": "h1"},
+            "source_uri": "https://example.com",
+            "title": "Example",
+            "author": None,
+            "published_at": None,
+        }
+    ]
+    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
+        response = client.get(
+            f"/api/jobs/{repository.job_id}/excerpts",
+            params=[("ids", str(excerpt_id))],
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body[0]["text"] == "archived quote"
+        assert body[0]["source_uri"] == "https://example.com"
+
+        missing = client.get(
+            f"/api/jobs/{repository.job_id}/excerpts",
+            params=[("ids", str(foreign_id))],
+        )
+        assert missing.status_code == 404
+        assert missing.json()["error_code"] == "excerpt_not_found"
+
+        unknown_job = client.get(f"/api/jobs/{uuid4()}/excerpts", params=[("ids", str(excerpt_id))])
+        assert unknown_job.status_code == 404
+        assert unknown_job.json()["error_code"] == "job_not_found"
+
+
+def test_spa_fallback_serves_index_and_keeps_api_json(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>Prospector</title>", encoding="utf-8")
+    (dist / "asset.txt").write_text("ok", encoding="utf-8")
+    repository = FakeRepository()
+    with TestClient(
+        create_app(_services(repository), validate_startup=False, web_dist=dist)
+    ) as client:
+        html = client.get("/", headers={"sec-fetch-dest": "document"})
+        assert html.status_code == 200
+        assert "Prospector" in html.text
+
+        document_nav = client.get(
+            f"/jobs/{repository.job_id}/report",
+            headers={"sec-fetch-dest": "document"},
+        )
+        assert document_nav.status_code == 200
+        assert document_nav.headers["content-type"].startswith("text/html")
+
+        unknown = client.get("/settings")
+        assert unknown.status_code == 200
+        assert "Prospector" in unknown.text
+
+        asset = client.get("/asset.txt")
+        assert asset.status_code == 200
+        assert asset.text == "ok"
+
+        jobs = client.get("/jobs")
+        assert jobs.status_code == 200
+        assert jobs.headers["content-type"].startswith("application/json")
+
+        jobs_document = client.get("/jobs", headers={"sec-fetch-dest": "document"})
+        assert jobs_document.status_code == 200
+        assert jobs_document.headers["content-type"].startswith("text/html")
