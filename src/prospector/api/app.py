@@ -11,7 +11,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -108,6 +108,7 @@ def create_app(
             await runtime.scheduler.stop()
 
     app = FastAPI(title="Prospector API", version="0.1.0", lifespan=lifespan)
+    router = APIRouter(prefix="/api")
 
     def runtime(request: Request) -> ApiServices:
         return request.app.state.services
@@ -145,7 +146,7 @@ def create_app(
         except LlmNotConfiguredError as exc:
             raise ApiError(503, "llm_not_configured", str(exc)) from exc
 
-    @app.post(
+    @router.post(
         "/scope",
         response_model=ScopeOutcome,
         responses={503: {"model": ErrorResponse}},
@@ -167,7 +168,7 @@ def create_app(
         except Exception as exc:
             raise ApiError(503, "service_unavailable", "Scope service unavailable") from exc
 
-    @app.post(
+    @router.post(
         "/scope/revise",
         response_model=ScopeReviseResponse,
         responses={503: {"model": ErrorResponse}},
@@ -190,7 +191,7 @@ def create_app(
             raise ApiError(503, "service_unavailable", "Scope revision unavailable") from exc
         return ScopeReviseResponse(brief=brief)
 
-    @app.post(
+    @router.post(
         "/jobs",
         response_model=JobCreateResponse,
         status_code=201,
@@ -204,11 +205,11 @@ def create_app(
         except Exception as exc:
             raise ApiError(503, "service_unavailable", "Job submission unavailable") from exc
 
-    @app.get("/jobs", response_model=list[JobListItem])
+    @router.get("/jobs", response_model=list[JobListItem])
     async def list_jobs(request: Request) -> list[dict[str, Any]]:
         return await run_in_threadpool(runtime(request).repository.list_jobs)
 
-    @app.post(
+    @router.post(
         "/jobs/{job_id}/cancel",
         response_model=JobCancelResponse,
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
@@ -225,7 +226,7 @@ def create_app(
             return JobCancelResponse(job_id=job_id, status="cancelled")
         raise ApiError(503, "service_unavailable", "Cancellation state is invalid")
 
-    @app.get(
+    @router.get(
         "/jobs/{job_id}",
         response_model=JobDetail,
         responses={404: {"model": ErrorResponse}},
@@ -236,7 +237,7 @@ def create_app(
             raise ApiError(404, "job_not_found", "Job not found")
         return job
 
-    @app.get(
+    @router.get(
         "/jobs/{job_id}/events",
         responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     )
@@ -286,7 +287,7 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.get(
+    @router.get(
         "/jobs/{job_id}/report",
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
     )
@@ -318,7 +319,7 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @app.get(
+    @router.get(
         "/healthz",
         response_model=HealthResponse,
         responses={503: {"model": ErrorResponse}},
@@ -332,4 +333,5 @@ def create_app(
             raise ApiError(503, "service_unavailable", "Service dependencies unavailable") from exc
         return HealthResponse(status="ok")
 
+    app.include_router(router)
     return app

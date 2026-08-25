@@ -142,7 +142,7 @@ def test_scope_validation_and_error_body_are_stable() -> None:
     repository = FakeRepository()
     with TestClient(create_app(_services(repository), validate_startup=False)) as client:
         response = client.post(
-            "/scope",
+            "/api/scope",
             json={"question": "Question", "clarification_question": "Which?"},
         )
         assert response.status_code == 422
@@ -151,11 +151,11 @@ def test_scope_validation_and_error_body_are_stable() -> None:
             "message": "request validation failed",
         }
 
-        response = client.post("/scope", json={"question": "   "})
+        response = client.post("/api/scope", json={"question": "   "})
         assert response.status_code == 422
         assert response.json()["error_code"] == "validation_error"
 
-        response = client.post("/scope", json={"question": "Question"})
+        response = client.post("/api/scope", json={"question": "Question"})
         assert response.status_code == 200
         assert response.json()["kind"] == "brief_pending"
 
@@ -163,12 +163,15 @@ def test_scope_validation_and_error_body_are_stable() -> None:
 def test_sse_replays_stopped_event_and_closed_cursor_returns_empty_stream() -> None:
     repository = FakeRepository()
     with TestClient(create_app(_services(repository), validate_startup=False)) as client:
-        response = client.get(f"/jobs/{repository.job_id}/events")
+        response = client.get(f"/api/jobs/{repository.job_id}/events")
         assert response.status_code == 200
         assert "id: 1" in response.text
         assert "id: 2\nevent: job.stopped" in response.text
 
-        response = client.get(f"/jobs/{repository.job_id}/events", headers={"Last-Event-ID": "2"})
+        response = client.get(
+            f"/api/jobs/{repository.job_id}/events",
+            headers={"Last-Event-ID": "2"},
+        )
         assert response.status_code == 200
         assert response.text == ""
 
@@ -176,16 +179,19 @@ def test_sse_replays_stopped_event_and_closed_cursor_returns_empty_stream() -> N
 def test_invalid_sse_cursor_and_report_states_use_structured_errors() -> None:
     repository = FakeRepository()
     with TestClient(create_app(_services(repository), validate_startup=False)) as client:
-        response = client.get(f"/jobs/{repository.job_id}/events", headers={"Last-Event-ID": "bad"})
+        response = client.get(
+            f"/api/jobs/{repository.job_id}/events",
+            headers={"Last-Event-ID": "bad"},
+        )
         assert response.status_code == 400
         assert response.json()["error_code"] == "invalid_last_event_id"
 
-        response = client.get(f"/jobs/{repository.job_id}/report?format=md")
+        response = client.get(f"/api/jobs/{repository.job_id}/report?format=md")
         assert response.status_code == 409
         assert response.json()["error_code"] == "report_not_ready"
 
         repository.ready_report = True
-        response = client.get(f"/jobs/{repository.job_id}/report?format=md")
+        response = client.get(f"/api/jobs/{repository.job_id}/report?format=md")
         assert response.status_code == 200
         assert response.content == b"# report"
         assert response.headers["content-disposition"] == 'attachment; filename="report.md"'
@@ -194,9 +200,20 @@ def test_invalid_sse_cursor_and_report_states_use_structured_errors() -> None:
 def test_cancel_endpoint_returns_structured_terminal_status() -> None:
     repository = FakeRepository()
     with TestClient(create_app(_services(repository), validate_startup=False)) as client:
-        response = client.post(f"/jobs/{repository.job_id}/cancel")
+        response = client.post(f"/api/jobs/{repository.job_id}/cancel")
         assert response.status_code == 200
         assert response.json() == {
             "job_id": str(repository.job_id),
             "status": "cancelled",
         }
+
+
+def test_unprefixed_routes_are_not_kept_as_aliases() -> None:
+    repository = FakeRepository()
+    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
+        assert client.get("/healthz").status_code == 404
+        assert client.post("/scope", json={"question": "Question"}).status_code == 404
+        assert client.get("/jobs").status_code == 404
+        health = client.get("/api/healthz")
+        assert health.status_code == 200
+        assert health.json() == {"status": "ok"}

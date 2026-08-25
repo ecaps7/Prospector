@@ -27,14 +27,14 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
-        if request.url.path == "/healthz":
+        if request.url.path == "/api/healthz":
             return httpx.Response(200, json={"status": "ok"})
-        if request.url.path == "/scope":
+        if request.url.path == "/api/scope":
             return httpx.Response(
                 200,
                 json=ScopeOutcome(kind="brief_pending", brief=brief).model_dump(mode="json"),
             )
-        if request.url.path == "/jobs" and request.method == "POST":
+        if request.url.path == "/api/jobs" and request.method == "POST":
             return httpx.Response(
                 201,
                 json={
@@ -44,7 +44,7 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
                     "queue_position": None,
                 },
             )
-        if request.url.path == f"/jobs/{job_id}/events":
+        if request.url.path == f"/api/jobs/{job_id}/events":
             content = "".join(
                 [
                     encode_event(
@@ -77,9 +77,9 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
                 ]
             )
             return httpx.Response(200, text=content, headers={"content-type": "text/event-stream"})
-        if request.url.path == f"/jobs/{job_id}/report":
+        if request.url.path == f"/api/jobs/{job_id}/report":
             return httpx.Response(200, content=b"# report\n")
-        if request.url.path == f"/jobs/{job_id}":
+        if request.url.path == f"/api/jobs/{job_id}":
             return httpx.Response(
                 200,
                 json={
@@ -118,11 +118,11 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
     report_path = tmp_path / ".prospector" / "reports" / str(job_id) / "report.md"
     assert report_path.read_bytes() == b"# report\n"
     assert requests == [
-        ("GET", "/healthz"),
-        ("POST", "/scope"),
-        ("POST", "/jobs"),
-        ("GET", f"/jobs/{job_id}"),
-        ("GET", f"/jobs/{job_id}/events"),
-        ("GET", f"/jobs/{job_id}"),
-        ("GET", f"/jobs/{job_id}/report"),
+        ("GET", "/api/healthz"),
+        ("POST", "/api/scope"),
+        ("POST", "/api/jobs"),
+        ("GET", f"/api/jobs/{job_id}"),
+        ("GET", f"/api/jobs/{job_id}/events"),
+        ("GET", f"/api/jobs/{job_id}"),
+        ("GET", f"/api/jobs/{job_id}/report"),
     ]

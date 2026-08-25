@@ -130,21 +130,21 @@ def test_scope_job_and_sse_http_flow_uses_persisted_events() -> None:
     job_id: UUID | None = None
     try:
         with TestClient(create_app(services)) as client:
-            scope_response = client.post("/scope", json={"question": "Research this"})
+            scope_response = client.post("/api/scope", json={"question": "Research this"})
             assert scope_response.status_code == 200
             assert scope_response.json()["brief"]["question"] == brief.question
 
-            created = client.post("/jobs", json={"brief": brief.model_dump(mode="json")})
+            created = client.post("/api/jobs", json={"brief": brief.model_dump(mode="json")})
             assert created.status_code == 201
             job_id = UUID(created.json()["job_id"])
             assert created.json()["status"] == "running"
 
-            events = client.get(f"/jobs/{job_id}/events")
+            events = client.get(f"/api/jobs/{job_id}/events")
             assert events.status_code == 200
             assert "event: brief.confirmed" in events.text
             assert "event: job.stopped" in events.text
 
-            detail = client.get(f"/jobs/{job_id}")
+            detail = client.get(f"/api/jobs/{job_id}")
             assert detail.status_code == 200
             assert detail.json()["status"] == "completed"
             assert detail.json()["phase"] == "draft_rendered"

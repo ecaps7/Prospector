@@ -108,7 +108,7 @@ class ProspectorClient:
         return response
 
     def health(self) -> None:
-        self._request("GET", "/healthz")
+        self._request("GET", "/api/healthz")
 
     def scope(
         self,
@@ -127,11 +127,11 @@ class ProspectorClient:
         if clarification_question is not None:
             payload["clarification_question"] = clarification_question
             payload["clarification_answer"] = clarification_answer
-        response = self._request("POST", "/scope", json=payload)
+        response = self._request("POST", "/api/scope", json=payload)
         try:
             return ScopeOutcome.model_validate(response.json())
         except (ValueError, TypeError) as exc:
-            raise CliProtocolError("Invalid /scope response") from exc
+            raise CliProtocolError("Invalid /api/scope response") from exc
 
     def revise_scope(
         self,
@@ -144,7 +144,7 @@ class ProspectorClient:
     ) -> ResearchBrief:
         response = self._request(
             "POST",
-            "/scope/revise",
+            "/api/scope/revise",
             json={
                 "question": question,
                 "previous_brief": previous_brief.model_dump(mode="json"),
@@ -156,35 +156,35 @@ class ProspectorClient:
         try:
             return ScopeReviseResponse.model_validate(response.json()).brief
         except (ValueError, TypeError) as exc:
-            raise CliProtocolError("Invalid /scope/revise response") from exc
+            raise CliProtocolError("Invalid /api/scope/revise response") from exc
 
     def create_job(self, brief: ResearchBrief) -> JobCreateResponse:
         response = self._request(
             "POST",
-            "/jobs",
+            "/api/jobs",
             json={"brief": brief.model_dump(mode="json")},
         )
         try:
             return JobCreateResponse.model_validate(response.json())
         except (ValueError, TypeError) as exc:
-            raise CliProtocolError("Invalid /jobs response") from exc
+            raise CliProtocolError("Invalid /api/jobs response") from exc
 
     def get_job(self, job_id: UUID) -> JobDetail:
-        response = self._request("GET", f"/jobs/{job_id}")
+        response = self._request("GET", f"/api/jobs/{job_id}")
         try:
             return JobDetail.model_validate(response.json())
         except (ValueError, TypeError) as exc:
             raise CliProtocolError("Invalid job response") from exc
 
     def cancel_job(self, job_id: UUID) -> JobCancelResponse:
-        response = self._request("POST", f"/jobs/{job_id}/cancel")
+        response = self._request("POST", f"/api/jobs/{job_id}/cancel")
         try:
             return JobCancelResponse.model_validate(response.json())
         except (ValueError, TypeError) as exc:
             raise CliProtocolError("Invalid job cancellation response") from exc
 
     def list_jobs(self) -> list[JobListItem]:
-        response = self._request("GET", "/jobs")
+        response = self._request("GET", "/api/jobs")
         try:
             body = response.json()
             if not isinstance(body, list):
@@ -196,7 +196,7 @@ class ProspectorClient:
     def download_report(self, job_id: UUID, report_format: str = "md") -> bytes:
         return self._request(
             "GET",
-            f"/jobs/{job_id}/report",
+            f"/api/jobs/{job_id}/report",
             params={"format": report_format},
         ).content
 
@@ -213,7 +213,7 @@ class ProspectorClient:
         try:
             with self.http.stream(
                 "GET",
-                f"/jobs/{job_id}/events",
+                f"/api/jobs/{job_id}/events",
                 headers=headers,
                 timeout=STREAM_TIMEOUT,
             ) as response:

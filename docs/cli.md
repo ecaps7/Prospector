@@ -59,31 +59,33 @@ prospector
 FastAPI 单进程。代码位于 `src/prospector/runtime/entrypoints/server.py` + 新增 `src/prospector/api/` 模块（路由、请求/响应 schema）。研究图在服务端后台任务中执行（asyncio 任务经线程池包装现有同步 `graph.invoke`）。**一次只允许一个 job 处于运行态**——单用户本机串行足够；第二个提交排队并在响应中说明。
 
 ```text
-POST /scope                      # Scope 展开问题（同步，数十秒）
+POST /api/scope                      # Scope 展开问题（同步，数十秒）
   body: { question, effort, language, clarification_question?, clarification_answer? }
   resp: { kind: "clarify", clarification_question }
       | { kind: "brief_pending", brief: {...} }
 
-POST /scope/revise               # 对应 Brief 卡片的 [i]：一条修订指令改写一轮
+POST /api/scope/revise               # 对应 Brief 卡片的 [i]：一条修订指令改写一轮
   body: { question, previous_brief, revision_note, effort, language }
   resp: { brief }
 
-POST /jobs                       # 冻结 Brief 并启动研究
+POST /api/jobs                       # 冻结 Brief 并启动研究
   body: { brief }                # brief 由客户端提交；[e] 本地编辑后的结果也走这里
   resp: { job_id, brief_id }     # schema 校验失败返回 422
 
-POST /jobs/{id}/cancel           # queued 立即取消；running 请求协作式停止
+POST /api/jobs/{id}/cancel           # queued 立即取消；running 请求协作式停止
 
-GET  /jobs                       # job list
-GET  /jobs/{id}                  # job status 快照
-GET  /jobs/{id}/events           # SSE；支持 Last-Event-ID 从 PG 事件表回放
-GET  /jobs/{id}/report?format=md|json   # 服务端从对象存储代理返回报告字节流
-GET  /healthz                    # serve 启动自检 + CLI 连接探测
+GET  /api/jobs                       # job list
+GET  /api/jobs/{id}                  # job status 快照
+GET  /api/jobs/{id}/events           # SSE；支持 Last-Event-ID 从 PG 事件表回放
+GET  /api/jobs/{id}/report?format=md|json   # 服务端从对象存储代理返回报告字节流
+GET  /api/healthz                    # serve 启动自检 + CLI 连接探测
 ```
+
+业务路由统一挂在 `/api` 下，不保留根路径别名。浏览器客户端应与 API 同源（开发时由前端代理 `/api` 到 `127.0.0.1:7620`）；服务端不开放 CORS。
 
 关键决定：
 
-- **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/scope` 与 `/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
+- **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/api/scope` 与 `/api/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /api/jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
 - **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
 - **取消同样持久化**：queued Job 直接进入 `cancelled`；running Job 先进入 `cancelling`，在当前模型或工具调用结束后的安全边界停止，写入 `cancelled` 与唯一 `job.stopped`，服务重启不会恢复。
 - **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
@@ -97,13 +99,13 @@ GET  /healthz                    # serve 启动自检 + CLI 连接探测
 prospector
   → 显示服务连接状态与当前 effort/language
   → prompt 用户输入研究问题
-  → POST /scope（spinner："Scope 正在展开问题…"）
-  → 若 clarify：打印澄清问题，prompt 用户回答一次，带答案重新 /scope
+  → POST /api/scope（spinner："Scope 正在展开问题…"）
+  → 若 clarify：打印澄清问题，prompt 用户回答一次，带答案重新 /api/scope
   → Brief 卡片（CLI 本地渲染）：
-      [c] 确认      → POST /jobs
+      [c] 确认      → POST /api/jobs
       [e] 编辑      → $EDITOR 打开 Brief YAML；schema 校验失败打印字段级错误并
                       重开编辑器（临时文件保留，不丢弃编辑内容），通过后回到卡片
-      [i] 指令修订  → prompt 一条修订意向 → POST /scope/revise → 新 Brief 直接 POST /jobs
+      [i] 指令修订  → prompt 一条修订意向 → POST /api/scope/revise → 新 Brief 直接 POST /api/jobs
       [q] 放弃      → 退出，不创建 job
   → JOB_CREATED: <job_id>（始终打印，attach 中断也能找回）
   → 进入 attach
@@ -186,7 +188,7 @@ Rich Live 实现；`attach` 与根交互研究流程共用同一渲染组件。
 
 关键错误场景：
 
-- **服务端未启动**：所有命令先探测 `/healthz`，失败时给可执行提示（`服务端未运行，先执行: prospector serve`），不吐 connection traceback。
+- **服务端未启动**：所有命令先探测 `/api/healthz`，失败时给可执行提示（`服务端未运行，先执行: prospector serve`），不吐 connection traceback。
 - **SSE 断线**：attach 自动重连（指数退避，上限 30s），带 `Last-Event-ID` 续传；TUI 状态点变黄提示重连中。重连期间研究不受影响（事实源在 PG）。
 - **Worker 轮数**：每轮模型决策完成后写入 `task.round_advanced`，TUI 直接投影 `rounds_used/rounds_limit`，不使用工具调用数推算。
 - **交互中断恢复**：job_id 创建时立刻打印；任何后续失败（含 CLI 崩溃）都可 `job attach` 找回。
@@ -196,7 +198,7 @@ Rich Live 实现；`attach` 与根交互研究流程共用同一渲染组件。
 ## 7. 测试策略
 
 - **单测**：Brief 卡片状态机（c/e/i/q）、事件折叠 `JobView` 的逻辑、SSE 客户端重连/续传（mock 流）、退出码映射；TUI 渲染用 Rich console capture 做快照测试。
-- **集成**：FastAPI `TestClient` 覆盖 `/scope → /jobs → /events` 全链路（LLM mock）；一条 `live` 标记的端到端用真实 LLM 走通根交互流程与 `attach`。
+- **集成**：FastAPI `TestClient` 覆盖 `/api/scope → /api/jobs → /api/jobs/{id}/events` 全链路（LLM mock）；一条 `live` 标记的端到端用真实 LLM 走通根交互流程与 `attach`。
 - 现有 `prospector-local` 测试不动，保证开发入口回归安全。
 
 ---
@@ -205,7 +207,7 @@ Rich Live 实现；`attach` 与根交互研究流程共用同一渲染组件。
 
 各期均已交付：
 
-1. [x] `api/` 模块 + `serve`：/scope、/jobs、SSE、报告代理。
+1. [x] `api/` 模块 + `serve`：/api/scope、/api/jobs、SSE、报告代理。
 2. [x] `prospector` 持久交互 CLI + `--plain` 全流程。
 3. [x] Rich TUI（`JobView` 投影 + Live 面板）。
 4. [x] `job list/status`、`report show/export`、错误与真实 usage 闭环。
