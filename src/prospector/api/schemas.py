@@ -139,9 +139,15 @@ class JobDetail(JobListItem):
     report: ReportView | None
 
 
+class ValidationErrorDetail(BaseModel):
+    path: str
+    reason: str
+
+
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+    details: list[ValidationErrorDetail] | None = None
 
 
 class HealthResponse(BaseModel):

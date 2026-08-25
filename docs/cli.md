@@ -89,7 +89,7 @@ GET  /api/healthz                    # serve 启动自检 + CLI 连接探测
 - **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
 - **取消同样持久化**：queued Job 直接进入 `cancelled`；running Job 先进入 `cancelling`，在当前模型或工具调用结束后的安全边界停止，写入 `cancelled` 与唯一 `job.stopped`，服务重启不会恢复。
 - **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
-- **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`；CLI 按 `error_code` 决定退出码，不解析 message 文本。
+- **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`。请求校验失败额外带稳定的 `details: [{ path, reason }]`（字段路径 + 原因），供表单定位；`path` 为空表示请求级错误。CLI 按 `error_code` 决定退出码，不解析 message 文本。
 
 ---
 

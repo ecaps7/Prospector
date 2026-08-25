@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from prospector.api.app import ApiServices, create_app, parse_storage_uri
+from prospector.api.errors import validation_error_details
 from prospector.api.scheduler import JobScheduler
 from prospector.api.sse import encode_event, heartbeat
 from prospector.schemas.brief import ResearchBrief, ScopeOutcome
@@ -190,6 +191,16 @@ def test_sse_openapi_documents_event_envelope_and_reconnect() -> None:
     }
 
     schemas = spec["components"]["schemas"]
+    error = schemas["ErrorResponse"]
+    assert set(error["required"]) == {"error_code", "message"}
+    assert "details" in error["properties"]
+    detail = schemas["ValidationErrorDetail"]
+    assert set(detail["required"]) == {"path", "reason"}
+    assert "HTTPValidationError" not in schemas
+    scope_422 = spec["paths"]["/api/scope"]["post"]["responses"]["422"]
+    assert scope_422["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
     assert schemas["SseEvent"]["discriminator"]["propertyName"] == "event_type"
     assert "job.stopped" in schemas["SseEvent"]["discriminator"]["mapping"]
     stopped = schemas["JobStoppedEvent"]
@@ -206,6 +217,39 @@ def test_sse_openapi_documents_event_envelope_and_reconnect() -> None:
     assert "report_json_ref" in payload["properties"]
 
 
+def test_validation_error_details_use_field_paths() -> None:
+    assert validation_error_details(
+        [
+            {
+                "loc": ("body", "question"),
+                "msg": "Value error, must not be blank",
+                "ctx": {"error": ValueError("must not be blank")},
+            },
+            {
+                "loc": ("body", "brief", "user_constraints", "regions"),
+                "msg": "List should have at most 12 items after validation, not 13",
+            },
+            {
+                "loc": ("body",),
+                "msg": (
+                    "Value error, clarification_question and clarification_answer "
+                    "must be provided together"
+                ),
+            },
+        ]
+    ) == [
+        {"path": "question", "reason": "must not be blank"},
+        {
+            "path": "brief.user_constraints.regions",
+            "reason": "List should have at most 12 items after validation, not 13",
+        },
+        {
+            "path": "",
+            "reason": "clarification_question and clarification_answer must be provided together",
+        },
+    ]
+
+
 def test_scope_validation_and_error_body_are_stable() -> None:
     repository = FakeRepository()
     with TestClient(create_app(_services(repository), validate_startup=False)) as client:
@@ -217,11 +261,54 @@ def test_scope_validation_and_error_body_are_stable() -> None:
         assert response.json() == {
             "error_code": "validation_error",
             "message": "request validation failed",
+            "details": [
+                {
+                    "path": "",
+                    "reason": (
+                        "clarification_question and clarification_answer must be provided together"
+                    ),
+                }
+            ],
         }
 
         response = client.post("/api/scope", json={"question": "   "})
         assert response.status_code == 422
-        assert response.json()["error_code"] == "validation_error"
+        assert response.json() == {
+            "error_code": "validation_error",
+            "message": "request validation failed",
+            "details": [{"path": "question", "reason": "must not be blank"}],
+        }
+
+        response = client.post("/api/scope", json={"question": "Question", "language": "  "})
+        assert response.status_code == 422
+        assert response.json()["details"] == [{"path": "language", "reason": "must not be blank"}]
+
+        response = client.post(
+            "/api/jobs",
+            json={"brief": {"question": "  ", "brief_text": "Detailed research space"}},
+        )
+        assert response.status_code == 422
+        assert response.json()["details"] == [
+            {"path": "brief.question", "reason": "must not be blank"}
+        ]
+
+        response = client.post(
+            "/api/jobs",
+            json={
+                "brief": {
+                    "question": "Question",
+                    "brief_text": "Detailed research space",
+                    "user_constraints": {"regions": [str(index) for index in range(13)]},
+                }
+            },
+        )
+        assert response.status_code == 422
+        assert response.json()["details"] == [
+            {
+                "path": "brief.user_constraints.regions",
+                "reason": "List should have at most 12 items after validation, not 13",
+            }
+        ]
 
         response = client.post("/api/scope", json={"question": "Question"})
         assert response.status_code == 200

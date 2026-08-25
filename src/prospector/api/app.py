@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from prospector.agents.llm import LlmNotConfiguredError, require_llm_settings
 from prospector.agents.scope import run_scope, write_research_brief
-from prospector.api.errors import ApiError
+from prospector.api.errors import ApiError, validation_error_details
 from prospector.api.scheduler import JobScheduler
 from prospector.api.schemas import (
     ErrorResponse,
@@ -110,6 +110,30 @@ def _publish_sse_as_event_stream(schema: dict[str, Any]) -> None:
         content["text/event-stream"] = json_body
 
 
+def _publish_validation_error_contract(schema: dict[str, Any]) -> None:
+    """Request validation uses the same error envelope as other API failures."""
+    error_ref = {"$ref": "#/components/schemas/ErrorResponse"}
+    for path_item in schema.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            responses = operation.get("responses")
+            if not isinstance(responses, dict):
+                continue
+            response_422 = responses.get("422")
+            if not isinstance(response_422, dict):
+                continue
+            content = response_422.setdefault("content", {})
+            application_json = content.setdefault("application/json", {})
+            if isinstance(application_json, dict):
+                application_json["schema"] = error_ref
+    components = schema.get("components", {}).get("schemas", {})
+    for unused in ("HTTPValidationError", "ValidationError"):
+        components.pop(unused, None)
+
+
 def create_app(
     services: ApiServices | None = None,
     *,
@@ -145,11 +169,15 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
-        _request: Request, _exc: RequestValidationError
+        _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         return JSONResponse(
             status_code=422,
-            content={"error_code": "validation_error", "message": "request validation failed"},
+            content={
+                "error_code": "validation_error",
+                "message": "request validation failed",
+                "details": validation_error_details(exc.errors()),
+            },
         )
 
     @app.exception_handler(Exception)
@@ -374,6 +402,7 @@ def create_app(
     def openapi() -> dict[str, Any]:
         schema = original_openapi()
         _publish_sse_as_event_stream(schema)
+        _publish_validation_error_contract(schema)
         return schema
 
     app.openapi = openapi  # type: ignore[method-assign]
