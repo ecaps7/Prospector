@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { ExcerptView, ReportSource } from "../api/types";
+import type { ExcerptView, ReportSource } from "../../api/types";
 
 type Props = {
   open: boolean;

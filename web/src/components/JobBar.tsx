@@ -1,17 +1,11 @@
 import { NavLink } from "react-router-dom";
+import { StatusDot } from "./ui/StatusDot";
 
 type Props = {
   jobId: string;
   question: string;
   status: string;
 };
-
-function statusDot(status: string): string {
-  if (status === "completed") return "ok";
-  if (status === "failed") return "danger";
-  if (status === "cancelled" || status === "cancelling") return "warn";
-  return "dim";
-}
 
 export function JobBar({ jobId, question, status }: Props) {
   return (
@@ -22,7 +16,7 @@ export function JobBar({ jobId, question, status }: Props) {
         </NavLink>
         <div className="jobid">
           <span className="st">
-            <span className={`dot ${statusDot(status)}`} />
+            <StatusDot status={status} />
           </span>
           <span className="q">{question}</span>
         </div>

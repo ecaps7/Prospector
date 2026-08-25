@@ -23,6 +23,7 @@ export default function App() {
   const location = useLocation();
   const reportMatch = useMatch("/jobs/:jobId/report");
   const monitorMatch = useMatch("/jobs/:jobId");
+  const isAskHome = location.pathname === "/";
   const jobId = reportMatch?.params.jobId ?? monitorMatch?.params.jobId;
   const shownMeta = jobId && jobMeta?.jobId === jobId ? jobMeta : null;
 
@@ -84,10 +85,12 @@ export default function App() {
         <JobBar jobId={jobId} question={shownMeta.question} status={shownMeta.status} />
       ) : null}
       <Outlet />
-      <footer className="pagefoot">
-        <span>Prospector · 本机单用户</span>
-        <span>FastAPI + SSE · 127.0.0.1:7620</span>
-      </footer>
+      {isAskHome ? null : (
+        <footer className="pagefoot">
+          <span>Prospector · 本机单用户</span>
+          <span>FastAPI + SSE · 127.0.0.1:7620</span>
+        </footer>
+      )}
     </ToastProvider>
   );
 }

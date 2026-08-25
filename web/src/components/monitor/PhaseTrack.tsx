@@ -1,4 +1,4 @@
-import { PHASE_LABELS } from "../state/jobView";
+import { PHASE_LABELS } from "../../state/jobView";
 
 type Props = {
   phaseIndex: number;

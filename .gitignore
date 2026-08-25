@@ -16,3 +16,4 @@ htmlcov/
 .worktrees/
 web/node_modules/
 web/*.local
+.claude
