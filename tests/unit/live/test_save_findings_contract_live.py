@@ -13,7 +13,12 @@ from prospector.agents.llm import (
     mid_model,
     require_llm_settings,
 )
-from prospector.agents.research_worker import WORKER_ACTION_RESPONSE_FORMAT, WorkerAction
+from prospector.agents.prompts.research_worker import worker_system_prompt
+from prospector.agents.research_worker import (
+    WORKER_ACTION_RESPONSE_FORMAT,
+    WORKER_ACTION_SCHEMA,
+    WorkerAction,
+)
 from prospector.config import clear_settings_cache, get_settings
 
 pytestmark = pytest.mark.live
@@ -45,6 +50,10 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
         temperature=0.0,
         messages=[
             {
+                "role": "system",
+                "content": worker_system_prompt(action_schema=WORKER_ACTION_SCHEMA),
+            },
+            {
                 "role": "user",
                 "content": (
                     "输出一个 save 动作 JSON，保存两条断言。"
@@ -52,7 +61,7 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
                     "第二条使用 source_ref s1:h2，断言为第二条事实；标签均为空。"
                     "searches 必须为空数组，finish 必须为 null。只输出 JSON。"
                 ),
-            }
+            },
         ],
         response_format=WORKER_ACTION_RESPONSE_FORMAT,
         extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
