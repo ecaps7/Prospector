@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prospector · 深度研究</title>
+    <script>
+      try {
+        const theme = localStorage.getItem("prospector-theme");
+        if (theme === "dark" || theme === "light") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch {
+        /* keep the default light theme */
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-jv7NQkLa.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-IFHVLmGd.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

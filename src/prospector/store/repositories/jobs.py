@@ -584,6 +584,42 @@ class JobRepository:
             ).scalar_one_or_none()
         return None if value is None else int(value)
 
+    def list_excerpts(self, job_id: UUID, excerpt_ids: list[UUID]) -> list[dict[str, Any]] | None:
+        """Return excerpts that belong to *job_id*. Missing or foreign ids yield None."""
+        unique_ids = list(dict.fromkeys(excerpt_ids))
+        if not unique_ids:
+            return []
+        if not self.job_exists(job_id):
+            return None
+        placeholders = ", ".join(f":id_{index}" for index in range(len(unique_ids)))
+        params: dict[str, Any] = {"job_id": job_id}
+        for index, excerpt_id in enumerate(unique_ids):
+            params[f"id_{index}"] = excerpt_id
+        with self.engine.connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        f"""
+                        SELECT e.id AS excerpt_id, e.text, e.doc_version, e.locator,
+                               d.source_uri,
+                               d.source_meta->>'title' AS title,
+                               d.source_meta->>'author' AS author,
+                               d.source_meta->>'published_at' AS published_at
+                        FROM app.excerpts e
+                        JOIN app.documents d ON d.id = e.doc_id
+                        WHERE e.job_id=:job_id AND e.id IN ({placeholders})
+                        """
+                    ),
+                    params,
+                ).mappings()
+            ]
+        found = {UUID(str(row["excerpt_id"])) for row in rows}
+        if any(excerpt_id not in found for excerpt_id in unique_ids):
+            return None
+        by_id = {UUID(str(row["excerpt_id"])): row for row in rows}
+        return [by_id[excerpt_id] for excerpt_id in unique_ids]
+
     def report_ref(self, job_id: UUID, report_format: Literal["md", "json"]) -> str | None:
         column = "markdown_ref" if report_format == "md" else "json_ref"
         with self.engine.connect() as conn:
