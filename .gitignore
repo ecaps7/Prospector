@@ -9,8 +9,10 @@ __pycache__/
 .mypy_cache/
 .basedpyright/
 *.egg-info/
-dist/
+/dist/
 build/
 .coverage
 htmlcov/
 .worktrees/
+web/node_modules/
+web/*.local

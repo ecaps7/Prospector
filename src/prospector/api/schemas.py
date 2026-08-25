@@ -139,6 +139,17 @@ class JobDetail(JobListItem):
     report: ReportView | None
 
 
+class ExcerptView(BaseModel):
+    excerpt_id: UUID
+    text: str
+    source_uri: str
+    document_version: int
+    title: str | None
+    author: str | None
+    published_at: str | None
+    locator: dict[str, Any] = Field(default_factory=dict)
+
+
 class ValidationErrorDetail(BaseModel):
     path: str
     reason: str

@@ -47,11 +47,23 @@ uv run --env-file .env prospector-local ask "一个需要多方查证的问题" 
 uv run --env-file .env prospector-local job events <job-id> --follow
 ```
 
-服务端模式提供结构化产物（报告 JSON、用量明细）：
+服务端模式提供结构化产物（报告 JSON、用量明细），并带一个同源 Web 界面：
 
 ```bash
-uv run --env-file .env prospector serve                      # 终端 1
+uv run --env-file .env prospector serve                      # 终端 1，打开 http://127.0.0.1:7620/
 uv run --env-file .env prospector --effort standard          # 终端 2，交互提问
+```
+
+前端开发（Vite 代理 `/api` 到 7620）：
+
+```bash
+cd web && npm ci && npm run dev
+```
+
+修改界面后重新构建并交给 `prospector serve` 托管：
+
+```bash
+cd web && npm ci && npm run build
 ```
 
 导出产物：
@@ -163,6 +175,7 @@ uv run --env-file .env python eval/run_report_verifier.py
 src/prospector/
 ├── agents/          # 各个智能体（规划、执行、两个核验器、撰写）
 │   └── prompts/     # 提示词模板
+├── api/             # FastAPI：REST / SSE，并托管 web/dist
 ├── deterministic/   # 不经过模型的确定性逻辑（预算注入、引用渲染、补丁应用）
 ├── flow/            # LangGraph 状态图与状态定义
 ├── obs/             # 结构化日志与链路追踪
@@ -171,6 +184,7 @@ src/prospector/
 ├── schemas/         # 数据契约（提纲、计划、证据、报告等）
 ├── store/           # 存储层（PostgreSQL、对象存储、断点）
 └── tools/           # 工具（检索、抓取、落证）
+web/                 # React + Vite SPA（提问 / 监控 / 报告 / 任务列表）
 ```
 
 技术选型：Python 3.13、LangGraph（+ PostgreSQL 断点）、PostgreSQL 18、MinIO、Pydantic v2、SQLAlchemy + psycopg、Typer、structlog、OpenTelemetry。
