@@ -788,8 +788,6 @@ def _writer_node(services: ResearchGraphServices):
         verifier_run_id = UUID(raw_run_id)
         if services.writer is None:
             raise RuntimeError("Report Writer services are not configured")
-        services.repository.record_phase_changed(job_id, "writing")
-
         # Set as soon as a revision row exists so a contract failure can still park the
         # model's actual answer on it. Without that artifact a rejection can only be
         # reconstructed by elimination from the previous revision.
@@ -1157,6 +1155,7 @@ def _render_node(services: ResearchGraphServices):
 
         report_id = UUID(str(stored["report_id"]))
         revision = int(stored["revision"])
+        services.repository.record_phase_changed(job_id, "rendering", revision=revision)
         draft = stored["draft"]
         assert isinstance(draft, ReportDraft)
         snapshot = services.repository.build_writer_snapshot(job_id, UUID(raw_run_id))

@@ -222,6 +222,9 @@ class ResearchTimelineRenderer:
         if event_type == "job.phase_changed":
             return self._render_phase(payload)
 
+        if event_type == "planner.started":
+            return [f"[轮 {int(payload['decision_round'])}] Planner 开始制定计划"]
+
         if event_type == "planner.decided":
             return self._render_planner_decision(payload)
 
@@ -401,6 +404,8 @@ class ResearchTimelineRenderer:
             return ["[成文] 逐句验证全部通过"]
         if phase == "revisions_exhausted":
             return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"]
+        if phase == "rendering":
+            return ["[成文] 正在渲染最终报告"]
         if phase == "draft_rendered":
             return ["[成文] 报告渲染完成"]
         if phase == "failed":

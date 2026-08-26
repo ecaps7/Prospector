@@ -870,12 +870,24 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
 
         events = repository.list_events(job_id)
         event_types = [row["event_type"] for row in events]
+        phases = [
+            event["payload"].get("phase")
+            for event in events
+            if event["event_type"] == "job.phase_changed"
+        ]
         tool_events = [row for row in events if row["event_type"] == "task.tool_used"]
         assert "planner.rejected" in event_types
         assert event_types.count("task.started") == 2
         assert event_types.count("task.evidence_saved") == 2
         assert event_types.count("task.finished") == 2
         assert event_types[-1] == "job.phase_changed"
+        assert phases[-5:] == [
+            "writing",
+            "verifying",
+            "verified",
+            "rendering",
+            "draft_rendered",
+        ], ">".join(str(phase) for phase in phases)
         assert all(event["payload"].get("tool_call_id") for event in tool_events)
         verifier_event = next(
             event for event in events if event["event_type"] == "verifier.completed"
@@ -968,9 +980,11 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert int(report_row["statement_count"]) == 4
         assert str(report_row["markdown_ref"]).endswith("/report.md")
         assert str(report_row["json_ref"]).endswith("/report.json")
-        assert "2026 年公开了可核对事实" not in json.dumps(
-            report_row["full_prompt"], ensure_ascii=False
-        )
+        # The Writer reads the Excerpt it will cite; the Document body it came from
+        # still never reaches any Prospector LLM context (D12).
+        writer_prompt = json.dumps(report_row["full_prompt"], ensure_ascii=False)
+        assert "2026 年公开了可核对事实，统计口径为年度。" in writer_prompt
+        assert "另一段记录了可能的相反信号与适用边界。" not in writer_prompt
         assert all(str(row["task_id"]) == row["produced_by"]["task_id"] for row in assertions)
         assert "document_view" not in json.dumps(prompts, ensure_ascii=False, default=str)
         assert "你的输出不合法" in json.dumps(
@@ -1236,8 +1250,18 @@ def test_planner_replay_reuses_logged_decision_and_versioned_plan() -> None:
                 ),
                 {"job_id": job_id},
             ).scalar_one()
+            started_events = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM app.events
+                    WHERE job_id=:job_id AND event_type='planner.started'
+                    """
+                ),
+                {"job_id": job_id},
+            ).scalar_one()
         assert plan_count == 1
         assert decision_events == 1
+        assert started_events == 1
     finally:
         with repository.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
