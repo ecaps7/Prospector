@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { KeyboardEvent, RefObject } from "react";
 import type { EffortLevel } from "../../api/types";
 import { Segmented } from "../Segmented";
 import { AutoGrowTextarea } from "../ui/AutoGrowTextarea";
@@ -39,6 +39,12 @@ export function HeroComposer({
   onSubmit,
   inputRef,
 }: Props) {
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    onSubmit();
+  };
+
   return (
     <div className="card composer">
       <label className="sr-only" htmlFor="ask-composer">
@@ -51,6 +57,7 @@ export function HeroComposer({
         resetWhenEmpty
         value={draft}
         onChange={(event) => onDraftChange(event.target.value)}
+        onKeyDown={onKeyDown}
         placeholder="提一个需要深度研究的问题"
       />
       <div className="composer-bar">

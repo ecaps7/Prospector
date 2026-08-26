@@ -4,7 +4,7 @@ export function ChatMessage({ from, children }: { from: "user" | "scope"; childr
   const user = from === "user";
   return (
     <div className={user ? "msg user" : "msg"}>
-      <span className="who">{user ? "我" : "S"}</span>
+      <span className="who">{user ? "我" : "P"}</span>
       <div className="bubble">{children}</div>
     </div>
   );

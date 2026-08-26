@@ -15,6 +15,8 @@ function readTheme(): "light" | "dark" {
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(readTheme);
   const [serverOk, setServerOk] = useState<boolean | null>(null);
+  // Bumped by the "重试" affordance so the health effect re-runs and pings immediately.
+  const [healthNonce, setHealthNonce] = useState(0);
   const [jobMeta, setJobMeta] = useState<{
     jobId: string;
     question: string;
@@ -26,11 +28,29 @@ export default function App() {
   const isAskHome = location.pathname === "/";
   const jobId = reportMatch?.params.jobId ?? monitorMatch?.params.jobId;
   const shownMeta = jobId && jobMeta?.jobId === jobId ? jobMeta : null;
+  const hasJobBar = Boolean(shownMeta && jobId);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  // The sticky bars cover the top of the viewport, so anchor jumps (report TOC) and
+  // sticky offsets have to know how tall they actually are. Measuring beats hard-coding:
+  // the job bar comes and goes, and its content wraps on narrow screens.
+  useEffect(() => {
+    const bars = [".topbar", ".jobbar"]
+      .map((selector) => document.querySelector(selector))
+      .filter((node): node is HTMLElement => node instanceof HTMLElement);
+    const measure = () => {
+      const height = bars.reduce((sum, bar) => sum + bar.offsetHeight, 0);
+      document.documentElement.style.setProperty("--chrome-h", `${height}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const bar of bars) observer.observe(bar);
+    return () => observer.disconnect();
+  }, [hasJobBar]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,7 +70,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [healthNonce]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -79,6 +99,7 @@ export default function App() {
       <TopBar
         theme={theme}
         serverOk={serverOk}
+        onRetryServer={() => setHealthNonce((n) => n + 1)}
         onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
       />
       {shownMeta && jobId ? (
@@ -88,7 +109,7 @@ export default function App() {
       {isAskHome ? null : (
         <footer className="pagefoot">
           <span>Prospector · 本机单用户</span>
-          <span>FastAPI + SSE · 127.0.0.1:7620</span>
+          {import.meta.env.DEV ? <span>{window.location.host}</span> : null}
         </footer>
       )}
     </ToastProvider>

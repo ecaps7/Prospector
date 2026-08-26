@@ -4,10 +4,10 @@ type Props = {
   theme: "light" | "dark";
   onToggleTheme: () => void;
   serverOk: boolean | null;
+  onRetryServer: () => void;
 };
 
-export function TopBar({ theme, onToggleTheme, serverOk }: Props) {
-  const pillClass = serverOk === true ? "ok" : serverOk === false ? "down" : "";
+export function TopBar({ theme, onToggleTheme, serverOk, onRetryServer }: Props) {
   return (
     <header className="topbar">
       <div className="topbar-inner">
@@ -28,10 +28,15 @@ export function TopBar({ theme, onToggleTheme, serverOk }: Props) {
           </NavLink>
         </nav>
         <div className="top-right">
-          <span className={`server-pill ${pillClass}`}>
-            <i />
-            {serverOk === false ? "服务不可用" : "127.0.0.1:7620"}
-          </span>
+          {serverOk === false ? (
+            <span className="server-alert" role="status">
+              <i />
+              后端未连接
+              <button type="button" onClick={onRetryServer}>
+                重试
+              </button>
+            </span>
+          ) : null}
           <button
             className="theme-btn"
             type="button"

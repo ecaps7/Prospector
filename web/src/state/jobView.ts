@@ -1,4 +1,5 @@
 import type { JobDetail, JobTaskView, ServerEvent, UsageView } from "../api/types";
+import { PHASE_STEPS } from "../lib/labels";
 import { renderEvent, type TimelineContext, type TimelineEntry } from "./timeline";
 
 export type ViewTask = {
@@ -56,7 +57,7 @@ const PHASE_INDEX: Record<string, number> = {
   cancelled: 0,
 };
 
-export const PHASE_LABELS = ["Brief", "规划", "搜集", "验证", "成文", "句级验证", "渲染"] as const;
+export const PHASE_LABELS = PHASE_STEPS;
 
 export function phaseIndex(phase: string): number {
   return PHASE_INDEX[phase] ?? 0;
@@ -292,6 +293,19 @@ export function totalToolCalls(state: JobViewState): number {
 
 export function runningTasks(state: JobViewState): number {
   return state.tasks.filter((task) => task.status === "running").length;
+}
+
+/**
+ * True once the job can no longer change on its own. The elapsed clock freezes here,
+ * and the monitor page stops ticking — a finished job has nothing left to animate.
+ */
+export function isFinished(state: JobViewState): boolean {
+  return (
+    state.stopped ||
+    state.status === "completed" ||
+    state.status === "failed" ||
+    state.status === "cancelled"
+  );
 }
 
 export function elapsedSeconds(state: JobViewState, now = Date.now()): number {

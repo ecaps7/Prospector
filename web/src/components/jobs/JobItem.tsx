@@ -1,20 +1,16 @@
 import { Link } from "react-router-dom";
 import type { JobListItem } from "../../api/types";
 import { fmtDateTime } from "../../lib/format";
+import { effortLabel, jobStatusLabel } from "../../lib/labels";
 import { StatusDot } from "../ui/StatusDot";
 import { Tag, type TagTone } from "../ui/Tag";
 
 function statusTag(job: JobListItem): { tone: TagTone; label: string } {
-  if (job.status === "completed") {
-    if (job.outcome === "partial") return { tone: "warn", label: "partial" };
-    if (job.outcome === "verified" || job.outcome === "draft_rendered") {
-      return { tone: "ok", label: job.outcome };
-    }
-    return { tone: "ok", label: job.status };
-  }
-  if (job.status === "failed") return { tone: "danger", label: "failed" };
-  if (job.status === "cancelled") return { tone: "warn", label: "cancelled" };
-  return { tone: "neutral", label: job.status };
+  const label = jobStatusLabel(job.status, job.outcome);
+  if (job.status === "completed") return { tone: job.outcome === "partial" ? "warn" : "ok", label };
+  if (job.status === "failed") return { tone: "danger", label };
+  if (job.status === "cancelled") return { tone: "warn", label };
+  return { tone: "neutral", label };
 }
 
 export function JobItem({ job }: { job: JobListItem }) {
@@ -30,7 +26,7 @@ export function JobItem({ job }: { job: JobListItem }) {
         <div className="q">{job.question || "（未命名研究）"}</div>
         <div className="sub">
           <Tag tone={tag.tone}>{tag.label}</Tag>
-          {job.effort ? <span>{job.effort}</span> : null}
+          {job.effort ? <span>{effortLabel(job.effort)}</span> : null}
           <span>{fmtDateTime(job.created_at)}</span>
         </div>
       </div>

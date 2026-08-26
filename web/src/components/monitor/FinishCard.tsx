@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { fmtClock, fmtNum } from "../../lib/format";
+import { errorLabel, jobStatusLabel, outcomeLabel, phaseLabel } from "../../lib/labels";
 
 type Props = {
   status: string;
@@ -33,22 +34,22 @@ export function FinishCard({
         {completed
           ? `研究完成 · ${fmtClock(elapsed)}`
           : failed
-            ? `研究失败${errorCode ? ` · ${errorCode}` : ""}`
+            ? `研究失败${errorCode ? ` · ${errorLabel(errorCode)}` : ""}`
             : "任务已取消"}
       </h3>
       <div className="finish-rows">
         <div className="item">
           <div className="k">阶段</div>
-          <div className="v">{phase}</div>
+          <div className="v">{phaseLabel(phase)}</div>
         </div>
         <div className="item">
           <div className="k">结果</div>
-          <div className="v">{outcome ?? status}</div>
+          <div className="v">{outcomeLabel(outcome) || jobStatusLabel(status)}</div>
         </div>
         <div className="item">
           <div className="k">用量</div>
           <div className="v">
-            {fmtNum(tokens)} token · {tools} 次工具
+            {fmtNum(tokens)} Token · {tools} 次工具调用
           </div>
         </div>
       </div>

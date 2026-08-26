@@ -8,6 +8,7 @@ import { ReportToc, type TocItem } from "../components/report/ReportToc";
 import { SourceList } from "../components/report/SourceList";
 import { StatementParagraphs } from "../components/report/StatementParagraphs";
 import { ErrorView, LoadingView } from "../components/ui/Status";
+import { apiErrorLabel } from "../lib/labels";
 
 function slug(index: number, title: string): string {
   return `sec-${index}-${title.slice(0, 12)}`;
@@ -17,6 +18,7 @@ export function ReportPage() {
   const { jobId } = useParams();
   const [report, setReport] = useState<ReportJson | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [active, setActive] = useState<string>("");
   const [drawer, setDrawer] = useState<{ source: ReportSource; excerpts: ExcerptView[] } | null>(null);
   const [loadingExcerpt, setLoadingExcerpt] = useState(false);
@@ -35,13 +37,13 @@ export function ReportPage() {
         if (err instanceof ApiError && err.errorCode === "report_not_ready") {
           setError("报告尚未就绪。研究完成后可在此阅读。");
         } else {
-          setError(err instanceof ApiError ? err.message : "无法加载报告");
+          setError(apiErrorLabel(err, "无法加载报告"));
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [jobId]);
+  }, [jobId, reloadKey]);
 
   const toc = useMemo<TocItem[]>(() => {
     if (!report) return [];
@@ -56,10 +58,15 @@ export function ReportPage() {
 
   useEffect(() => {
     const onScroll = () => {
+      // A heading counts as "the one you're reading" once it passes under the sticky
+      // bars — the same line the TOC scrolls headings to, so highlight and jump agree.
+      const chrome =
+        parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chrome-h")) || 52;
+      const readingLine = chrome + 24;
       let current = toc[0]?.id ?? "";
       for (const item of toc) {
         const el = document.getElementById(item.id);
-        if (el && el.getBoundingClientRect().top < 120) current = item.id;
+        if (el && el.getBoundingClientRect().top < readingLine) current = item.id;
       }
       setActive(current);
     };
@@ -77,13 +84,23 @@ export function ReportPage() {
       const excerpts = source.excerpt_ids.length ? await api.listExcerpts(jobId, source.excerpt_ids) : [];
       setDrawer({ source, excerpts });
     } catch (err) {
-      setExcerptError(err instanceof ApiError ? err.message : "无法读取摘录");
+      setExcerptError(apiErrorLabel(err, "无法读取摘录"));
     } finally {
       setLoadingExcerpt(false);
     }
   };
 
-  if (error) return <ErrorView message={error} tone="muted" />;
+  if (error)
+    return (
+      <ErrorView
+        message={error}
+        tone="muted"
+        onRetry={() => {
+          setError(null);
+          setReloadKey((key) => key + 1);
+        }}
+      />
+    );
   if (!report) return <LoadingView>正在加载报告…</LoadingView>;
 
   const failed = new Set(report.failed_statement_ids ?? []);
@@ -102,7 +119,6 @@ export function ReportPage() {
     <section className="view">
       <ReportHead
         title={report.draft.title}
-        verificationStatus={report.verification_status}
         verified={verified}
         statementCount={statementCount}
         failedCount={failed.size}

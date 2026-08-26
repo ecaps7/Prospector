@@ -1,6 +1,8 @@
+import { memo } from "react";
 import type { TimelineEntry } from "../../state/timeline";
 
-export function TimelinePanel({ rows }: { rows: TimelineEntry[] }) {
+/** Memoised: `rows` only gets a new identity when an event actually lands. */
+export const TimelinePanel = memo(function TimelinePanel({ rows }: { rows: TimelineEntry[] }) {
   return (
     <div className="card timeline-panel">
       <div className="panel-title">事件时间线</div>
@@ -16,4 +18,4 @@ export function TimelinePanel({ rows }: { rows: TimelineEntry[] }) {
       </div>
     </div>
   );
-}
+});

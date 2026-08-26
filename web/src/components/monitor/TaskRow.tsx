@@ -1,20 +1,7 @@
+import { modeLabel, stageLabel } from "../../lib/labels";
 import type { ViewTask } from "../../state/jobView";
 import { Meter } from "../ui/Meter";
 import { Tag } from "../ui/Tag";
-
-const STAGE_LABEL: Record<string, string> = {
-  scout: "scout",
-  deep_dive: "deep_dive",
-  verify: "verify",
-};
-
-const MODE_LABEL: Record<string, string> = {
-  factual: "事实核验",
-  comparison: "对比",
-  counterargument: "反证",
-  risk_scan: "风险扫描",
-  timeline: "时间线",
-};
 
 export function TaskRow({ task, index }: { task: ViewTask; index: number }) {
   const rowClass = task.status === "running" ? "running" : task.status === "pending" ? "queued" : "";
@@ -24,8 +11,8 @@ export function TaskRow({ task, index }: { task: ViewTask; index: number }) {
       <div className="task-main">
         <div className="task-q">{task.question}</div>
         <div className="task-meta">
-          <Tag tone="neutral">{STAGE_LABEL[task.researchStage] ?? task.researchStage}</Tag>
-          <Tag tone="neutral">{MODE_LABEL[task.researchMode] ?? task.researchMode}</Tag>
+          <Tag tone="neutral">{stageLabel(task.researchStage)}</Tag>
+          <Tag tone="neutral">{modeLabel(task.researchMode)}</Tag>
         </div>
       </div>
       {task.status === "done" ? (

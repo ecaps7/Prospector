@@ -47,13 +47,13 @@ export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose
           {error ? <p className="form-error">{error}</p> : null}
           {excerpts.map((excerpt) => (
             <div key={excerpt.excerpt_id} className="ev-field">
-              <div className="k">存档摘录 · EXCERPT</div>
+              <div className="k">原文摘录</div>
               <div className="ev-excerpt">{excerpt.text}</div>
             </div>
           ))}
           {source ? (
             <div className="ev-field">
-              <div className="k">溯源 · PROVENANCE</div>
+              <div className="k">来源信息</div>
               <div className="ev-meta">
                 <div className="row">
                   <span className="k">来源地址</span>
@@ -65,7 +65,7 @@ export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose
                 </div>
                 <div className="row">
                   <span className="k">快照版本</span>
-                  <span className="v mono">document_version = {source.document_version}</span>
+                  <span className="v">第 {source.document_version} 版</span>
                 </div>
                 {source.author ? (
                   <div className="row">

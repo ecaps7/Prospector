@@ -28,11 +28,28 @@ export function LoadingView({ children }: { children: ReactNode }) {
   );
 }
 
-/** Whole-page failure state. `muted` is for expected absences, not errors. */
-export function ErrorView({ message, tone = "error" }: { message: string; tone?: "error" | "muted" }) {
+/**
+ * Whole-page failure state. `muted` is for expected absences, not errors.
+ * Pass `onRetry` whenever the failure might not repeat — a dead end with no way
+ * forward leaves reloading the browser as the user's only move.
+ */
+export function ErrorView({
+  message,
+  tone = "error",
+  onRetry,
+}: {
+  message: string;
+  tone?: "error" | "muted";
+  onRetry?: () => void;
+}) {
   return (
     <section className="view">
       <p className={tone === "muted" ? "muted" : "form-error"}>{message}</p>
+      {onRetry ? (
+        <button className="btn ghost sm" type="button" onClick={onRetry}>
+          重试
+        </button>
+      ) : null}
     </section>
   );
 }

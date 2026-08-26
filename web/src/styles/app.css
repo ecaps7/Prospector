@@ -22,8 +22,9 @@
   --surface: var(--seed-surface);
   --surface-2: color-mix(in srgb, var(--seed-surface) 94%, var(--seed-fg));
   --text: var(--seed-fg);
-  --text-2: color-mix(in srgb, var(--seed-fg) 62%, var(--seed-bg));
-  --text-3: color-mix(in srgb, var(--seed-fg) 44%, var(--seed-bg));
+  /* 三档文本层级都要在 --bg / --surface 上过 WCAG AA 4.5:1（最小 6.81 / 4.60） */
+  --text-2: color-mix(in srgb, var(--seed-fg) 74%, var(--seed-bg));
+  --text-3: color-mix(in srgb, var(--seed-fg) 62%, var(--seed-bg));
   --border: color-mix(in srgb, var(--seed-fg) 10%, transparent);
   --border-strong: color-mix(in srgb, var(--seed-fg) 20%, transparent);
   --primary: var(--seed-primary);
@@ -36,15 +37,51 @@
   --danger: #d70015;
   --replan: #b31c74;
   --info: #5e6ad2;
-  --r-card: var(--seed-radius);
-  --r-ctrl: 10px;
+  /* Radius scale. Nested corners are derived, never picked:
+     inner radius = outer radius - padding. */
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: var(--seed-radius);
+  --r-input: 24px;
+  /* Dock 的输入框只有一行高，--r-input 会把它压成药丸；这里降一档，
+     让它读起来仍是圆角矩形，和气泡的 --r-md 是同一种形状语言。 */
+  --r-dock: 18px;
+  --r-pill: 980px;
+  /* Type scale. --fs-lg is the input floor: iOS Safari zooms the page when a
+     focused field is under 16px. */
+  --fs-meta: 12px;
+  --fs-ui: 13px;
+  --fs-body: 15px;
+  --fs-lg: 16px;
+  --fs-h3: 19px;
+  --fs-h2: 24px;
+  --fs-h1: 30px;
+  --fs-hero: clamp(28px, 3.4vw, 38px);
+  /* 顶部悬浮栏（顶栏 + 任务栏）的实测总高，由 App.tsx 在运行时写入。
+     锚点跳转和 sticky 定位都要让开这段高度，否则内容会藏在栏底下。
+     默认值对应"只有顶栏"的页面。 */
+  --chrome-h: 52px;
+  /* 跳到锚点时，标题距悬浮栏底部再留一口气 */
+  --anchor-gap: 16px;
+  /* 对话页栅格：列宽 = 正文可读行长 + 头像列（30px + 12px gap）。
+     气泡、状态行、方案卡、输入框共用这一列，且都在页面居中。列宽不能大于
+     内容实际用掉的宽度——多出来的部分会让内容贴住列的左边缘，看着像整体偏了。 */
+  --ask-measure: 700px;
+  --ask-col: calc(var(--ask-measure) + 42px);
+  /* 栏外留白。--ask-col 量的是内容本身，左右留白一律加在它外面——对话区和 dock
+     是两个不同的容器，只有把留白算在同一侧，两者的内容宽度才会逐像素相等。 */
+  --ask-gutter: 20px;
   --shadow-1: 0 1px 2px color-mix(in srgb, var(--seed-fg) 6%, transparent);
   --shadow-2: 0 12px 40px color-mix(in srgb, var(--seed-fg) 14%, transparent);
   --white: #ffffff;
   --backdrop: color-mix(in srgb, #000 32%, transparent);
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
     "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  /* SF Mono 排在最前：ui-monospace 在 macOS 上通常也会落到它，但顺序写死更省心，
+     其它平台再退回各自的系统等宽字体。 */
+  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, "Liberation Mono",
+    monospace;
   --ease-seg: cubic-bezier(0.32, 0.72, 0, 1);
 }
 [data-theme="dark"] {
@@ -65,12 +102,16 @@
 }
 html {
   scroll-behavior: smooth;
+  /* 锚点跳转（目录点击、带 #hash 的外部链接）的落点要让开顶部悬浮栏，
+     否则标题会停在视口最顶端、正好被栏挡住。
+     只在这里设一次：元素上的 scroll-margin-top 会和它叠加，别再加第二处。 */
+  scroll-padding-top: calc(var(--chrome-h) + var(--anchor-gap));
 }
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: calc(15px * var(--seed-type-scale));
+  font-size: calc(var(--fs-body) * var(--seed-type-scale));
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   transition: background 0.25s ease, color 0.25s ease;
@@ -97,10 +138,10 @@ a {
 }
 kbd {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-meta);
   border: 1px solid var(--border-strong);
   border-bottom-width: 2px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   padding: 1px 5px;
   color: var(--text-2);
   background: var(--surface);
@@ -134,7 +175,7 @@ kbd {
   align-items: center;
   gap: 9px;
   font-weight: 600;
-  font-size: 15px;
+  font-size: var(--fs-body);
   letter-spacing: -0.01em;
   color: var(--text);
   text-decoration: none;
@@ -155,11 +196,11 @@ kbd {
   border: 0;
   background: transparent;
   color: var(--text-2);
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   font-weight: 500;
   letter-spacing: 0.01em;
   padding: 6px 13px;
-  border-radius: 980px;
+  border-radius: var(--r-pill);
   transition: 0.18s;
   text-decoration: none;
 }
@@ -179,28 +220,34 @@ kbd {
   align-items: center;
   gap: 14px;
 }
-.server-pill {
-  display: flex;
+.server-alert {
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 12px;
-  color: var(--text-2);
-  font-family: var(--font-mono);
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-meta);
+  white-space: nowrap;
 }
-.server-pill i {
+.server-alert i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--text-3);
+  background: var(--danger);
   display: inline-block;
 }
-.server-pill.ok i {
-  background: var(--ok);
+.server-alert button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0 4px;
 }
-.server-pill.down i {
-  background: var(--danger);
-}
-.server-pill,
 .topnav a,
 .topnav button {
   white-space: nowrap;
@@ -209,13 +256,6 @@ kbd {
   .topbar-inner {
     gap: 14px;
     padding: 0 16px;
-  }
-  .server-pill span,
-  .server-pill {
-    font-size: 0;
-  }
-  .server-pill i {
-    font-size: 12px;
   }
 }
 .theme-btn {
@@ -257,8 +297,8 @@ kbd {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
-  font-size: 12.5px;
-  border-radius: 980px;
+  font-size: var(--fs-meta);
+  border-radius: var(--r-pill);
   padding: 6px 12px;
   display: inline-flex;
   align-items: center;
@@ -282,7 +322,7 @@ kbd {
   flex: none;
 }
 .jobbar .jobid .q {
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   color: var(--text);
   font-weight: 500;
   min-width: 0;
@@ -293,7 +333,7 @@ kbd {
 .jobbar .tabs {
   display: inline-flex;
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   padding: 3px;
   gap: 2px;
   flex: none;
@@ -302,8 +342,8 @@ kbd {
 .jobbar .tabs button {
   border: 0;
   background: transparent;
-  border-radius: 7px;
-  font-size: 13px;
+  border-radius: calc(var(--r-sm) - 3px);
+  font-size: var(--fs-ui);
   color: var(--text-2);
   padding: 5px 14px;
   font-weight: 500;
@@ -340,11 +380,11 @@ kbd {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--r-card);
+  border-radius: var(--r-lg);
   box-shadow: var(--shadow-1);
 }
 .panel-title {
-  font-size: 13px;
+  font-size: var(--fs-ui);
   font-weight: 600;
   color: var(--text-2);
   letter-spacing: 0.02em;
@@ -356,10 +396,10 @@ kbd {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1;
   padding: 5px 10px;
-  border-radius: 980px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--border);
   color: var(--text-2);
   background: var(--surface);
@@ -372,10 +412,10 @@ kbd {
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 11px;
+  font-size: var(--fs-meta);
   line-height: 1;
   padding: 3px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -406,8 +446,8 @@ kbd {
   justify-content: center;
   gap: 7px;
   border: 1px solid transparent;
-  border-radius: 980px;
-  font-size: 14px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-body);
   font-weight: 500;
   padding: 9px 20px;
   min-height: 40px;
@@ -441,7 +481,7 @@ kbd {
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
 }
 .btn.sm {
-  font-size: 13px;
+  font-size: var(--fs-ui);
   padding: 6px 14px;
   min-height: 32px;
 }
@@ -466,9 +506,13 @@ kbd {
 .ask-view {
   max-width: none;
   width: 100%;
-  flex: 1;
+  /* flex: none 是必须的。写成 flex: 1 会把 flex-basis 设成 0%，父级高度不确定时
+     浏览器改用内容高度、下面那行 height 直接失效——整页被内容撑高，滚动的是窗口
+     而不是对话区，底部输入区被推到视口外面。高度也别再手抄 52px：顶栏（可能还有
+     任务栏）的实测总高由 App.tsx 写进 --chrome-h。 */
+  flex: none;
   min-height: 0;
-  height: calc(100dvh - 52px);
+  height: calc(100dvh - var(--chrome-h));
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -484,6 +528,7 @@ kbd {
   align-items: center;
 }
 .ask-view.is-idle .ask-stage-inner {
+  max-width: 760px;
   padding-top: 40px;
   padding-bottom: 48px;
 }
@@ -497,9 +542,9 @@ kbd {
 }
 .ask-stage-inner {
   width: 100%;
-  max-width: 760px;
+  max-width: calc(var(--ask-col) + var(--ask-gutter) * 2);
   margin: 0 auto;
-  padding: 28px 20px 16px;
+  padding: 28px var(--ask-gutter) 16px;
 }
 .ask-hero {
   max-width: 640px;
@@ -507,7 +552,7 @@ kbd {
   text-align: center;
 }
 .ask-hero h1 {
-  font-size: clamp(28px, 3.4vw, 38px);
+  font-size: var(--fs-hero);
   font-weight: 600;
   letter-spacing: 0;
   line-height: 1.2;
@@ -516,20 +561,20 @@ kbd {
   max-width: 540px;
   margin: 14px auto 0;
   color: var(--text-2);
-  font-size: 15px;
+  font-size: var(--fs-body);
   line-height: 1.65;
 }
 .ask-dock {
   flex: none;
   z-index: 20;
-  padding: 8px 20px calc(14px + env(safe-area-inset-bottom, 0px));
+  padding: 8px var(--ask-gutter) calc(14px + env(safe-area-inset-bottom, 0px));
   background: linear-gradient(to top, var(--bg) 68%, color-mix(in srgb, var(--bg) 55%, transparent) 86%, transparent);
 }
 .composer {
-  max-width: 760px;
+  max-width: var(--ask-col);
   margin: 30px auto 0;
   padding: 12px 12px 12px 18px;
-  border-radius: 24px;
+  border-radius: var(--r-input);
   box-shadow: var(--shadow-1), 0 8px 28px color-mix(in srgb, var(--seed-fg) 6%, transparent);
   transition: border-color 0.18s, box-shadow 0.18s;
 }
@@ -539,11 +584,11 @@ kbd {
 }
 .composer-dock {
   margin: 0 auto;
-  padding: 10px 10px 10px 18px;
+  padding: 6px 6px 6px 18px;
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  border-radius: 24px;
+  border-radius: var(--r-dock);
   box-shadow: var(--shadow-1), 0 8px 28px color-mix(in srgb, var(--seed-fg) 6%, transparent);
 }
 .composer textarea {
@@ -555,18 +600,18 @@ kbd {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 16px;
+  font-size: var(--fs-lg);
   line-height: 1.6;
   padding: 8px 0 4px;
 }
 .composer-dock textarea {
-  min-height: 28px;
+  min-height: 24px;
   max-height: 160px;
   resize: none;
   border: 0;
   border-radius: 0;
   background: transparent;
-  padding: 10px 0 12px;
+  padding: 6px 0;
   line-height: 1.5;
 }
 .composer textarea:focus {
@@ -585,10 +630,10 @@ kbd {
 }
 .send-btn {
   flex: none;
-  width: 44px;
-  height: 44px;
-  min-width: 44px;
-  min-height: 44px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
   border: 0;
   border-radius: 50%;
   background: var(--primary);
@@ -608,16 +653,16 @@ kbd {
   cursor: default;
 }
 .ask-dock .form-error {
-  max-width: 760px;
+  max-width: var(--ask-col);
   margin: 0 auto 10px;
   text-align: center;
 }
 .ask-examples {
-  max-width: 760px;
+  max-width: 760px; /* 仅出现在 idle 落地页，沿用窄栏 */
   margin: 26px auto 0;
 }
 .ask-examples-label {
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   text-align: center;
 }
@@ -632,9 +677,9 @@ kbd {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
-  border-radius: 14px;
+  border-radius: var(--r-md);
   padding: 12px 14px;
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   line-height: 1.5;
   transition: border-color 0.18s, color 0.18s, background 0.18s, transform 0.15s;
 }
@@ -653,10 +698,10 @@ kbd {
 }
 
 .composer-hint {
-  max-width: 760px;
+  max-width: var(--ask-col);
   margin: 8px auto 0;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
 }
 .composer-bar {
@@ -689,7 +734,7 @@ kbd {
   position: relative;
   display: inline-flex;
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   padding: 3px;
   gap: 2px;
 }
@@ -699,7 +744,7 @@ kbd {
   bottom: 3px;
   left: 0;
   width: 0;
-  border-radius: 7px;
+  border-radius: calc(var(--r-sm) - 3px);
   background: var(--surface);
   box-shadow: var(--shadow-1);
   pointer-events: none;
@@ -712,8 +757,8 @@ kbd {
   z-index: 1;
   border: 0;
   background: transparent;
-  border-radius: 7px;
-  font-size: 13px;
+  border-radius: calc(var(--r-sm) - 3px);
+  font-size: var(--fs-ui);
   color: var(--text-2);
   padding: 5px 13px;
   font-weight: 500;
@@ -739,7 +784,7 @@ kbd {
   font-weight: 600;
 }
 .field-label {
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   margin-right: 2px;
 }
@@ -748,7 +793,7 @@ kbd {
   flex: 1;
 }
 .flow {
-  max-width: 760px;
+  max-width: var(--ask-col);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -766,7 +811,7 @@ kbd {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   background: color-mix(in srgb, var(--seed-fg) 8%, transparent);
   color: var(--text-2);
@@ -778,12 +823,12 @@ kbd {
 .msg .bubble {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--r-md);
   padding: 12px 16px;
-  font-size: 14.5px;
+  font-size: var(--fs-body);
   line-height: 1.65;
   box-shadow: var(--shadow-1);
-  max-width: 640px;
+  max-width: min(var(--ask-measure), 100%);
 }
 .msg.user .bubble {
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
@@ -794,9 +839,23 @@ kbd {
   align-items: center;
   gap: 10px;
   color: var(--text-2);
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   padding: 4px 0 4px 42px;
   animation: fade-up 0.28s ease;
+}
+/* 状态行里的文字按钮（如"停止"）：不抢视线，但可点、可聚焦 */
+.link-btn {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  font: inherit;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.link-btn:hover {
+  color: var(--text);
 }
 .msg,
 .brief-card {
@@ -829,19 +888,23 @@ kbd {
 .answer-row {
   display: flex;
   gap: 10px;
-  max-width: 640px;
+  max-width: min(var(--ask-measure), 100%);
   margin-left: 42px;
 }
 .answer-row input,
 .revise-row input {
   flex: 1;
   border: 1px solid var(--border-strong);
-  border-radius: 980px;
+  border-radius: var(--r-pill);
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-body);
   padding: 9px 16px;
+}
+.revise-row input:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 .answer-row input:focus,
 .revise-row input:focus {
@@ -850,118 +913,212 @@ kbd {
   box-shadow: 0 0 0 4px var(--primary-soft);
 }
 .brief-card {
-  max-width: 760px;
+  /* .flow 是 column flex，交叉轴上的 margin:auto 会顶掉 stretch，卡片于是按内容
+     宽度收缩——方案长一点卡片就宽一点。width:100% 把它钉在栏宽上。 */
+  width: 100%;
+  max-width: var(--ask-col);
   margin: 0 auto;
   overflow: hidden;
 }
+/* The card takes focus only programmatically, to park the keyboard somewhere the
+   shortcut handler owns; it is not Tab-reachable, so it draws no focus ring. */
+.brief-card:focus,
+.brief-card:focus-visible {
+  outline: none;
+}
 .brief-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 16px 22px;
+  padding: 11px 16px 12px 22px;
   border-bottom: 1px solid var(--border);
 }
-.brief-head h3 {
-  font-size: 16px;
+/* 小标一行 + 标题一行。标题位置留给研究问题本身——"研究方案"是个类别名，
+   不携带信息，而那句复述才是要用户核对的东西。 */
+.brief-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.brief-meta .brief-kind {
+  font-size: var(--fs-meta);
   font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+.brief-meta .chip {
+  margin-left: auto;
+  padding: 4px 9px;
+}
+/* 正文是常驻可编辑的，没有"编辑模式"可标记，改没改过只能靠这个 */
+.brief-dirty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--warn);
+}
+.brief-undo {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-weight: 400;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  padding: 2px 4px;
+  border-radius: var(--r-xs);
+}
+.brief-undo:hover {
+  color: var(--text);
+}
+.brief-head h3 {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.45;
   letter-spacing: -0.01em;
-  margin-right: auto;
 }
 .brief-body {
-  padding: 20px 22px;
+  padding: 15px 22px 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 13px;
 }
-.brief-field .k {
-  font-size: 12px;
+/* 直接子级：.constraint-list 里也有 .k，那个是"时间/地区"这类行内标签，
+   不能被这条规则改成 flex。 */
+.brief-field > .k {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   letter-spacing: 0.03em;
-  margin-bottom: 6px;
+  margin-bottom: 3px;
   font-weight: 600;
 }
+/* 说明文字跟标签同行。这类话读一遍就够，不值得每次都占掉一整行。 */
+.brief-field > .k .hint {
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-3);
+}
 .brief-field .v {
-  font-size: 14.5px;
+  font-size: var(--fs-body);
   line-height: 1.7;
 }
+/* 研究范围常驻是一个自动撑高的 textarea：只读时无边框无底色，就是卡片上的一段
+   正文；点进去才浮出输入框。没有"编辑模式"，也不再自带滚动条——整页只留对话区
+   一个滚动区域。横向负边距让正文左缘和标签对齐，聚焦时的高亮框再向两侧张开；
+   padding 12 + border 1，所以两侧各 13。 */
 .brief-text {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 16px;
-  font-size: 13.5px;
-  line-height: 1.75;
+  display: block;
+  width: calc(100% + 26px);
+  margin: 0 -13px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  font: inherit;
+  font-size: var(--fs-body);
+  line-height: 1.78;
   color: var(--text);
-  max-height: 236px;
-  overflow-y: auto;
   white-space: pre-wrap;
+  overflow: hidden;
+  resize: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
-.brief-text.editing {
-  outline: 2px solid var(--primary-soft);
+.brief-text:hover {
+  background: color-mix(in srgb, var(--seed-fg) 3.5%, transparent);
+}
+.brief-text:focus {
+  outline: none;
+  background: var(--bg);
   border-color: var(--primary);
-  max-height: 320px;
+  box-shadow: 0 0 0 4px var(--primary-soft);
 }
 .constraint-empty {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-ui);
   color: var(--text-2);
   background: color-mix(in srgb, var(--seed-fg) 4%, transparent);
-  border-radius: 10px;
+  border-radius: var(--r-sm);
   padding: 10px 14px;
 }
 .constraint-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 13.5px;
+  gap: 3px;
+  font-size: var(--fs-ui);
 }
 .constraint-list .row {
   display: flex;
   gap: 10px;
+  line-height: 1.5;
 }
 .constraint-list .k {
   flex: none;
-  width: 84px;
+  /* 固定 84px 对"时间"两个字来说太宽，值前面会空出一大截 */
+  width: auto;
+  min-width: 46px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   font-weight: 600;
 }
+/* 左边"编辑"是改这份方案，右边"取消 / 开始"是处置这份方案 */
 .brief-foot {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding: 16px 22px;
+  padding: 11px 22px;
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--seed-fg) 2.5%, var(--surface));
 }
-.brief-foot .quiet-acts {
-  display: flex;
-  gap: 2px;
+.brief-foot .btn {
+  min-height: 34px;
+  padding: 6px 17px;
+  /* .btn 自带的 gap 会在文字和"零宽"键帽之间留一格，把文字挤得偏左；
+     间距改由 .hot 自己的 margin-left 承担。 */
+  gap: 0;
 }
-.brief-foot .quiet-acts button {
-  border: 0;
+.brief-foot .btn.ghost.on {
+  background: color-mix(in srgb, var(--seed-fg) 8%, transparent);
+  border-color: var(--border-strong);
+}
+/* 快捷键提示：按住 ⌘ / Ctrl 才出现。收起时不是"透明"而是"没宽度"——
+   只把 opacity 归零的话，按钮文字右边会一直空着一格。 */
+.brief-foot .hot {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+  border-width: 0;
+  color: var(--text-3);
   background: transparent;
-  color: var(--text-2);
-  font-size: 13px;
-  padding: 8px 11px;
-  min-height: 36px;
-  border-radius: 8px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
+  opacity: 0;
+  max-width: 0;
+  margin-left: 0;
+  padding: 1px 0;
+  transition: max-width 0.2s ease, opacity 0.13s ease, margin-left 0.2s ease, padding 0.2s ease;
 }
-.brief-foot .quiet-acts button:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
+.brief-card.mod-held .brief-foot .hot {
+  opacity: 1;
+  max-width: 60px;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-width: 1px 1px 2px;
 }
+.brief-foot .btn.primary .hot {
+  border-color: color-mix(in srgb, var(--on-primary) 35%, transparent);
+  color: var(--on-primary);
+}
+/* 点"编辑"从底栏下面弹出来的一行：用自然语言说要怎么改 */
 .revise-row {
   display: none;
   gap: 10px;
-  padding: 14px 22px 18px;
+  padding: 12px 22px 14px;
   border-top: 1px solid var(--border);
 }
 .revise-row.open {
@@ -969,7 +1126,7 @@ kbd {
 }
 .form-error {
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--fs-ui);
   padding: 0 4px;
 }
 
@@ -986,7 +1143,7 @@ kbd {
   gap: 11px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 980px;
+  border-radius: var(--r-pill);
   padding: 8px 18px 8px 14px;
   box-shadow: var(--shadow-1);
   min-width: 0;
@@ -1032,25 +1189,21 @@ kbd {
   background: var(--text-3);
 }
 .job-capsule .job-label {
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 600;
   white-space: nowrap;
 }
 .job-capsule .job-q {
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.replay-ctrl {
+.monitor-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.replay-ctrl .seg button {
-  padding: 5px 11px;
-  font-size: 12.5px;
 }
 .phase-track {
   display: flex;
@@ -1077,11 +1230,11 @@ kbd {
   display: grid;
   place-items: center;
   color: transparent;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   transition: 0.25s;
 }
 .phase .lab {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   white-space: nowrap;
   font-weight: 500;
@@ -1112,7 +1265,7 @@ kbd {
   height: 2px;
   background: var(--border);
   margin: 0 6px 21px;
-  border-radius: 2px;
+  border-radius: var(--r-pill);
   min-width: 26px;
   transition: 0.3s;
 }
@@ -1143,12 +1296,12 @@ kbd {
   flex-wrap: wrap;
 }
 .plan-head .ver {
-  font-size: 15px;
+  font-size: var(--fs-body);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 .plan-note {
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   color: var(--text-2);
   line-height: 1.55;
   margin-bottom: 12px;
@@ -1158,7 +1311,7 @@ kbd {
   gap: 12px;
   align-items: flex-start;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
 }
 .task-row + .task-row {
@@ -1175,11 +1328,11 @@ kbd {
   flex: none;
   width: 30px;
   height: 30px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   margin-top: 1px;
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   color: var(--text-2);
   display: grid;
@@ -1190,7 +1343,7 @@ kbd {
   flex: 1;
 }
 .task-q {
-  font-size: 13.5px;
+  font-size: var(--fs-ui);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1208,26 +1361,26 @@ kbd {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 11.5px;
+  font-size: var(--fs-meta);
   color: var(--text-2);
   font-family: var(--font-mono);
 }
 .rounds-bar .track {
   width: 74px;
   height: 5px;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--seed-fg) 10%, transparent);
   overflow: hidden;
 }
 .rounds-bar .fill {
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
   background: var(--primary);
   transition: width 0.4s;
 }
 .task-status {
   flex: none;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-2);
   margin-top: 2px;
   display: flex;
@@ -1248,35 +1401,60 @@ kbd {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  font-size: 13px;
+  font-size: var(--fs-ui);
 }
 .usage-row .top .name {
   color: var(--text-2);
 }
 .usage-row .top .val {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-ui);
   font-weight: 600;
 }
 .usage-row .track {
   margin-top: 7px;
   height: 6px;
-  border-radius: 4px;
+  border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--seed-fg) 9%, transparent);
   overflow: hidden;
 }
 .usage-row .fill {
   height: 100%;
-  border-radius: 4px;
+  border-radius: var(--r-pill);
   background: var(--text-2);
   transition: width 0.5s;
 }
 .usage-row.accent .fill {
   background: var(--primary);
 }
+/* 无上限的累计计数：纯数字，不给进度条，免得读成配额 */
+.usage-split {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.usage-tally {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.usage-tally .tally-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-ui);
+}
+.usage-tally .name {
+  color: var(--text-2);
+}
+.usage-tally .val {
+  font-weight: 600;
+}
 .usage-note {
   margin-top: 12px;
-  font-size: 11.5px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   line-height: 1.5;
 }
@@ -1293,13 +1471,13 @@ kbd {
   overflow-y: auto;
   flex: 1;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
 }
 .tl-row {
   display: flex;
   gap: 10px;
   padding: 5px 2px;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   line-height: 1.5;
 }
 .tl-row:hover {
@@ -1355,7 +1533,7 @@ kbd {
   padding: 26px 28px;
 }
 .finish-card h3 {
-  font-size: 19px;
+  font-size: var(--fs-h3);
   font-weight: 600;
   letter-spacing: -0.01em;
   display: flex;
@@ -1371,7 +1549,7 @@ kbd {
   color: var(--white);
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--fs-meta);
 }
 .finish-card h3 .ok-dot {
   background: var(--ok);
@@ -1389,11 +1567,11 @@ kbd {
   margin-top: 14px;
 }
 .finish-rows .item .k {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
 }
 .finish-rows .item .v {
-  font-size: 15px;
+  font-size: var(--fs-body);
   font-weight: 600;
   margin-top: 3px;
 }
@@ -1413,7 +1591,7 @@ kbd {
   flex-wrap: wrap;
 }
 .report-title-row h1 {
-  font-size: 30px;
+  font-size: var(--fs-h1);
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.28;
@@ -1425,10 +1603,10 @@ kbd {
   align-items: center;
   gap: 7px;
   flex: none;
-  font-size: 13px;
+  font-size: var(--fs-ui);
   font-weight: 600;
   padding: 8px 14px;
-  border-radius: 980px;
+  border-radius: var(--r-pill);
 }
 .vbadge.ok {
   color: var(--ok);
@@ -1440,12 +1618,12 @@ kbd {
 }
 .report-note {
   margin-top: 14px;
-  font-size: 13px;
+  font-size: var(--fs-ui);
   color: var(--text-2);
   line-height: 1.6;
   background: color-mix(in srgb, var(--warn) 8%, transparent);
   border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   padding: 11px 15px;
 }
 .report-layout {
@@ -1464,8 +1642,8 @@ kbd {
 }
 .toc {
   position: sticky;
-  top: 74px;
-  font-size: 13px;
+  top: calc(var(--chrome-h) + 22px);
+  font-size: var(--fs-ui);
 }
 .toc .panel-title {
   margin-bottom: 10px;
@@ -1475,7 +1653,7 @@ kbd {
   color: var(--text-2);
   text-decoration: none;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   line-height: 1.45;
   border-left: 2px solid transparent;
 }
@@ -1497,7 +1675,7 @@ kbd {
   max-width: 720px;
 }
 .report-body h2 {
-  font-size: 21px;
+  font-size: var(--fs-h2);
   font-weight: 600;
   letter-spacing: -0.015em;
   margin: 34px 0 14px;
@@ -1507,7 +1685,7 @@ kbd {
   margin-top: 0;
 }
 .report-body p {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   line-height: 1.85;
   margin-bottom: 14px;
   text-align: left;
@@ -1522,12 +1700,12 @@ kbd {
   padding: 0 4px;
   margin: 0 2px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   vertical-align: 3px;
   background: var(--primary-soft);
   color: var(--link);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   transition: 0.15s;
   line-height: 1;
@@ -1544,17 +1722,17 @@ kbd {
   background: color-mix(in srgb, var(--warn) 9%, transparent);
   border-bottom: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
   padding: 1px 3px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
 }
 .fail-mark {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 13%, transparent);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   padding: 2px 7px;
   margin-left: 6px;
   vertical-align: 2px;
@@ -1586,11 +1764,11 @@ kbd {
   flex: none;
   width: 30px;
   height: 30px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   margin-top: 1px;
   background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   color: var(--text-2);
   display: grid;
@@ -1600,13 +1778,13 @@ kbd {
   min-width: 0;
 }
 .source-title {
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 500;
   line-height: 1.5;
 }
 .source-uri {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1656,18 +1834,18 @@ kbd {
 .evidence-head .num {
   width: 32px;
   height: 32px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   flex: none;
   background: var(--primary-soft);
   color: var(--link);
   font-family: var(--font-mono);
   font-weight: 700;
-  font-size: 13px;
+  font-size: var(--fs-ui);
   display: grid;
   place-items: center;
 }
 .evidence-head h4 {
-  font-size: 14.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   flex: 1;
   line-height: 1.4;
@@ -1684,7 +1862,7 @@ kbd {
   color: var(--text-2);
   display: grid;
   place-items: center;
-  font-size: 14px;
+  font-size: var(--fs-body);
 }
 .icon-btn:hover {
   color: var(--text);
@@ -1697,18 +1875,18 @@ kbd {
   gap: 16px;
 }
 .ev-field .k {
-  font-size: 11.5px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   letter-spacing: 0.05em;
   font-weight: 600;
   margin-bottom: 6px;
 }
 .ev-excerpt {
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1.8;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   padding: 14px 16px;
   white-space: pre-wrap;
 }
@@ -1716,7 +1894,7 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-ui);
 }
 .ev-meta .row {
   display: flex;
@@ -1733,12 +1911,12 @@ kbd {
 }
 .ev-meta .row .v a {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-meta);
 }
 .evidence-foot {
   padding: 14px 22px;
   border-top: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
   line-height: 1.5;
 }
@@ -1751,7 +1929,7 @@ kbd {
   flex-wrap: wrap;
 }
 .jobs-head h1 {
-  font-size: 24px;
+  font-size: var(--fs-h2);
   font-weight: 600;
   letter-spacing: -0.02em;
   margin-right: auto;
@@ -1791,7 +1969,7 @@ kbd {
   min-width: 0;
 }
 .job-item .q {
-  font-size: 14.5px;
+  font-size: var(--fs-body);
   font-weight: 500;
   line-height: 1.45;
   overflow: hidden;
@@ -1807,13 +1985,13 @@ kbd {
   margin-top: 6px;
   flex-wrap: wrap;
   align-items: center;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-3);
 }
 .job-item .go {
   flex: none;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-ui);
   display: flex;
   gap: 6px;
   align-items: center;
@@ -1825,7 +2003,7 @@ kbd {
   padding: 36px 22px;
   text-align: center;
   color: var(--text-2);
-  font-size: 14.5px;
+  font-size: var(--fs-body);
 }
 .toast {
   position: fixed;
@@ -1835,20 +2013,46 @@ kbd {
   z-index: 120;
   background: var(--text);
   color: var(--bg);
-  font-size: 13px;
+  font-size: var(--fs-ui);
   padding: 10px 18px;
-  border-radius: 980px;
+  border-radius: var(--r-pill);
   opacity: 0;
   pointer-events: none;
   transition: 0.25s;
   box-shadow: var(--shadow-2);
 }
-body:has(.ask-dock) .toast {
+/* Ask 页的底部要么是输入区、要么是方案卡的按钮栏（方案确认阶段没有输入区）。
+   toast 一律抬到它们上面——盖住一段正文只是碍眼，盖住"开始/取消"是挡路。 */
+body:has(.ask-dock) .toast,
+body:has(.brief-card) .toast {
   bottom: calc(96px + env(safe-area-inset-bottom, 0px));
 }
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+/* Only a toast carrying an action becomes clickable; plain ones stay pass-through. */
+.toast.show:has(.toast-act) {
+  pointer-events: auto;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.toast-act {
+  flex: none;
+  border: 0;
+  background: color-mix(in srgb, var(--bg) 18%, transparent);
+  color: var(--bg);
+  font: inherit;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: var(--r-pill);
+  transition: background 0.15s;
+}
+.toast-act:hover {
+  background: color-mix(in srgb, var(--bg) 30%, transparent);
 }
 .pagefoot {
   max-width: 1180px;
@@ -1856,7 +2060,7 @@ body:has(.ask-dock) .toast {
   padding: 0 28px 40px;
   width: 100%;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   display: flex;
   gap: 10px;
   align-items: center;

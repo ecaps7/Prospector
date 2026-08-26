@@ -62,24 +62,33 @@ export function emptyConstraints(): ResearchBrief["user_constraints"] {
 export const api = {
   healthz: () => request<{ status: "ok" }>("/api/healthz"),
 
-  scope: (payload: {
-    question: string;
-    effort: ResearchBrief["effort"];
-    language: string;
-    clarification_question?: string;
-    clarification_answer?: string;
-  }) => request<ScopeOutcome>("/api/scope", { method: "POST", body: JSON.stringify(payload) }),
+  // Scope blocks on an LLM call for tens of seconds, so both entry points take a
+  // signal: without one the caller has no way to stop waiting.
+  scope: (
+    payload: {
+      question: string;
+      effort: ResearchBrief["effort"];
+      language: string;
+      clarification_question?: string;
+      clarification_answer?: string;
+    },
+    signal?: AbortSignal,
+  ) => request<ScopeOutcome>("/api/scope", { method: "POST", body: JSON.stringify(payload), signal }),
 
-  reviseScope: (payload: {
-    question: string;
-    previous_brief: ResearchBrief;
-    revision_note: string;
-    effort: ResearchBrief["effort"];
-    language: string;
-  }) =>
+  reviseScope: (
+    payload: {
+      question: string;
+      previous_brief: ResearchBrief;
+      revision_note: string;
+      effort: ResearchBrief["effort"];
+      language: string;
+    },
+    signal?: AbortSignal,
+  ) =>
     request<{ brief: ResearchBrief }>("/api/scope/revise", {
       method: "POST",
       body: JSON.stringify(payload),
+      signal,
     }),
 
   createJob: (brief: ResearchBrief) =>

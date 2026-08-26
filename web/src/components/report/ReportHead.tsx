@@ -1,6 +1,5 @@
 type Props = {
   title: string;
-  verificationStatus: string;
   verified: boolean;
   statementCount: number;
   failedCount: number;
@@ -8,7 +7,6 @@ type Props = {
 
 export function ReportHead({
   title,
-  verificationStatus,
   verified,
   statementCount,
   failedCount,
@@ -20,12 +18,12 @@ export function ReportHead({
         <span className={`vbadge ${verified ? "ok" : "warn"}`}>
           {verified
             ? `✓ 已逐句核对 · ${statementCount} 句全部通过`
-            : `⚠ 部分核对 · ${failedCount} 句未通过（partial）`}
+            : `⚠ 部分核对 · ${failedCount} 句未通过`}
         </span>
       </div>
       {!verified ? (
         <div className="report-note">
-          本报告标记为 {verificationStatus}：未通过核对的句子保留原文、不带引用角标并如实标出——与其硬凑一个干净结论，不如如实标出哪些句子没通过核对。
+          本报告为部分核对：未通过核对的句子保留原文、不带引用角标并如实标出——与其硬凑一个干净结论，不如让你看清哪些句子没站住。
         </div>
       ) : null}
     </div>
