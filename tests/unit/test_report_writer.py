@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
+from prospector.agents import streaming
 from prospector.agents.prompts.report_writer import (
     continuation_message,
     report_writer_messages,
     retry_message,
 )
 from prospector.agents.report_writer import OpenAIReportWriter, ReportWriterOutputError
+from prospector.deterministic.excerpt_text import CLIP_MARKER, writer_excerpt_limit
 from prospector.reporting.render import render_report_draft
 from prospector.schemas.report import (
     ReportDraft,
@@ -26,6 +30,8 @@ from prospector.schemas.report_stream import ReportStreamAssembler
 
 EXCERPT_ID = UUID("10000000-0000-0000-0000-000000000001")
 OTHER_EXCERPT_ID = UUID("10000000-0000-0000-0000-000000000002")
+TASK_ID = UUID("50000000-0000-0000-0000-000000000001")
+EXCERPT_BODY = "该口径下的年度数值为 42，统计区间为 2026 全年，由发布方自行披露。"
 
 
 def _snapshot(effort: str = "quick") -> WriterSnapshot:
@@ -39,14 +45,30 @@ def _snapshot(effort: str = "quick") -> WriterSnapshot:
                 "language": "zh",
                 "effort": effort,
             },
-            "final_plan_summary": [{"version": 1, "tasks": []}],
+            "final_plan_summary": [
+                {
+                    "version": 1,
+                    "tasks": [
+                        {
+                            "id": str(TASK_ID),
+                            "question": "这条线索要回答的研究问题。",
+                            "research_stage": "deep_dive",
+                            "research_mode": "factual",
+                            "expected_evidence": "一条带口径的直接证据。",
+                            "stop_reason": "expected_evidence_satisfied",
+                        }
+                    ],
+                }
+            ],
             "evidence_cards": [
                 {
                     "assertion_id": "30000000-0000-0000-0000-000000000001",
+                    "task_id": str(TASK_ID),
                     "assertion_statement": "公开材料记录了一个带时间口径的事实。",
                     "excerpts": [
                         {
                             "excerpt_id": str(EXCERPT_ID),
+                            "text": EXCERPT_BODY,
                             "source": {
                                 "title": "公开报告",
                                 "author": "Example Publisher",
@@ -62,6 +84,12 @@ def _snapshot(effort: str = "quick") -> WriterSnapshot:
             "minor_gaps": [],
         }
     )
+
+
+def _material(snapshot: WriterSnapshot) -> Any:
+    """The frozen material block the Writer is handed, parsed back out of the prompt."""
+    user = report_writer_messages(snapshot)[1]["content"]
+    return json.loads(user.split("研究材料：\n", 1)[1])
 
 
 def _intro_payload() -> list[dict[str, object]]:
@@ -187,10 +215,19 @@ def _second_turn_lines() -> list[str]:
     ]
 
 
-class _FakeStreamClient:
-    """Minimal chat.completions.create stub yielding one scripted turn per call."""
+def _dropped_stream(error: Exception) -> Iterator[SimpleNamespace]:
+    """A stream that opens, delivers a fragment, and then dies."""
+    yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="半句"))])
+    raise error
 
-    def __init__(self, turns: list[str]) -> None:
+
+class _FakeStreamClient:
+    """Minimal chat.completions.create stub yielding one scripted turn per call.
+
+    A turn given as an exception stands for a connection lost mid-answer.
+    """
+
+    def __init__(self, turns: list[str | Exception]) -> None:
         self.turns = list(turns)
         self.calls: list[dict[str, object]] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
@@ -201,6 +238,8 @@ class _FakeStreamClient:
             kwargs["messages"] = [dict(message) for message in messages]
         self.calls.append(kwargs)
         text = self.turns.pop(0)
+        if isinstance(text, Exception):
+            return _dropped_stream(text)
         chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
         return iter([chunk])
 
@@ -211,7 +250,13 @@ class _FakeStreamClient:
         return cast(dict[str, str], messages[-1])
 
 
-def test_writer_prompt_is_stream_contract_and_contains_no_excerpt_body() -> None:
+def test_writer_prompt_is_stream_contract_and_carries_excerpt_text() -> None:
+    """The Writer reads the passage, not just the Assertion's one-line compression.
+
+    With only one-liners the single thing it can do is transcribe them one per sentence,
+    which is how a research report degenerates into a chronicle. Document body text is
+    still out of reach (D12); the Excerpt a citation resolves to is not.
+    """
     messages = report_writer_messages(_snapshot())
     prompt = "\n".join(message["content"] for message in messages)
 
@@ -219,17 +264,66 @@ def test_writer_prompt_is_stream_contract_and_contains_no_excerpt_body() -> None
     assert '"record":"conclusion"' in prompt
     assert "不得引入研究材料之外的内容" in prompt
     assert "只能引用此前已输出的" in prompt
-    assert "推理链最多两层" in prompt
+    assert "推理链最多两层" not in prompt
+    assert "后续 Report Verifier 逐句核对" in prompt
     assert "含有具体数字、年份、机构、人物、地点或事件" in prompt
     assert "必须写成 evidence" in prompt
     assert "可以很长、很具体" not in prompt
     assert "未完成禁止输出 end" in prompt
     assert "narrative_plan" not in prompt
     assert '"excerpt_id"' in prompt
-    assert "Excerpt 原文" not in messages[1]["content"]
+    assert EXCERPT_BODY in messages[1]["content"]
     # Excerpt ids are shown as short aliases, never raw UUIDs the model could corrupt.
     assert '"e_01"' in messages[1]["content"]
     assert str(EXCERPT_ID) not in messages[1]["content"]
+
+
+def test_writer_material_groups_findings_by_research_question() -> None:
+    """Structure to build on, instead of one flat pile ordered by the calendar."""
+    material = _material(_snapshot())
+
+    groups = material["research_groups"]
+    assert [group["research_question"] for group in groups] == ["这条线索要回答的研究问题。"]
+    assert groups[0]["research_stage"] == "deep_dive"
+    assert groups[0]["findings"] == [
+        {
+            "statement": "公开材料记录了一个带时间口径的事实。",
+            "excerpt_ids": ["e_01"],
+        }
+    ]
+    # The passage lives once in the library the findings point into, not inline per card.
+    assert [item["excerpt_id"] for item in material["excerpt_library"]] == ["e_01"]
+    assert material["excerpt_library"][0]["text"] == EXCERPT_BODY
+    assert "text" not in groups[0]["findings"][0]
+
+
+def test_writer_material_renders_a_shared_excerpt_once() -> None:
+    """Assertions outnumber Excerpts and share them; paying per card would multiply cost."""
+    payload = _snapshot().model_dump(mode="json")
+    second = json.loads(json.dumps(payload["evidence_cards"][0]))
+    second["assertion_id"] = "30000000-0000-0000-0000-000000000009"
+    second["assertion_statement"] = "同一段原文支撑的另一条结论。"
+    payload["evidence_cards"].append(second)
+
+    material = _material(WriterSnapshot.model_validate(payload))
+
+    assert len(material["research_groups"][0]["findings"]) == 2
+    assert len(material["excerpt_library"]) == 1
+
+
+def test_writer_material_clips_a_long_excerpt_without_rewriting_it() -> None:
+    """Clipping is a marked middle cut, so the passage stays recognizable and auditable."""
+    payload = _snapshot().model_dump(mode="json")
+    body = "开头的关键结论。" + "中段的铺垫内容。" * 500 + "结尾的关键口径。"
+    payload["evidence_cards"][0]["excerpts"][0]["text"] = body
+
+    material = _material(WriterSnapshot.model_validate(payload))
+
+    text = material["excerpt_library"][0]["text"]
+    assert len(text) <= writer_excerpt_limit(1)
+    assert text.startswith("开头的关键结论。")
+    assert text.endswith("结尾的关键口径。")
+    assert CLIP_MARKER in text
 
 
 def test_writer_prompt_mandates_no_length_targets_and_no_worked_domain() -> None:
@@ -252,10 +346,12 @@ def test_writer_prompt_aliases_conflict_excerpt_ids() -> None:
     snapshot_payload["evidence_cards"].append(
         {
             "assertion_id": "30000000-0000-0000-0000-000000000002",
+            "task_id": str(TASK_ID),
             "assertion_statement": "另一份材料记录了不同条件下的事实。",
             "excerpts": [
                 {
                     "excerpt_id": str(OTHER_EXCERPT_ID),
+                    "text": "另一口径下的年度数值为 37。",
                     "source": {
                         "title": "另一份公开报告",
                         "author": "Example Publisher",
@@ -355,78 +451,92 @@ def _draft_payload_with_section_statements(
 ) -> dict[str, object]:
     payload = _draft().model_dump(mode="json")
     payload["sections"][0]["paragraphs"][0]["statements"] = statements
-    payload["conclusion"][0]["statements"][0]["premise_statement_ids"] = [
-        str(statements[0]["statement_id"])
-    ]
-    payload["conclusion"][0]["statements"][0]["kind"] = "derived"
+    for statement in payload["conclusion"][0]["statements"]:
+        statement["premise_statement_ids"] = [str(statements[0]["statement_id"])]
+        statement["kind"] = "derived"
     return payload
 
 
-def test_derived_statement_cannot_rest_on_a_statement_that_carries_no_evidence() -> None:
-    """Otherwise a chain can read elaboration → derived → derived and ground out in nothing."""
-    with pytest.raises(ValidationError, match="carry no evidence"):
-        ReportDraft.model_validate(
-            _draft_payload_with_section_statements(
-                [
-                    {
-                        "statement_id": "s_bridge",
-                        "text": "一段不带出处的展开。",
-                        "kind": "elaboration",
-                        "candidate_excerpt_ids": [],
-                        "premise_statement_ids": [],
-                    },
-                    {
-                        "statement_id": "s_on_bridge",
-                        "text": "在没有出处的句子上继续推理。",
-                        "kind": "derived",
-                        "candidate_excerpt_ids": [],
-                        "premise_statement_ids": ["s_bridge"],
-                    },
-                ]
-            )
+def test_writer_accepts_a_derived_statement_with_an_ungrounded_premise() -> None:
+    """Grounding is a Report Verifier judgement, not a Writer rejection."""
+    draft = ReportDraft.model_validate(
+        _draft_payload_with_section_statements(
+            [
+                {
+                    "statement_id": "s_bridge",
+                    "text": "一段不带出处的展开。",
+                    "kind": "elaboration",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": [],
+                },
+                {
+                    "statement_id": "s_on_bridge",
+                    "text": "在没有出处的句子上继续推理。",
+                    "kind": "derived",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": ["s_bridge"],
+                },
+            ]
         )
+    )
 
-
-def test_reasoning_chain_deeper_than_two_steps_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="reasoning chain of depth 3"):
-        ReportDraft.model_validate(
-            _draft_payload_with_section_statements(
-                [
-                    {
-                        "statement_id": "s_root",
-                        "text": "材料记录的事实。",
-                        "kind": "evidence",
-                        "candidate_excerpt_ids": [str(EXCERPT_ID)],
-                        "premise_statement_ids": [],
-                    },
-                    {
-                        "statement_id": "s_step_1",
-                        "text": "第一层推理。",
-                        "kind": "derived",
-                        "candidate_excerpt_ids": [],
-                        "premise_statement_ids": ["s_root"],
-                    },
-                    {
-                        "statement_id": "s_step_2",
-                        "text": "第二层推理。",
-                        "kind": "derived",
-                        "candidate_excerpt_ids": [],
-                        "premise_statement_ids": ["s_step_1"],
-                    },
-                    {
-                        "statement_id": "s_step_3",
-                        "text": "第三层推理，已经离材料太远。",
-                        "kind": "derived",
-                        "candidate_excerpt_ids": [],
-                        "premise_statement_ids": ["s_step_2"],
-                    },
-                ]
-            )
+    assert (
+        next(
+            statement.text
+            for statement in draft.statements()
+            if statement.statement_id == "s_on_bridge"
         )
+        == "在没有出处的句子上继续推理。"
+    )
 
 
-def test_assembler_rejects_a_groundless_chain_as_it_streams_in() -> None:
-    """Rejecting at build() would throw away a whole generation over one statement."""
+def test_writer_accepts_a_reasoning_chain_deeper_than_two_steps() -> None:
+    draft = ReportDraft.model_validate(
+        _draft_payload_with_section_statements(
+            [
+                {
+                    "statement_id": "s_root",
+                    "text": "材料记录的事实。",
+                    "kind": "evidence",
+                    "candidate_excerpt_ids": [str(EXCERPT_ID)],
+                    "premise_statement_ids": [],
+                },
+                {
+                    "statement_id": "s_step_1",
+                    "text": "第一层推理。",
+                    "kind": "derived",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": ["s_root"],
+                },
+                {
+                    "statement_id": "s_step_2",
+                    "text": "第二层推理。",
+                    "kind": "derived",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": ["s_step_1"],
+                },
+                {
+                    "statement_id": "s_step_3",
+                    "text": "第三层推理，已经离材料太远。",
+                    "kind": "derived",
+                    "candidate_excerpt_ids": [],
+                    "premise_statement_ids": ["s_step_2"],
+                },
+            ]
+        )
+    )
+
+    assert (
+        next(
+            statement.text
+            for statement in draft.statements()
+            if statement.statement_id == "s_step_3"
+        )
+        == "第三层推理，已经离材料太远。"
+    )
+
+
+def test_assembler_accepts_an_ungrounded_chain_for_report_verifier() -> None:
     assembler = ReportStreamAssembler(_snapshot())
     assembler.consume("\n".join(_first_turn_lines()))
 
@@ -440,8 +550,7 @@ def test_assembler_rejects_a_groundless_chain_as_it_streams_in() -> None:
         )
     )
 
-    assert outcome.error is not None
-    assert "carry no evidence" in outcome.error
+    assert outcome.error is None
     assert not assembler.done
 
 
@@ -467,10 +576,12 @@ def test_present_both_does_not_require_adjacent_evidence_statements() -> None:
     snapshot_payload["evidence_cards"].append(
         {
             "assertion_id": "30000000-0000-0000-0000-000000000002",
+            "task_id": str(TASK_ID),
             "assertion_statement": "另一份材料记录了不同条件下的事实。",
             "excerpts": [
                 {
                     "excerpt_id": str(OTHER_EXCERPT_ID),
+                    "text": "另一口径下的年度数值为 37。",
                     "source": {
                         "title": "另一份公开报告",
                         "author": "Example Publisher",
@@ -638,7 +749,7 @@ def test_assembler_rejects_end_before_conclusion_and_section_after_conclusion() 
 
 def test_writer_loop_continues_across_turns_and_disables_json_mode() -> None:
     client = _FakeStreamClient(["\n".join(_first_turn_lines()), "\n".join(_second_turn_lines())])
-    writer = OpenAIReportWriter(client=client, model="fake-model")  # type: ignore[arg-type]
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     result = writer.write(_snapshot())
 
@@ -650,6 +761,40 @@ def test_writer_loop_continues_across_turns_and_disables_json_mode() -> None:
         "\n".join(_first_turn_lines()),
         "\n".join(_second_turn_lines()),
     ]
+
+
+def test_writer_replays_a_turn_whose_stream_was_cut_mid_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider hanging up mid-answer costs one turn, not the whole Job.
+
+    This is the failure that used to end a research run after its evidence was already
+    gathered and verified: the report was the only thing left to produce.
+    """
+    monkeypatch.setattr(streaming, "_sleep", lambda _seconds: None)
+    dropped = httpx.RemoteProtocolError(
+        "peer closed connection without sending complete message body"
+    )
+    client = _FakeStreamClient(
+        [
+            "\n".join(_first_turn_lines()),
+            dropped,
+            "\n".join(_second_turn_lines()),
+        ]
+    )
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = writer.write(_snapshot())
+
+    assert len(client.calls) == 3
+    # The replay re-asks the identical question -- the dropped fragment is never fed back
+    # to the model as if it had been accepted.
+    assert client.calls[1]["messages"] == client.calls[2]["messages"]
+    assert result.raw_output == [
+        "\n".join(_first_turn_lines()),
+        "\n".join(_second_turn_lines()),
+    ]
+    assert result.draft.title == "深度研究报告"
 
 
 def test_writer_loop_feeds_validation_error_back_for_localized_retry() -> None:
@@ -666,7 +811,7 @@ def test_writer_loop_feeds_validation_error_back_for_localized_retry() -> None:
         ]
     )
     client = _FakeStreamClient([bad_turn, "\n".join(_second_turn_lines())])
-    writer = OpenAIReportWriter(client=client, model="fake-model")  # type: ignore[arg-type]
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     result = writer.write(_snapshot())
 
@@ -687,7 +832,20 @@ def test_writer_loop_fails_after_repeated_errors() -> None:
         candidate_excerpt_ids=[],
     )
     client = _FakeStreamClient([bad_line] * 5)
-    writer = OpenAIReportWriter(client=client, model="fake-model")  # type: ignore[arg-type]
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     with pytest.raises(ReportWriterOutputError, match="after retries"):
         writer.write(_snapshot())
+
+
+@pytest.mark.parametrize(
+    ("excerpt_count", "expected"),
+    [
+        (1, 1500),  # a small Job gets the full per-passage ceiling
+        (132, 1212),  # a standard Job splits the total budget
+        (4000, 400),  # past the floor, passages stay usable and the block grows
+    ],
+)
+def test_writer_excerpt_limit_splits_a_total_budget(excerpt_count: int, expected: int) -> None:
+    """Evidence volume varies by an order of magnitude; a fixed cap fits only one size."""
+    assert writer_excerpt_limit(excerpt_count) == expected

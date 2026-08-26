@@ -10,10 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 StatementKind = Literal["evidence", "derived", "elaboration", "limitation"]
 
-# Longest chain of inference allowed above cited material: evidence → derived → derived.
-# Defined and enforced here because it is a property of the draft's shape; every other
-# layer reads this constant instead of re-deciding the ceiling for itself.
-MAX_PREMISE_DEPTH = 2
+# Longest inference chain that Report Verifier may pass. Four levels is what a report
+# that argues rather than lists actually needs: evidence → a judgement about one strand
+# → a section's claim → the report's overall claim. Capping at two forbade that shape
+# outright and pushed every cross-section conclusion into a deterministic rejection.
+# Writer records the complete premise graph, including deeper chains, so the Verifier can
+# make the quality decision and preserve a failed statement in a partial report.
+MAX_PREMISE_DEPTH = 4
 
 
 class WriterSource(BaseModel):
@@ -31,6 +34,11 @@ class WriterExcerptRef(BaseModel):
 
     excerpt_id: UUID
     source: WriterSource
+    # The passage itself, clipped for the prompt budget but never rewritten. Without it
+    # the Writer only has the Assertion's one-line compression to work from, and the
+    # only thing it can do with a list of one-liners is transcribe them one per
+    # sentence. Report Verifier still reads the stored text for the formal verdict.
+    text: str
 
 
 class WriterConflict(BaseModel):
@@ -48,6 +56,10 @@ class WriterEvidenceCard(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     assertion_id: UUID
+    # Which research question this card was collected to answer. A flat, chronologically
+    # ordered pile of cards gives the Writer no structure to build on but the calendar;
+    # grouped by task it can see what each strand of the research was actually asking.
+    task_id: UUID
     assertion_statement: str = Field(..., min_length=1)
     excerpts: list[WriterExcerptRef] = Field(..., min_length=1)
 
@@ -110,37 +122,18 @@ class ReportStatement(BaseModel):
 
 def premise_depth(
     statement: ReportStatement,
-    kinds: Mapping[str, StatementKind],
     depths: Mapping[str, int],
 ) -> int:
-    """How many inference steps *statement* sits above cited material.
+    """Return the structural distance from a derived statement to its premises.
 
-    ``kinds`` and ``depths`` cover the statements already accepted before this one.
-    Raises ValueError when a premise cannot ground a chain — elaboration and
-    limitation carry no evidence at all, so resting a derived statement on one
-    would let a reasoning chain bottom out in nothing — or when the chain runs
-    deeper than MAX_PREMISE_DEPTH. The wire assembler and the draft validator both
-    call this, so a shape rejected at the end is also rejected as it streams in.
+    The Writer uses this only to retain an exact, acyclic premise graph. Whether a
+    chain is grounded in evidence or exceeds ``MAX_PREMISE_DEPTH`` is a Report
+    Verifier judgement: rejecting it here would prevent the report from entering
+    the statement-level repair and partial-rendering path.
     """
-    groundless = sorted(
-        premise_id
-        for premise_id in statement.premise_statement_ids
-        if kinds[premise_id] not in {"evidence", "derived"}
-    )
-    if groundless:
-        raise ValueError(
-            f"{statement.statement_id} rests on premises that carry no evidence "
-            f"({', '.join(groundless)}); premises must be evidence or derived statements"
-        )
     if statement.kind != "derived":
         return 0
-    depth = 1 + max(depths[premise_id] for premise_id in statement.premise_statement_ids)
-    if depth > MAX_PREMISE_DEPTH:
-        raise ValueError(
-            f"{statement.statement_id} builds a reasoning chain of depth {depth}, "
-            f"deeper than the allowed {MAX_PREMISE_DEPTH}"
-        )
-    return depth
+    return 1 + max(depths[premise_id] for premise_id in statement.premise_statement_ids)
 
 
 class ReportParagraph(BaseModel):
@@ -190,7 +183,7 @@ class ReportDraft(BaseModel):
                         + ", ".join(sorted(unknown))
                     )
                 kinds[statement.statement_id] = statement.kind
-                depths[statement.statement_id] = premise_depth(statement, kinds, depths)
+                depths[statement.statement_id] = premise_depth(statement, depths)
         return self
 
     def paragraphs(self) -> list[ReportParagraph]:

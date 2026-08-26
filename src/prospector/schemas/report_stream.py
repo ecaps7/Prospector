@@ -240,10 +240,11 @@ class ReportStreamAssembler:
                 "premise_statement_ids 只能引用之前已输出的 statement，未知："
                 + ", ".join(sorted(unknown_premises))
             )
-        # Reject an ungrounded or over-deep chain here rather than at build(), so the
-        # model can repair one statement instead of losing an entire generation.
+        # Record the exact premise depth without deciding whether the inference is
+        # grounded or acceptable. Those are Report Verifier checks, so a locally
+        # well-formed Writer stream can enter the sentence-level repair path.
         try:
-            depth = premise_depth(record, self._statement_kinds, self._statement_depths)
+            depth = premise_depth(record, self._statement_depths)
         except ValueError as exc:
             raise ReportStreamError(str(exc)) from exc
         paragraphs = self._current_paragraphs()

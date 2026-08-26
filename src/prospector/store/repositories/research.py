@@ -13,6 +13,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from prospector.config import Settings, get_settings
+from prospector.deterministic.excerpt_text import (
+    PREMISE_EXCERPT_CHAR_LIMIT,
+    clip_excerpt_text,
+)
 from prospector.schemas.brief import EffortLevel, ResearchBrief, UserConstraints
 from prospector.schemas.claims import (
     BridgeStatementDecision,
@@ -33,7 +37,7 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
-from prospector.schemas.report import ReportDraft, WriterSnapshot
+from prospector.schemas.report import ReportDraft, ReportParagraph, WriterSnapshot
 from prospector.schemas.verifier import (
     AssertionDisposition,
     ConflictResolution,
@@ -113,6 +117,47 @@ class ResearchRepository:
                 },
             )
         return event_id
+
+    @classmethod
+    def _phase_event(
+        cls,
+        conn: Connection,
+        *,
+        job_id: UUID,
+        phase: str,
+        plan_version: int | None = None,
+        trigger: str | None = None,
+        revision: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"phase": phase, "outcome": None, "error_code": None}
+        if plan_version is not None:
+            payload["plan_version"] = plan_version
+        if trigger is not None:
+            payload["trigger"] = trigger
+        if revision is not None:
+            payload["revision"] = revision
+        latest = (
+            conn.execute(
+                text(
+                    """
+                    SELECT payload FROM app.events
+                    WHERE job_id=:job_id AND event_type=:event_type
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ),
+                {"job_id": job_id, "event_type": EventType.JOB_PHASE_CHANGED.value},
+            )
+            .scalars()
+            .first()
+        )
+        if latest is not None and all(latest.get(key) == value for key, value in payload.items()):
+            return
+        cls._event(
+            conn,
+            job_id=job_id,
+            event_type=EventType.JOB_PHASE_CHANGED,
+            payload=payload,
+        )
 
     def record_usage(
         self,
@@ -255,7 +300,7 @@ class ResearchRepository:
         prompt: list[dict[str, Any]],
     ) -> None:
         with self.engine.begin() as conn:
-            conn.execute(
+            inserted = conn.execute(
                 text(
                     """
                     INSERT INTO app.decision_log
@@ -270,7 +315,15 @@ class ResearchRepository:
                     "prompt": _json(prompt),
                     "now": datetime.now(UTC),
                 },
-            )
+            ).rowcount
+            if inserted:
+                self._event(
+                    conn,
+                    job_id=job_id,
+                    event_type=EventType.PLANNER_STARTED,
+                    decision_round=decision_round,
+                    payload={"decision_round": decision_round},
+                )
 
     def get_completed_decision(
         self,
@@ -1790,7 +1843,12 @@ class ResearchRepository:
             )
 
     def build_writer_snapshot(self, job_id: UUID, verifier_run_id: UUID) -> WriterSnapshot:
-        """Build the Writer's compact view without Excerpt or Document body text."""
+        """Build the Writer's view: Assertions grouped by task, over clipped Excerpt text.
+
+        Document body text still never reaches the Writer (D12). Excerpt text does: it is
+        the passage a citation resolves to, and withholding it left the Writer with
+        nothing but one-line Assertions to re-serialize.
+        """
         with self.engine.connect() as conn:
             brief = (
                 conn.execute(
@@ -1851,7 +1909,7 @@ class ResearchRepository:
                 for row in conn.execute(
                     text(
                         """
-                        SELECT id, statement, excerpt_ids
+                        SELECT id, task_id, statement, excerpt_ids
                         FROM app.assertions WHERE job_id=:job_id ORDER BY created_at, id
                         """
                     ),
@@ -1864,7 +1922,8 @@ class ResearchRepository:
                 for row in conn.execute(
                     text(
                         """
-                        SELECT e.id AS excerpt_id, d.source_uri, d.version AS document_version,
+                        SELECT e.id AS excerpt_id, e.text,
+                               d.source_uri, d.version AS document_version,
                                d.source_meta->>'title' AS title,
                                d.source_meta->>'author' AS author,
                                d.source_meta->>'published_at' AS published_at
@@ -1907,10 +1966,12 @@ class ResearchRepository:
             cards.append(
                 {
                     "assertion_id": assertion["id"],
+                    "task_id": assertion["task_id"],
                     "assertion_statement": assertion["statement"],
                     "excerpts": [
                         {
                             "excerpt_id": item["excerpt_id"],
+                            "text": item["text"],
                             "source": {
                                 "title": item["title"],
                                 "author": item["author"],
@@ -2063,6 +2124,12 @@ class ResearchRepository:
             ).scalar_one()
             if stored_prompt != full_prompt:
                 raise RuntimeError("Report Writer replayed with a different prompt")
+            self._phase_event(
+                conn,
+                job_id=job_id,
+                phase="writing",
+                revision=revision,
+            )
         return report_id, revision
 
     def complete_report_revision(
@@ -2110,6 +2177,20 @@ class ResearchRepository:
                     """
                 ),
                 {"report_id": report_id, "now": now},
+            )
+            job_id = UUID(
+                str(
+                    conn.execute(
+                        text("SELECT job_id FROM app.reports WHERE id=:report_id"),
+                        {"report_id": report_id},
+                    ).scalar_one()
+                )
+            )
+            self._phase_event(
+                conn,
+                job_id=job_id,
+                phase="verifying",
+                revision=revision,
             )
             statement_order = 0
             paragraph_groups = [
@@ -2195,6 +2276,20 @@ class ResearchRepository:
             ).rowcount
             if updated != 1:
                 raise RuntimeError("Report is missing")
+            row = (
+                conn.execute(
+                    text("SELECT job_id, current_revision FROM app.reports WHERE id=:report_id"),
+                    {"report_id": report_id},
+                )
+                .mappings()
+                .one()
+            )
+            self._phase_event(
+                conn,
+                job_id=UUID(str(row["job_id"])),
+                phase=status,
+                revision=int(row["current_revision"]),
+            )
 
     def begin_report_verifier_run(
         self,
@@ -2498,6 +2593,20 @@ class ResearchRepository:
                 ),
                 {"report_id": report_id, "status": next_status, "now": now},
             )
+            job_id = UUID(
+                str(
+                    conn.execute(
+                        text("SELECT job_id FROM app.reports WHERE id=:report_id"),
+                        {"report_id": report_id},
+                    ).scalar_one()
+                )
+            )
+            self._phase_event(
+                conn,
+                job_id=job_id,
+                phase=next_status,
+                revision=revision,
+            )
 
     def _persist_claim_decisions(
         self,
@@ -2603,13 +2712,9 @@ class ResearchRepository:
                     if prior is not None:
                         premise_claim_ids.append(str(prior))
                         claim_ids[premise_id] = UUID(str(prior))
-                depth = min(
-                    1
-                    + max(
-                        (self._claim_depth(conn, UUID(value)) for value in premise_claim_ids),
-                        default=0,
-                    ),
-                    2,
+                depth = 1 + max(
+                    (self._claim_depth(conn, UUID(value)) for value in premise_claim_ids),
+                    default=0,
                 )
                 conn.execute(
                     text(
@@ -2704,9 +2809,30 @@ class ResearchRepository:
             passed_ids = self.get_passed_statement_ids(report_id, revision=revision)
 
         statement_map = {item.statement_id: item for item in draft.statements()}
-        # Depth for derived premises: evidence leaves = 0. ReportDraft already refuses
-        # chains deeper than MAX_PREMISE_DEPTH, so this reports the real depth instead
-        # of clamping a violation out of sight.
+        # Where each statement sits, so a derived verdict can be judged against the
+        # paragraph it generalizes over instead of its premise ids alone.
+        location: dict[str, tuple[str | None, list[dict[str, Any]]]] = {}
+        scopes: list[tuple[str | None, list[ReportParagraph]]] = [
+            (None, list(draft.introduction)),
+            *((section.title, list(section.paragraphs)) for section in draft.sections),
+            (None, list(draft.conclusion)),
+        ]
+        for section_title, paragraphs in scopes:
+            for paragraph in paragraphs:
+                rendered = [
+                    {
+                        "statement_id": item.statement_id,
+                        "text": item.text,
+                        "kind": item.kind,
+                    }
+                    for item in paragraph.statements
+                ]
+                for item in paragraph.statements:
+                    location[item.statement_id] = (section_title, rendered)
+
+        # Depth is a structural measurement. It must be carried without clamping so
+        # Report Verifier can reject an over-deep statement through the normal
+        # revision/partial-report path.
         depth_cache: dict[str, int] = {}
 
         def statement_depth(statement_id: str) -> int:
@@ -2753,14 +2879,31 @@ class ResearchRepository:
             # gate does not fire before those waves run.
             for premise_id in statement.premise_statement_ids:
                 premise = statement_map[premise_id]
+                # An evidence premise carries the reasoning's factual base. Without its
+                # Excerpt the verifier can only take the premise sentence's word for it,
+                # which is exactly what a miscalibration verdict is supposed to catch.
+                premise_excerpts = [
+                    {
+                        "text": clip_excerpt_text(
+                            excerpts[excerpt_id]["text"], PREMISE_EXCERPT_CHAR_LIMIT
+                        ),
+                        "title": excerpts[excerpt_id]["title"],
+                        "url": excerpts[excerpt_id]["url"],
+                    }
+                    for excerpt_id in premise.candidate_excerpt_ids
+                    if excerpt_id in excerpts
+                ]
                 premises.append(
                     {
                         "statement_id": premise_id,
                         "text": premise.text,
                         "kind": premise.kind,
                         "passed": premise_id in passed_ids,
+                        "excerpts": premise_excerpts,
                     }
                 )
+            section_title, paragraph_statements = location.get(statement.statement_id, (None, []))
+            derived = statement.kind == "derived"
             inputs.append(
                 ReportVerifierStatementInput(
                     statement_id=statement.statement_id,
@@ -2770,6 +2913,8 @@ class ResearchRepository:
                     premises=premises,
                     premises_all_passed=premises_all_passed,
                     premise_depth=statement_depth(statement.statement_id),
+                    section_title=section_title if derived else None,
+                    paragraph_statements=paragraph_statements if derived else [],
                 )
             )
         if not inputs:
@@ -2920,54 +3065,16 @@ class ResearchRepository:
         *,
         plan_version: int | None = None,
         trigger: str | None = None,
+        revision: int | None = None,
     ) -> None:
-        payload: dict[str, Any] = {"phase": phase, "outcome": None, "error_code": None}
-        if plan_version is not None:
-            payload["plan_version"] = plan_version
-        if trigger is not None:
-            payload["trigger"] = trigger
         with self.engine.begin() as conn:
-            if plan_version is None:
-                exists = conn.execute(
-                    text(
-                        """
-                        SELECT 1 FROM app.events
-                        WHERE job_id=:job_id AND event_type=:event_type
-                          AND payload->>'phase'=:phase
-                        LIMIT 1
-                        """
-                    ),
-                    {
-                        "job_id": job_id,
-                        "event_type": EventType.JOB_PHASE_CHANGED.value,
-                        "phase": phase,
-                    },
-                ).scalar_one_or_none()
-            else:
-                exists = conn.execute(
-                    text(
-                        """
-                        SELECT 1 FROM app.events
-                        WHERE job_id=:job_id AND event_type=:event_type
-                          AND payload->>'phase'=:phase
-                          AND payload->>'plan_version'=:plan_version
-                        LIMIT 1
-                        """
-                    ),
-                    {
-                        "job_id": job_id,
-                        "event_type": EventType.JOB_PHASE_CHANGED.value,
-                        "phase": phase,
-                        "plan_version": str(plan_version),
-                    },
-                ).scalar_one_or_none()
-            if exists:
-                return
-            self._event(
+            self._phase_event(
                 conn,
                 job_id=job_id,
-                event_type=EventType.JOB_PHASE_CHANGED,
-                payload=payload,
+                phase=phase,
+                plan_version=plan_version,
+                trigger=trigger,
+                revision=revision,
             )
 
     def list_events(self, job_id: UUID) -> list[dict[str, Any]]:
