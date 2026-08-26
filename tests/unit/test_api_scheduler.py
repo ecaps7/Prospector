@@ -21,6 +21,8 @@ class FakeJobRepository:
         self.failed: list[tuple[UUID, str]] = []
         self.cancelled: list[UUID] = []
         self.cancel_requests: dict[UUID, str] = {}
+        self.cancel_finalization_attempted = threading.Event()
+        self.fail_cancel_finalization_once = False
 
     def finalize_pending_cancellations(self) -> None:
         pass
@@ -28,13 +30,18 @@ class FakeJobRepository:
     def cancel_requested(self, job_id: UUID) -> bool:
         return self.cancel_requests.get(job_id) in {"cancelling", "cancelled"}
 
-    def request_cancel(self, job_id: UUID) -> str | None:
+    def request_cancel(self, job_id: UUID, *, requested_via: str) -> str | None:
+        assert requested_via in {"web_monitor", "cli"}
         if not any(item["job_id"] == job_id for item in self.created):
             return None
         self.cancel_requests[job_id] = "cancelling"
         return "cancelling"
 
     def finalize_cancelled(self, job_id: UUID) -> None:
+        self.cancel_finalization_attempted.set()
+        if self.fail_cancel_finalization_once:
+            self.fail_cancel_finalization_once = False
+            raise RuntimeError("cancel finalization failed")
         self.cancel_requests[job_id] = "cancelled"
         if job_id not in self.cancelled:
             self.cancelled.append(job_id)
@@ -181,10 +188,43 @@ async def test_scheduler_cancels_running_job_instead_of_completing_it() -> None:
     try:
         created = await scheduler.submit(ResearchBrief(question="Q", brief_text="Brief"))
         await asyncio.to_thread(started.wait, 2)
-        assert await scheduler.cancel(created["job_id"]) == "cancelling"
+        assert await scheduler.cancel(created["job_id"], requested_via="cli") == "cancelling"
         release.set()
         await _wait_until(lambda: repository.cancelled == [created["job_id"]])
         assert repository.completed == []
     finally:
         release.set()
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_one_finalization_failure_does_not_kill_later_jobs() -> None:
+    repository = FakeJobRepository()
+    repository.fail_cancel_finalization_once = True
+    first_started = threading.Event()
+    release_first = threading.Event()
+    run_order: list[UUID] = []
+
+    def run_job(job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
+        run_order.append(job_id)
+        if len(run_order) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+
+    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    await scheduler.start()
+    try:
+        brief = ResearchBrief(question="Q", brief_text="Brief")
+        first = await scheduler.submit(brief)
+        await asyncio.to_thread(first_started.wait, 2)
+        assert await scheduler.cancel(first["job_id"], requested_via="cli") == "cancelling"
+        release_first.set()
+        await asyncio.to_thread(repository.cancel_finalization_attempted.wait, 2)
+
+        second = await scheduler.submit(brief)
+        await _wait_until(lambda: second["job_id"] in repository.completed)
+        assert run_order == [first["job_id"], second["job_id"]]
+    finally:
+        release_first.set()
         await scheduler.stop()

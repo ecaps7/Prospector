@@ -33,6 +33,7 @@ def _detail(job_id: UUID, task_id: UUID) -> JobDetail:
         brief_id=uuid4(),
         language="zh",
         plan_version=1,
+        latest_event_id=0,
         tasks=[
             JobTaskView(
                 task_id=task_id,

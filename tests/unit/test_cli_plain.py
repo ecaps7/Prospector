@@ -24,6 +24,7 @@ def _detail(job_id: UUID, tasks: list[JobTaskView]) -> JobDetail:
         brief_id=uuid4(),
         language="zh",
         plan_version=1,
+        latest_event_id=0,
         tasks=tasks,
         usage=[],
         report=None,

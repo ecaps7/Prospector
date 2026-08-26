@@ -147,6 +147,7 @@ def test_terminal_failure_exit_codes(monkeypatch) -> None:
             brief_id=uuid4(),
             language="zh",
             plan_version=1,
+            latest_event_id=0,
             tasks=[],
             usage=[],
             report=None,

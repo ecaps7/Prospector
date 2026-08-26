@@ -99,6 +99,9 @@ class FakeRepository:
 
 
 class FakeScheduler:
+    def __init__(self) -> None:
+        self.cancel_source: str | None = None
+
     async def start(self) -> None:
         pass
 
@@ -113,7 +116,8 @@ class FakeScheduler:
             "queue_position": None,
         }
 
-    async def cancel(self, job_id: UUID) -> str | None:
+    async def cancel(self, job_id: UUID, *, requested_via: str) -> str | None:
+        self.cancel_source = requested_via
         return "cancelled" if job_id else None
 
 
@@ -183,6 +187,22 @@ def test_encoded_job_stopped_matches_published_event_schema() -> None:
         }
     )
     sse_event_adapter.validate_json(_sse_data(frame))
+
+
+def test_encoded_planner_started_matches_published_event_schema() -> None:
+    frame = encode_event(
+        {
+            "id": 3,
+            "event_type": "planner.started",
+            "payload": {"decision_round": 1},
+            "task_id": None,
+            "decision_round": 1,
+            "created_at": datetime(2026, 7, 19, tzinfo=UTC),
+        }
+    )
+    event = sse_event_adapter.validate_json(_sse_data(frame)).root
+    assert event.event_type == "planner.started"
+    assert event.payload.decision_round == 1
 
 
 def test_sse_openapi_documents_event_envelope_and_reconnect() -> None:
@@ -375,13 +395,22 @@ def test_invalid_sse_cursor_and_report_states_use_structured_errors() -> None:
 
 def test_cancel_endpoint_returns_structured_terminal_status() -> None:
     repository = FakeRepository()
-    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
-        response = client.post(f"/api/jobs/{repository.job_id}/cancel")
+    services = _services(repository)
+    scheduler = cast(FakeScheduler, services.scheduler)
+    with TestClient(create_app(services, validate_startup=False)) as client:
+        response = client.post(
+            f"/api/jobs/{repository.job_id}/cancel",
+            json={"requested_via": "web_monitor"},
+        )
         assert response.status_code == 200
         assert response.json() == {
             "job_id": str(repository.job_id),
             "status": "cancelled",
         }
+        assert scheduler.cancel_source == "web_monitor"
+
+        missing_source = client.post(f"/api/jobs/{repository.job_id}/cancel")
+        assert missing_source.status_code == 422
 
 
 def test_unprefixed_routes_are_not_kept_as_aliases() -> None:

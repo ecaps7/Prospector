@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from prospector.schemas.brief import EffortLevel, ResearchBrief
+from prospector.schemas.plan import TaskStatus
 
 
 class ScopeRequest(BaseModel):
@@ -76,6 +77,10 @@ class JobCreateResponse(BaseModel):
     queue_position: int | None = Field(default=None, ge=1)
 
 
+class JobCancelRequest(BaseModel):
+    requested_via: Literal["web_monitor", "cli"]
+
+
 class JobCancelResponse(BaseModel):
     job_id: UUID
     status: Literal["cancelling", "cancelled"]
@@ -106,7 +111,7 @@ class JobTaskView(BaseModel):
     subjects: list[str]
     research_stage: str
     research_mode: str
-    status: str
+    status: TaskStatus
     stop_reason: str | None
     budget: dict[str, Any]
     tool_calls_used: int
@@ -134,6 +139,7 @@ class JobDetail(JobListItem):
     brief_id: UUID | None
     language: str | None
     plan_version: int
+    latest_event_id: int
     tasks: list[JobTaskView]
     usage: list[UsageView]
     report: ReportView | None

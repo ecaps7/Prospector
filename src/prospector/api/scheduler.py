@@ -14,7 +14,7 @@ from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.research_graph import VerifierMajorGapError
 from prospector.obs.logging import get_logger
 from prospector.schemas.brief import ResearchBrief
-from prospector.store.repositories.jobs import JobRepository
+from prospector.store.repositories.jobs import CancelRequestSource, JobRepository
 
 RunJob = Callable[[UUID, UUID], Mapping[str, Any]]
 
@@ -72,6 +72,8 @@ class JobScheduler:
 
     async def submit(self, brief: ResearchBrief) -> dict[str, Any]:
         async with self._state_lock:
+            if self._worker is None or self._worker.done():
+                raise RuntimeError("Job scheduler is not running")
             start_immediately = self._active_job_id is None and self._queue.empty()
             created = await asyncio.to_thread(
                 self.repository.create_with_brief,
@@ -84,9 +86,13 @@ class JobScheduler:
             await self._queue.put(job_id)
             return created
 
-    async def cancel(self, job_id: UUID) -> str | None:
+    async def cancel(self, job_id: UUID, *, requested_via: CancelRequestSource) -> str | None:
         async with self._state_lock:
-            return await asyncio.to_thread(self.repository.request_cancel, job_id)
+            return await asyncio.to_thread(
+                self.repository.request_cancel,
+                job_id,
+                requested_via=requested_via,
+            )
 
     async def _consume(self) -> None:
         while True:
@@ -133,6 +139,12 @@ class JobScheduler:
                         await asyncio.to_thread(self.repository.finalize_cancelled, job_id)
                     else:
                         await asyncio.to_thread(self.repository.finalize_success, job_id, result)
+            except Exception as exc:
+                log.exception(
+                    "job.scheduler_iteration_failed",
+                    job_id=str(job_id),
+                    message=str(exc),
+                )
             finally:
                 async with self._state_lock:
                     if self._active_job_id == job_id:

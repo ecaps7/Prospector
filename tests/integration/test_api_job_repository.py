@@ -183,10 +183,72 @@ def test_job_detail_aggregates_persisted_model_and_tool_usage() -> None:
 
         detail = jobs.get_job(job_id)
         assert detail is not None
+        assert detail["latest_event_id"] == jobs.list_events_after(job_id, 0)[-1]["id"]
         by_component = {row["component"]: row for row in detail["usage"]}
         assert by_component["planner"]["input_tokens"] == 120
         assert by_component["planner"]["output_tokens"] == 30
         assert by_component["research_worker_tools"]["tool_calls"] == 1
+    finally:
+        with jobs.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_job_detail_orders_tasks_by_first_plan_appearance() -> None:
+    jobs = JobRepository()
+    created = jobs.create_with_brief(
+        ResearchBrief(question="Task order integration", brief_text="Verify plan task order."),
+        start_immediately=True,
+    )
+    job_id = created["job_id"]
+    task_ids = [
+        UUID("00000000-0000-0000-0000-000000000301"),
+        UUID("00000000-0000-0000-0000-000000000302"),
+        UUID("00000000-0000-0000-0000-000000000303"),
+    ]
+    plan_order = [task_ids[2], task_ids[0], task_ids[1]]
+    try:
+        with jobs.engine.begin() as conn:
+            for task_id in task_ids:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO app.tasks
+                          (id, job_id, question, subjects, research_stage, research_mode,
+                           source_policy, allowed_tools, expected_evidence, depends_on, budget,
+                           status, created_at)
+                        VALUES
+                          (:id, :job_id, :question, '["subject"]'::jsonb, 'scout', 'factual',
+                           '{}'::jsonb, '["web_search"]'::jsonb, 'One exact source excerpt',
+                           '[]'::jsonb, '{"max_worker_rounds": 2}'::jsonb, 'pending',
+                           '2026-08-26T12:00:00Z'::timestamptz)
+                        """
+                    ),
+                    {
+                        "id": task_id,
+                        "job_id": job_id,
+                        "question": f"Task order question {task_id}",
+                    },
+                )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO app.plans
+                      (id, job_id, version, decision_round, task_ids, created_at)
+                    VALUES
+                      (:id, :job_id, 1, 1, CAST(:task_ids AS JSONB),
+                       '2026-08-26T12:00:00Z'::timestamptz)
+                    """
+                ),
+                {
+                    "id": UUID("00000000-0000-0000-0000-000000000399"),
+                    "job_id": job_id,
+                    "task_ids": str([str(task_id) for task_id in plan_order]).replace("'", '"'),
+                },
+            )
+
+        detail = jobs.get_job(job_id)
+        assert detail is not None
+        assert [task["task_id"] for task in detail["tasks"]] == plan_order
     finally:
         with jobs.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
@@ -198,9 +260,42 @@ def test_queued_and_running_jobs_reach_idempotent_cancelled_terminal_state() -> 
     queued = repository.create_with_brief(brief, start_immediately=False)
     running = repository.create_with_brief(brief, start_immediately=True)
     job_ids = [queued["job_id"], running["job_id"]]
+    pending_task_id = UUID("00000000-0000-0000-0000-000000000201")
+    running_task_id = UUID("00000000-0000-0000-0000-000000000202")
     try:
-        assert repository.request_cancel(queued["job_id"]) == "cancelled"
-        assert repository.request_cancel(running["job_id"]) == "cancelling"
+        with repository.engine.begin() as conn:
+            for task_id, status in (
+                (pending_task_id, "pending"),
+                (running_task_id, "running"),
+            ):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO app.tasks
+                          (id, job_id, question, subjects, research_stage, research_mode,
+                           source_policy, allowed_tools, expected_evidence, depends_on, budget,
+                           status, created_at, started_at)
+                        VALUES
+                          (:id, :job_id, :question, '["subject"]'::jsonb, 'scout', 'factual',
+                           '{}'::jsonb, '["web_search"]'::jsonb, :expected_evidence,
+                           '[]'::jsonb, '{"max_worker_rounds": 2}'::jsonb,
+                           :status, NOW(), CASE WHEN :status='running' THEN NOW() ELSE NULL END)
+                        """
+                    ),
+                    {
+                        "id": task_id,
+                        "job_id": running["job_id"],
+                        "question": f"Cancellation integration task {status}",
+                        "expected_evidence": "One exact source excerpt",
+                        "status": status,
+                    },
+                )
+
+        assert repository.request_cancel(queued["job_id"], requested_via="cli") == "cancelled"
+        assert (
+            repository.request_cancel(running["job_id"], requested_via="web_monitor")
+            == "cancelling"
+        )
         repository.finalize_cancelled(running["job_id"])
         repository.finalize_cancelled(running["job_id"])
 
@@ -216,6 +311,18 @@ def test_queued_and_running_jobs_reach_idempotent_cancelled_terminal_state() -> 
             ]
             assert len(stopped) == 1
             assert stopped[0]["payload"]["status"] == "cancelled"
+        cancelling = [
+            event
+            for event in repository.list_events_after(running["job_id"], 0)
+            if event["event_type"] == "job.phase_changed"
+            and event["payload"].get("phase") == "cancelling"
+        ]
+        assert cancelling[0]["payload"]["requested_via"] == "web_monitor"
+        running_detail = repository.get_job(running["job_id"])
+        assert running_detail is not None
+        assert {task["status"] for task in running_detail["tasks"]} == {"cancelled"}
+        assert {task["stop_reason"] for task in running_detail["tasks"]} == {"job_cancelled"}
+        assert all(task["finished_at"] is not None for task in running_detail["tasks"])
         assert not any(row["job_id"] in job_ids for row in repository.recoverable_jobs())
     finally:
         with repository.engine.begin() as conn:

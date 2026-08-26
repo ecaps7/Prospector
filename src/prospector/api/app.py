@@ -27,6 +27,7 @@ from prospector.api.schemas import (
     ErrorResponse,
     ExcerptView,
     HealthResponse,
+    JobCancelRequest,
     JobCancelResponse,
     JobCreateRequest,
     JobCreateResponse,
@@ -318,8 +319,15 @@ def create_app(
         response_model=JobCancelResponse,
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
     )
-    async def cancel_job(job_id: UUID, request: Request) -> JobCancelResponse:
-        status = await runtime(request).scheduler.cancel(job_id)
+    async def cancel_job(
+        job_id: UUID,
+        payload: JobCancelRequest,
+        request: Request,
+    ) -> JobCancelResponse:
+        status = await runtime(request).scheduler.cancel(
+            job_id,
+            requested_via=payload.requested_via,
+        )
         if status is None:
             raise ApiError(404, "job_not_found", "Job not found")
         if status in {"completed", "failed"}:

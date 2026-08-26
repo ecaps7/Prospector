@@ -24,6 +24,7 @@ JobRuntimeStatus = Literal[
     "completed",
     "failed",
 ]
+CancelRequestSource = Literal["web_monitor", "cli"]
 
 
 def _json(value: object) -> str:
@@ -234,7 +235,12 @@ class JobRepository:
             )
         return {"job_id": UUID(str(row["job_id"])), "brief_id": UUID(str(row["brief_id"]))}
 
-    def request_cancel(self, job_id: UUID) -> JobRuntimeStatus | None:
+    def request_cancel(
+        self,
+        job_id: UUID,
+        *,
+        requested_via: CancelRequestSource,
+    ) -> JobRuntimeStatus | None:
         cancel_immediately = False
         with self.engine.begin() as conn:
             current = conn.execute(
@@ -262,7 +268,12 @@ class JobRepository:
                 conn,
                 job_id=job_id,
                 event_type=EventType.JOB_PHASE_CHANGED,
-                payload={"phase": "cancelling", "outcome": None, "error_code": None},
+                payload={
+                    "phase": "cancelling",
+                    "outcome": None,
+                    "error_code": None,
+                    "requested_via": requested_via,
+                },
             )
         if cancel_immediately:
             self.finalize_cancelled(job_id)
@@ -488,7 +499,9 @@ class JobRepository:
                                ) AS phase,
                                j.outcome, j.error_code, j.created_at, j.updated_at,
                                COALESCE((SELECT MAX(version) FROM app.plans p
-                                         WHERE p.job_id=j.id), 0) AS plan_version
+                                         WHERE p.job_id=j.id), 0) AS plan_version,
+                               COALESCE((SELECT MAX(e.id) FROM app.events e
+                                         WHERE e.job_id=j.id), 0) AS latest_event_id
                         FROM app.jobs j
                         LEFT JOIN app.briefs b ON b.id=j.brief_id
                         WHERE j.id=:job_id
@@ -506,10 +519,25 @@ class JobRepository:
                 for row in conn.execute(
                     text(
                         """
+                        WITH first_plan_task AS (
+                            SELECT DISTINCT ON (task_ref.task_id)
+                                   task_ref.task_id::uuid AS task_id,
+                                   p.version AS plan_version,
+                                   task_ref.task_position
+                            FROM app.plans p
+                            CROSS JOIN LATERAL jsonb_array_elements_text(p.task_ids)
+                                WITH ORDINALITY AS task_ref(task_id, task_position)
+                            WHERE p.job_id=:job_id
+                            ORDER BY task_ref.task_id, p.version, task_ref.task_position
+                        )
                         SELECT id AS task_id, question, subjects, research_stage,
                                research_mode, status, stop_reason, budget,
                                tool_calls_used, created_at, started_at, finished_at
-                        FROM app.tasks WHERE job_id=:job_id ORDER BY created_at, id
+                        FROM app.tasks t
+                        LEFT JOIN first_plan_task p ON p.task_id=t.id
+                        WHERE t.job_id=:job_id
+                        ORDER BY p.plan_version NULLS LAST, p.task_position NULLS LAST,
+                                 t.created_at, t.id
                         """
                     ),
                     {"job_id": job_id},

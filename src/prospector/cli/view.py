@@ -134,7 +134,10 @@ class JobView:
                 current.tool_calls_used,
                 snapshot_task.tool_calls_used,
             )
-            if snapshot_task.status in {"done", "failed"} or current.status == "pending":
+            if (
+                snapshot_task.status in {"done", "failed", "cancelled"}
+                or current.status == "pending"
+            ):
                 current.status = snapshot_task.status
         self._renderer.register_tasks(self.tasks)
 

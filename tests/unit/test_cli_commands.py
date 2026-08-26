@@ -59,6 +59,7 @@ class FakeClient:
             brief_id=uuid4(),
             language="zh",
             plan_version=2,
+            latest_event_id=0,
             tasks=[
                 JobTaskView(
                     task_id=uuid4(),

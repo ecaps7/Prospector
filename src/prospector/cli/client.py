@@ -177,7 +177,11 @@ class ProspectorClient:
             raise CliProtocolError("Invalid job response") from exc
 
     def cancel_job(self, job_id: UUID) -> JobCancelResponse:
-        response = self._request("POST", f"/api/jobs/{job_id}/cancel")
+        response = self._request(
+            "POST",
+            f"/api/jobs/{job_id}/cancel",
+            json={"requested_via": "cli"},
+        )
         try:
             return JobCancelResponse.model_validate(response.json())
         except (ValueError, TypeError) as exc:

@@ -17,6 +17,7 @@ class EventType(StrEnum):
     JOB_PHASE_CHANGED = "job.phase_changed"
     JOB_STOPPED = "job.stopped"
     BRIEF_CONFIRMED = "brief.confirmed"
+    PLANNER_STARTED = "planner.started"
     PLANNER_DECIDED = "planner.decided"
     PLANNER_REJECTED = "planner.rejected"
     TASK_STARTED = "task.started"
@@ -51,6 +52,8 @@ class JobPhaseChangedPayload(_EventPayload):
     error_code: str | None = None
     plan_version: int | None = None
     trigger: str | None = None
+    revision: int | None = None
+    requested_via: Literal["web_monitor", "cli"] | None = None
 
 
 class JobStoppedPayload(_EventPayload):
@@ -76,6 +79,10 @@ class PlannerDecidedPayload(_EventPayload):
     task_ids: list[UUID] | None = None
     reason: str | None = None
     note: str | None = None
+
+
+class PlannerStartedPayload(_EventPayload):
+    decision_round: int
 
 
 class PlannerRejectedPayload(_EventPayload):
@@ -204,6 +211,11 @@ class PlannerDecidedEvent(SseEventBase):
     payload: PlannerDecidedPayload
 
 
+class PlannerStartedEvent(SseEventBase):
+    event_type: Literal["planner.started"]
+    payload: PlannerStartedPayload
+
+
 class PlannerRejectedEvent(SseEventBase):
     event_type: Literal["planner.rejected"]
     payload: PlannerRejectedPayload
@@ -253,6 +265,7 @@ SseEventVariant = Annotated[
     JobPhaseChangedEvent
     | JobStoppedEvent
     | BriefConfirmedEvent
+    | PlannerStartedEvent
     | PlannerDecidedEvent
     | PlannerRejectedEvent
     | TaskStartedEvent

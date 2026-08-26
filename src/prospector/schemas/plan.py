@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 ResearchMode = Literal["factual", "comparison", "counterargument", "risk_scan", "timeline"]
 ResearchStage = Literal["scout", "deep_dive", "verify"]
-TaskStatus = Literal["pending", "running", "done", "failed", "skipped"]
+TaskStatus = Literal["pending", "running", "done", "failed", "skipped", "cancelled"]
 AllowedTool = Literal["web_search", "web_fetch", "save_findings"]
 
 
