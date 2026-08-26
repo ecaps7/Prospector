@@ -15,7 +15,7 @@ from typing import Protocol
 from openai import OpenAI
 from pydantic import ValidationError
 
-from prospector.agents.llm import get_openai_client, strong_model
+from prospector.agents.llm import get_openai_client, strong_model, thinking_extra_body
 from prospector.agents.prompts.report_writer import (
     continuation_message,
     patch_restart_message,
@@ -23,7 +23,7 @@ from prospector.agents.prompts.report_writer import (
     report_writer_revision_messages,
     retry_message,
 )
-from prospector.agents.usage import record_usage_value
+from prospector.agents.streaming import stream_text
 from prospector.deterministic.statement_patches import (
     apply_statement_patches,
     preceding_statement_ids,
@@ -70,25 +70,14 @@ class OpenAIReportWriter:
         self,
         messages: list[dict[str, str]],
     ) -> str:
-        stream = self.client.chat.completions.create(
+        return stream_text(
+            self.client,
+            agent="report_writer",
             model=self.model,
+            messages=messages,
             temperature=0.2,
-            messages=messages,  # type: ignore[arg-type]
-            stream=True,
-            stream_options={"include_usage": True},
-            extra_body={"enable_thinking": True},
+            extra_body=thinking_extra_body(self.model),
         )
-        parts: list[str] = []
-        usage = None
-        for chunk in stream:
-            if getattr(chunk, "usage", None) is not None:
-                usage = chunk.usage
-            if chunk.choices:
-                text = getattr(chunk.choices[0].delta, "content", None)
-                if text:
-                    parts.append(text)
-        record_usage_value(usage, self.model)
-        return "".join(parts)
 
     def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:
         messages = report_writer_messages(snapshot)

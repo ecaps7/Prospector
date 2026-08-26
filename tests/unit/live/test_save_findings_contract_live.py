@@ -11,6 +11,7 @@ from prospector.agents.llm import (
     LlmNotConfiguredError,
     get_async_openai_client,
     mid_model,
+    no_thinking_extra_body,
     require_llm_settings,
 )
 from prospector.agents.prompts.research_worker import worker_system_prompt
@@ -64,7 +65,7 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
             },
         ],
         response_format=WORKER_ACTION_RESPONSE_FORMAT,
-        extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
+        extra_body=no_thinking_extra_body(mid_model()),
     )
     content = response.choices[0].message.content
     assert content is not None

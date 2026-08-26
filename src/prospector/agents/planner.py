@@ -10,9 +10,16 @@ from typing import Any, Protocol
 from openai import OpenAI
 from pydantic import ValidationError
 
-from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model, strong_model
+from prospector.agents.llm import (
+    get_openai_client,
+    mid_model,
+    no_thinking_extra_body,
+    strong_model,
+    thinking_extra_body,
+)
 from prospector.agents.prompts.planner import planner_brief_message, planner_system_prompt
-from prospector.agents.usage import record_response_usage, record_usage_value
+from prospector.agents.streaming import stream_text
+from prospector.agents.usage import record_response_usage
 from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
@@ -168,27 +175,14 @@ class OpenAIPlannerModel:
         self.repair_model = repair_model or mid_model()
 
     def _stream_content(self, messages: list[PlannerMessage]) -> str:
-        stream = self.client.chat.completions.create(
+        return stream_text(
+            self.client,
+            agent="planner",
             model=self.model,
+            messages=messages,
             temperature=0.0,
-            messages=messages,  # type: ignore[arg-type]
-            stream=True,
-            stream_options={"include_usage": True},
-            extra_body={"enable_thinking": True},
+            extra_body=thinking_extra_body(self.model),
         )
-        parts: list[str] = []
-        usage = None
-        for chunk in stream:
-            if getattr(chunk, "usage", None) is not None:
-                usage = chunk.usage
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            text = getattr(delta, "content", None)
-            if text:
-                parts.append(text)
-        record_usage_value(usage, self.model)
-        return "".join(parts)
 
     def _repair_content(self, broken_output: str) -> str:
         response = self.client.chat.completions.create(
@@ -196,7 +190,7 @@ class OpenAIPlannerModel:
             temperature=0.0,
             messages=[{"role": "user", "content": _repair_prompt(broken_output)}],
             response_format={"type": "json_object"},
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(self.repair_model),
         )
         record_response_usage(response, self.repair_model)
         if not getattr(response, "choices", None):

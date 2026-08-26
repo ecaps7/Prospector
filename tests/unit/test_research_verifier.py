@@ -419,7 +419,9 @@ def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
     valid = json.dumps(_llm_decision().model_dump(mode="json"), ensure_ascii=False)
     completions = _FakeCompletions("判断如下：" + valid, repaired=valid)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
 
     result = verifier.verify(
         {
@@ -434,11 +436,11 @@ def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
     assert result.decision.release_decision == "pass"
     assert result.decision.conflict_resolutions == []
     first, second = completions.requests
-    assert first["model"] == "strong" and first["stream"] is True
+    assert first["model"] == "qwen-strong" and first["stream"] is True
     assert first["extra_body"] == {"enable_thinking": True}
-    assert second["model"] == "mid"
+    assert second["model"] == "qwen-mid"
     assert second["response_format"] == {"type": "json_object"}
-    assert second["extra_body"] == {"enable_thinking": False, "thinking": {"type": "disabled"}}
+    assert second["extra_body"] == {"enable_thinking": False}
 
 
 def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> None:
@@ -461,12 +463,17 @@ def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> 
     )
     completions = _FakeCompletions([illegal, legal])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
 
     result = verifier.verify(snapshot)
 
     assert result.decision.release_decision == "needs_research"
-    assert [request["model"] for request in completions.requests] == ["strong", "strong"]
+    assert [request["model"] for request in completions.requests] == [
+        "qwen-strong",
+        "qwen-strong",
+    ]
     retry_messages = completions.requests[1]["messages"]
     assert retry_messages[:2] == research_verifier_messages(snapshot)
     assert retry_messages[-2] == {"role": "assistant", "content": illegal}
@@ -489,7 +496,9 @@ def test_verifier_binds_conflict_judgements_to_excerpt_ids() -> None:
     content = json.dumps(llm, ensure_ascii=False)
     completions = _FakeCompletions(content)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
 
     result = verifier.verify(
         {
@@ -537,14 +546,19 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
     )
     completions = _FakeCompletions([illegal, legal])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
 
     result = verifier.verify(snapshot)
 
     assert result.decision.conflict_resolutions == []
     assert [item.assertion_id for item in result.decision.assertion_dispositions] == [ASSERTION_B]
     # Judgement errors go to the model that made them, never to the snapshot-blind repair model.
-    assert [request["model"] for request in completions.requests] == ["strong", "strong"]
+    assert [request["model"] for request in completions.requests] == [
+        "qwen-strong",
+        "qwen-strong",
+    ]
     retry = completions.requests[1]["messages"][-1]["content"]
     # Named, so the model can tell which of several judgements to drop, and told where to put it.
     assert "论文发表年份是 2024 还是 2025" in retry
@@ -554,7 +568,9 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
 def test_verifier_raises_when_structural_repair_is_still_invalid() -> None:
     completions = _FakeCompletions("not json", repaired='{"release_decision":"pass"}')
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIResearchVerifier(client=cast(Any, client), model="strong", repair_model="mid")
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
 
     with pytest.raises(VerifierOutputError, match="repair failed"):
         verifier.verify({})

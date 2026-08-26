@@ -584,7 +584,7 @@ async def test_openai_summary_uses_required_fixed_slots_and_returns_ledger_order
         ),
     ]
     client = FakeSummaryClient({"summary_1": "第二条摘要。", "summary_0": "第一条摘要。"})
-    model = OpenAIWorkerModel(client=cast(Any, client), model="test-model")
+    model = OpenAIWorkerModel(client=cast(Any, client), model="qwen-test-model")
 
     texts = await model.summarize(assertions)
 
@@ -605,7 +605,7 @@ async def test_openai_summary_rejects_missing_fixed_slot() -> None:
         produced_by={"task_id": str(uuid4()), "worker": "rw_test"},
     )
     client = FakeSummaryClient({})
-    model = OpenAIWorkerModel(client=cast(Any, client), model="test-model")
+    model = OpenAIWorkerModel(client=cast(Any, client), model="qwen-test-model")
 
     with pytest.raises(ValueError, match="every fixed summary slot exactly once"):
         await model.summarize([assertion])
@@ -645,7 +645,7 @@ async def test_openai_worker_action_uses_json_object_format() -> None:
     )
     message = FakeActionMessage(content=content)
     client = FakeActionClient(message)
-    model = OpenAIWorkerModel(client=cast(Any, client), model="test-model")
+    model = OpenAIWorkerModel(client=cast(Any, client), model="qwen-test-model")
 
     action = await model.next_action([])
 
@@ -662,7 +662,7 @@ async def test_openai_worker_action_uses_json_object_format() -> None:
     prose_message = FakeActionMessage(content='我认为可以结束。\n{"goal_met": true}')
     prose_model = OpenAIWorkerModel(
         client=cast(Any, FakeActionClient(prose_message)),
-        model="test-model",
+        model="qwen-test-model",
     )
     with pytest.raises(ValidationError):
         await prose_model.next_action([])
@@ -690,7 +690,7 @@ async def test_openai_worker_save_action_keeps_findings_as_an_array() -> None:
     )
     model = OpenAIWorkerModel(
         client=cast(Any, FakeActionClient(FakeActionMessage(content=content))),
-        model="test-model",
+        model="qwen-test-model",
     )
 
     action = await model.next_action([])

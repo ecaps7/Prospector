@@ -53,8 +53,8 @@ class _FakeClient:
 def _model(client: _FakeClient) -> OpenAIPlannerModel:
     return OpenAIPlannerModel(
         client=client,  # type: ignore[arg-type]
-        model="test-model",
-        repair_model="test-repair-model",
+        model="qwen-test-model",
+        repair_model="qwen-test-repair-model",
     )
 
 
@@ -112,6 +112,20 @@ def test_planner_strips_code_fences_before_parsing() -> None:
     assert len(client.completions.requests) == 1
 
 
+def test_planner_uses_deepseek_thinking_parameter() -> None:
+    client = _FakeClient(json.dumps(_dispatch_payload(), ensure_ascii=False))
+    model = OpenAIPlannerModel(
+        client=client,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        repair_model="deepseek-v4-flash",
+    )
+
+    model.decide([])
+
+    (request,) = client.completions.requests
+    assert request["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
 def test_planner_repairs_broken_json_with_light_structured_model() -> None:
     valid = json.dumps(_dispatch_payload(), ensure_ascii=False)
     client = _FakeClient("经过思考，我的决定是：" + valid, repair_text=valid)
@@ -122,12 +136,9 @@ def test_planner_repairs_broken_json_with_light_structured_model() -> None:
     stream_request, repair_request = client.completions.requests
     assert stream_request["stream"] is True
     assert repair_request.get("stream") is None
-    assert repair_request["model"] == "test-repair-model"
+    assert repair_request["model"] == "qwen-test-repair-model"
     assert repair_request["response_format"] == {"type": "json_object"}
-    assert repair_request["extra_body"] == {
-        "enable_thinking": False,
-        "thinking": {"type": "disabled"},
-    }
+    assert repair_request["extra_body"] == {"enable_thinking": False}
     assert isinstance(result.raw_output, dict)
     assert result.raw_output["repaired_content"] == valid
 

@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_async_openai_client, mid_model
+from prospector.agents.llm import get_async_openai_client, mid_model, no_thinking_extra_body
 from prospector.agents.prompts.research_worker import (
     worker_constraints_message,
     worker_coverage_message,
@@ -474,7 +474,7 @@ class OpenAIWorkerModel:
                 temperature=0.0,
                 messages=repair_messages,  # type: ignore[arg-type]
                 response_format=WORKER_ACTION_RESPONSE_FORMAT,
-                extra_body=NO_THINKING_EXTRA_BODY,
+                extra_body=no_thinking_extra_body(self.model),
             )
             content = choice.message.content
             if not content:
@@ -522,7 +522,7 @@ class OpenAIWorkerModel:
                 }
             ],
             response_format={"type": "json_object"},
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(self.model),
         )
         content = choice.message.content
         if not content:
@@ -573,7 +573,7 @@ class OpenAIWorkerModel:
                 "function": {"name": SUMMARY_TOOL_NAME},
             },
             parallel_tool_calls=False,
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(self.model),
         )
         calls = choice.message.tool_calls or []
         call = calls[0] if len(calls) == 1 else None

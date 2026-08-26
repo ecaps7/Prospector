@@ -9,7 +9,7 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
-from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model
+from prospector.agents.llm import get_openai_client, mid_model, no_thinking_extra_body
 from prospector.agents.prompts.scope import clarify_prompt, write_brief_prompt
 from prospector.config import Settings
 from prospector.obs.logging import get_logger
@@ -74,7 +74,7 @@ def _chat_json(
             temperature=0.0,
             messages=messages,
             response_format={"type": "json_object"},
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(model),
         )
     except Exception:
         log.debug("llm.call.json_object_fallback", label=label, model=model)
@@ -82,7 +82,7 @@ def _chat_json(
             model=model,
             temperature=0.0,
             messages=messages,
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(model),
         )
     content = None
     if getattr(response, "choices", None):
