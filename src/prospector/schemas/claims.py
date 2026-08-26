@@ -7,12 +7,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from prospector.schemas.report import MAX_PREMISE_DEPTH
-
 ClaimType = Literal["fact", "number", "causal", "opinion_attributed"]
 ClaimGrounding = Literal["evidence", "derived"]
 EvidenceRelation = Literal["support", "contradict", "partial"]
 VerdictStatus = Literal["pass", "unsupported", "conflicted", "overreach", "miscalibrated"]
+# What a derived statement is doing, which decides how strict the verdict should be.
+# Judging a generalization by a causal standard rejects the ordinary work of a research
+# report; judging a causal claim by a generalization standard lets attribution through.
+InferenceType = Literal["generalization", "causal", "comparison", "restatement"]
 MAX_REPORT_REVISION_ROUNDS = 2
 
 
@@ -52,6 +54,8 @@ class DerivedStatementDecision(BaseModel):
     statement_id: str
     kind: Literal["derived"] = "derived"
     claim_type: ClaimType = "causal"
+    # Defaulted so a deterministic verdict raised before the model runs stays valid.
+    inference_type: InferenceType = "generalization"
     inference_note: str = Field(..., min_length=1)
     status: VerdictStatus
     reason: str = Field(..., min_length=1)
@@ -95,7 +99,14 @@ class ReportVerifierFindings(BaseModel):
 
 
 class ReportVerifierStatementInput(BaseModel):
-    """One statement plus the evidence/premise context the model may see."""
+    """One statement plus the evidence/premise context the model may see.
+
+    ``section_title`` and ``paragraph_statements`` are populated for derived statements
+    only. A generalization can only be judged against the material it generalizes over,
+    and that material sits in the surrounding paragraph rather than in the handful of
+    ids the Writer happened to name as premises. Evidence statements deliberately keep
+    the narrow view: their neighbours must never stand in for the cited Excerpt.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -105,7 +116,9 @@ class ReportVerifierStatementInput(BaseModel):
     candidate_excerpts: list[dict[str, Any]] = Field(default_factory=list)
     premises: list[dict[str, Any]] = Field(default_factory=list)
     premises_all_passed: bool = True
-    premise_depth: int = Field(default=0, ge=0, le=MAX_PREMISE_DEPTH)
+    premise_depth: int = Field(default=0, ge=0)
+    section_title: str | None = None
+    paragraph_statements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ReportVerifierSnapshot(BaseModel):

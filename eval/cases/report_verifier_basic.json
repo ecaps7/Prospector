@@ -42,6 +42,52 @@
         "premise_depth": 0
       },
       {
+        "statement_id": "s_scoped_pattern",
+        "text": "就本次试点覆盖的三个站点、六周窗口而言，接驳车运行期间等待时间与满意度两项指标同向改善。",
+        "kind": "derived",
+        "candidate_excerpts": [],
+        "premises": [
+          {
+            "statement_id": "s_wait_time",
+            "text": "试点期间，乘客平均等待时间从12分钟下降到8分钟。",
+            "kind": "evidence",
+            "passed": true,
+            "excerpts": [
+              {
+                "text": "试点在A、B、C三个地铁站运行六周，共调查1200名乘客。乘客平均等待时间从12分钟下降到8分钟，满意度从68%上升到74%。",
+                "title": "地铁接驳车试点评估报告",
+                "url": "https://example.test/metro-pilot"
+              }
+            ]
+          }
+        ],
+        "premises_all_passed": true,
+        "premise_depth": 1,
+        "section_title": "试点结果",
+        "paragraph_statements": [
+          {
+            "statement_id": "s_wait_time",
+            "text": "试点期间，乘客平均等待时间从12分钟下降到8分钟。",
+            "kind": "evidence"
+          },
+          {
+            "statement_id": "s_satisfaction",
+            "text": "同期乘客满意度从68%上升到74%。",
+            "kind": "evidence"
+          },
+          {
+            "statement_id": "s_scoped_pattern",
+            "text": "就本次试点覆盖的三个站点、六周窗口而言，接驳车运行期间等待时间与满意度两项指标同向改善。",
+            "kind": "derived"
+          },
+          {
+            "statement_id": "s_citywide_congestion",
+            "text": "该试点已经证明，推广到全市可以降低交通拥堵。",
+            "kind": "derived"
+          }
+        ]
+      },
+      {
         "statement_id": "s_citywide_congestion",
         "text": "该试点已经证明，推广到全市可以降低交通拥堵。",
         "kind": "derived",
@@ -51,11 +97,41 @@
             "statement_id": "s_wait_time",
             "text": "试点期间，乘客平均等待时间从12分钟下降到8分钟。",
             "kind": "evidence",
-            "passed": false
+            "passed": true,
+            "excerpts": [
+              {
+                "text": "试点在A、B、C三个地铁站运行六周，共调查1200名乘客。乘客平均等待时间从12分钟下降到8分钟，满意度从68%上升到74%。",
+                "title": "地铁接驳车试点评估报告",
+                "url": "https://example.test/metro-pilot"
+              }
+            ]
           }
         ],
         "premises_all_passed": true,
-        "premise_depth": 1
+        "premise_depth": 1,
+        "section_title": "试点结果",
+        "paragraph_statements": [
+          {
+            "statement_id": "s_wait_time",
+            "text": "试点期间，乘客平均等待时间从12分钟下降到8分钟。",
+            "kind": "evidence"
+          },
+          {
+            "statement_id": "s_satisfaction",
+            "text": "同期乘客满意度从68%上升到74%。",
+            "kind": "evidence"
+          },
+          {
+            "statement_id": "s_scoped_pattern",
+            "text": "就本次试点覆盖的三个站点、六周窗口而言，接驳车运行期间等待时间与满意度两项指标同向改善。",
+            "kind": "derived"
+          },
+          {
+            "statement_id": "s_citywide_congestion",
+            "text": "该试点已经证明，推广到全市可以降低交通拥堵。",
+            "kind": "derived"
+          }
+        ]
       },
       {
         "statement_id": "s_limitations",
@@ -83,22 +159,38 @@
   "expectations": [
     {
       "statement_id": "s_wait_time",
-      "accepted_statuses": ["pass"],
+      "accepted_statuses": [
+        "pass"
+      ],
       "reason": "原文明确支持等待时间从12分钟下降到8分钟。"
     },
     {
       "statement_id": "s_satisfaction_wrong",
-      "accepted_statuses": ["unsupported", "conflicted"],
+      "accepted_statuses": [
+        "unsupported",
+        "conflicted"
+      ],
       "reason": "原文是从68%上升到74%，不是提高20个百分点，因此不得放行。"
     },
     {
+      "statement_id": "s_scoped_pattern",
+      "accepted_statuses": [
+        "pass"
+      ],
+      "reason": "归纳写明了自己的范围（三个站点、六周），且只说同向改善、不声称因果，应当放行。"
+    },
+    {
       "statement_id": "s_citywide_congestion",
-      "accepted_statuses": ["overreach"],
+      "accepted_statuses": [
+        "overreach"
+      ],
       "reason": "三个站、六周的等待时间变化不能证明全市交通拥堵会下降。"
     },
     {
       "statement_id": "s_limitations",
-      "accepted_statuses": ["pass"],
+      "accepted_statuses": [
+        "pass"
+      ],
       "reason": "原文明确说明没有测量拥堵，也没有长期追踪。"
     }
   ]

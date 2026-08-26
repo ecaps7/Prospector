@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from prospector.agents.prompts.report_verifier import report_verifier_messages
 from prospector.agents.report_verifier import (
     OpenAIReportVerifier,
     ReportVerifierOutputError,
@@ -24,7 +25,12 @@ from prospector.schemas.claims import (
     ReportVerifierStatementInput,
     StatementFailure,
 )
-from prospector.schemas.report import ReportDraft, ReportStatement, WriterSnapshot
+from prospector.schemas.report import (
+    MAX_PREMISE_DEPTH,
+    ReportDraft,
+    ReportStatement,
+    WriterSnapshot,
+)
 from prospector.schemas.report_patch import ReportPatchAssembler
 
 EXCERPT_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -45,10 +51,12 @@ def _snapshot() -> WriterSnapshot:
             "evidence_cards": [
                 {
                     "assertion_id": "30000000-0000-0000-0000-000000000001",
+                    "task_id": "50000000-0000-0000-0000-000000000001",
                     "assertion_statement": "事实",
                     "excerpts": [
                         {
                             "excerpt_id": str(EXCERPT_ID),
+                            "text": "原文片段。",
                             "source": {
                                 "title": "t",
                                 "author": None,
@@ -231,7 +239,7 @@ def test_a_truncated_answer_is_retried_rather_than_sent_to_the_syntax_repairer()
     """Repair cannot recover a length stop: the syntax is fine, the content is missing."""
     completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=1)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     result = verifier.verify(_bridge_snapshot())
 
@@ -244,7 +252,7 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
     """No valid decision means the verifier failed; it does not mean the prose is wrong."""
     completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=99)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     with pytest.raises(ReportVerifierOutputError, match="cut off twice") as raised:
         verifier.verify(_bridge_snapshot())
@@ -259,7 +267,7 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
 def test_unterminated_json_with_stop_reason_is_retried_then_fails_clearly() -> None:
     completions = _MalformedCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     with pytest.raises(ReportVerifierOutputError, match="Unterminated string") as raised:
         verifier.verify(_bridge_snapshot())
@@ -290,7 +298,7 @@ def test_complete_long_reason_is_accepted_without_retry() -> None:
         }
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     result = verifier.verify(
         ReportVerifierSnapshot(
@@ -340,7 +348,7 @@ def test_incomplete_evidence_pairs_are_retried_with_the_rule_that_was_broken() -
     }
     completions = _SequencedCompletions([covers_one, covers_both])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
     result = verifier.verify(
         ReportVerifierSnapshot(
@@ -397,7 +405,7 @@ def test_report_verifier_passes_evidence_and_derived() -> None:
             )
         )
     )
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
     result = verifier.verify(
         ReportVerifierSnapshot(
             job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -458,7 +466,7 @@ def test_derived_with_failed_premises_calls_llm_and_lets_it_decide() -> None:
             )
         )
     )
-    verifier = OpenAIReportVerifier(client=client, model="fake-model")  # type: ignore[arg-type]
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
     result = verifier.verify(
         ReportVerifierSnapshot(
             job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -489,6 +497,77 @@ def test_derived_with_failed_premises_calls_llm_and_lets_it_decide() -> None:
     )
     assert result.findings.all_passed
     assert client.chat.completions.calls == 1
+
+
+def test_verifier_marks_an_overdeep_derived_statement_for_revision_without_an_llm_call() -> None:
+    verifier = OpenAIReportVerifier(client=SimpleNamespace(), model="qwen-fake-model")  # type: ignore[arg-type]
+    snapshot = ReportVerifierSnapshot(
+        job_id=UUID("20000000-0000-0000-0000-000000000001"),
+        report_id=UUID("40000000-0000-0000-0000-000000000001"),
+        revision=1,
+        round=1,
+        brief_question="q",
+        statements=[
+            ReportVerifierStatementInput(
+                statement_id="s_too_deep",
+                text="超出可验证深度的推理。",
+                kind="derived",
+                premises=[
+                    {
+                        "statement_id": "s_one_below",
+                        "text": "下一层推理。",
+                        "kind": "derived",
+                        "passed": True,
+                    }
+                ],
+                premise_depth=MAX_PREMISE_DEPTH + 1,
+            )
+        ],
+    )
+
+    result = verifier.verify(snapshot)
+
+    assert result.findings.passed_statement_ids == []
+    assert [(failure.statement_id, failure.status) for failure in result.findings.failures] == [
+        ("s_too_deep", "overreach")
+    ]
+    assert result.decisions[0].status == "overreach"
+    raw_output = cast(dict[str, object], result.raw_outputs["s_too_deep"])
+    assert raw_output["deterministic_rule"] == ("derived_premise_grounding_or_depth")
+
+
+def test_verifier_marks_an_ungrounded_derived_statement_for_revision_without_an_llm_call() -> None:
+    verifier = OpenAIReportVerifier(client=SimpleNamespace(), model="qwen-fake-model")  # type: ignore[arg-type]
+    snapshot = ReportVerifierSnapshot(
+        job_id=UUID("20000000-0000-0000-0000-000000000001"),
+        report_id=UUID("40000000-0000-0000-0000-000000000001"),
+        revision=1,
+        round=1,
+        brief_question="q",
+        statements=[
+            ReportVerifierStatementInput(
+                statement_id="s_ungrounded",
+                text="把衔接句推成事实结论。",
+                kind="derived",
+                premises=[
+                    {
+                        "statement_id": "s_bridge",
+                        "text": "下文讨论。",
+                        "kind": "elaboration",
+                        "passed": True,
+                    }
+                ],
+                premise_depth=1,
+            )
+        ],
+    )
+
+    result = verifier.verify(snapshot)
+
+    assert [(failure.statement_id, failure.status) for failure in result.findings.failures] == [
+        ("s_ungrounded", "overreach")
+    ]
+    assert "s_bridge" in result.findings.failures[0].reason
 
 
 def test_apply_statement_patches_only_replaces_named_sentences() -> None:
@@ -565,13 +644,8 @@ def test_patch_assembler_rejects_a_premise_that_comes_later_in_the_draft() -> No
 def test_writer_revise_retries_when_the_assembled_draft_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Invariants that span the finished draft cannot be judged patch by patch.
-
-    Grounding a sentence on an elaboration passes every per-patch check -- the premise does
-    stand earlier -- and only fails once the draft is rebuilt, because an elaboration carries
-    no evidence for the chain to bottom out in. Raising there used to end the Job outright.
-    """
-    writer = OpenAIReportWriter(client=SimpleNamespace(), model="fake-model")  # type: ignore[arg-type]
+    """A malformed patch is retried before the report revision is rejected."""
+    writer = OpenAIReportWriter(client=SimpleNamespace(), model="qwen-fake-model")  # type: ignore[arg-type]
 
     def patch(**fields: object) -> str:
         return "\n".join(
@@ -588,7 +662,7 @@ def test_writer_revise_retries_when_the_assembled_draft_is_rejected(
                 text="由引言推出的说法。",
                 kind="derived",
                 candidate_excerpt_ids=[],
-                premise_statement_ids=["s_intro"],
+                premise_statement_ids=[],
             ),
             patch(
                 statement_id="s_fact",
@@ -624,14 +698,14 @@ def test_writer_revise_retries_when_the_assembled_draft_is_rejected(
 
     assert _text_of(result.draft, "s_fact") == "补丁事实"
     assert len(prompts) == 2
-    # The whole set is re-requested: the rejection belongs to the patches taken together.
+    # A malformed stream record is corrected before the revision is rejected.
     restart = prompts[1][-1]["content"]
-    assert "整体应用到草稿后不通过" in restart
-    assert "重新输出完整的补丁集" in restart
+    assert "derived statement requires premise_statement_ids" in restart
+    assert "已接受的最后一条记录" in restart
 
 
 def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
-    writer = OpenAIReportWriter(client=SimpleNamespace(), model="fake-model")  # type: ignore[arg-type]
+    writer = OpenAIReportWriter(client=SimpleNamespace(), model="qwen-fake-model")  # type: ignore[arg-type]
     lines = [
         json.dumps(
             {
@@ -662,3 +736,127 @@ def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = writer.revise(_snapshot(), _draft(), findings)
     assert _text_of(result.draft, "s_fact") == "补丁事实"
+
+
+def test_derived_at_the_depth_cap_is_left_to_the_llm() -> None:
+    """The cap is the last passable depth, not the first rejected one.
+
+    A report that argues rather than lists needs evidence → strand → section → report,
+    so the boundary case has to reach the model instead of being refused structurally.
+    """
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(
+                {
+                    "s_at_cap": {
+                        "statement_id": "s_at_cap",
+                        "kind": "derived",
+                        "claim_type": "fact",
+                        "inference_type": "generalization",
+                        "inference_note": "由分论点收束为全文论点",
+                        "status": "pass",
+                        "reason": "归纳范围已写明",
+                    }
+                }
+            )
+        )
+    )
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_at_cap",
+                    text="就本报告收集到的材料而言，这些线索指向同一个判断。",
+                    kind="derived",
+                    premises=[
+                        {
+                            "statement_id": "s_one_below",
+                            "text": "下一层推理。",
+                            "kind": "derived",
+                            "passed": True,
+                        }
+                    ],
+                    premise_depth=MAX_PREMISE_DEPTH,
+                )
+            ],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert client.chat.completions.calls == 1
+
+
+def test_derived_prompt_carries_paragraph_and_premise_excerpts() -> None:
+    """Whatever a generalization is judged against has to be in front of the judge."""
+    statement = ReportVerifierStatementInput(
+        statement_id="s_pattern",
+        text="这些案例显示落地集中在流程标准化的场景。",
+        kind="derived",
+        premises=[
+            {
+                "statement_id": "s_case_a",
+                "text": "甲公司部署了订单处理 Agent。",
+                "kind": "evidence",
+                "passed": True,
+                "excerpts": [
+                    {
+                        "text": "甲公司订单处理时间从 3 小时缩短到 15 分钟。",
+                        "title": "甲公司案例",
+                        "url": "https://example.test/a",
+                    }
+                ],
+            }
+        ],
+        premise_depth=1,
+        section_title="落地图谱",
+        paragraph_statements=[
+            {
+                "statement_id": "s_case_a",
+                "text": "甲公司部署了订单处理 Agent。",
+                "kind": "evidence",
+            },
+            {"statement_id": "s_case_b", "text": "乙公司部署了客服 Agent。", "kind": "evidence"},
+            {
+                "statement_id": "s_pattern",
+                "text": "这些案例显示落地集中在流程标准化的场景。",
+                "kind": "derived",
+            },
+        ],
+    ).model_dump(mode="json")
+
+    messages = report_verifier_messages(statement)
+    system, user = messages[0]["content"], messages[1]["content"]
+
+    # The rubric must grade by inference type, not by one blanket overreach standard.
+    assert "inference_type" in system
+    assert "generalization" in system and "causal" in system
+    # The paragraph the generalization covers, and the premise's own source text.
+    assert "乙公司部署了客服 Agent。" in user
+    assert "甲公司订单处理时间从 3 小时缩短到 15 分钟。" in user
+    assert "落地图谱" in user
+
+
+def test_evidence_prompt_stays_narrow() -> None:
+    """An evidence sentence is judged against its Excerpt alone.
+
+    Neighbouring sentences must never be able to stand in for a missing source, so the
+    paragraph context that derived statements get is deliberately withheld here.
+    """
+    statement = ReportVerifierStatementInput(
+        statement_id="s_fact",
+        text="甲公司部署了订单处理 Agent。",
+        kind="evidence",
+        candidate_excerpts=[{"excerpt_id": "E1", "text": "甲公司上线了订单处理 Agent。"}],
+    )
+
+    assert statement.section_title is None
+    assert statement.paragraph_statements == []
+    user = report_verifier_messages(statement.model_dump(mode="json"))[1]["content"]
+    assert "甲公司上线了订单处理 Agent。" in user

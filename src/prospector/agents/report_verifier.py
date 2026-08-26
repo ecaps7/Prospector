@@ -13,7 +13,7 @@ from uuid import UUID
 from openai import OpenAI
 from pydantic import TypeAdapter, ValidationError
 
-from prospector.agents.llm import NO_THINKING_EXTRA_BODY, get_openai_client, mid_model
+from prospector.agents.llm import get_openai_client, mid_model, no_thinking_extra_body
 from prospector.agents.prompts.report_verifier import report_verifier_messages
 from prospector.agents.usage import record_response_usage
 from prospector.schemas.claims import (
@@ -25,6 +25,7 @@ from prospector.schemas.claims import (
     StatementFailure,
     VerdictStatus,
 )
+from prospector.schemas.report import MAX_PREMISE_DEPTH
 
 MAX_VERIFY_WORKERS = 8
 # A single verdict is a handful of fields. Leaving the response budget at the provider
@@ -154,6 +155,45 @@ def _contract_violation(
     return None
 
 
+def _deterministic_derived_overreach(statement: dict[str, Any]) -> DerivedStatementDecision | None:
+    """Return a non-pass verdict for a premise graph that cannot be accepted.
+
+    Writer owns only stream shape and topological references. Report Verifier owns
+    the evidence-grounding and depth policy, so these verdicts deliberately enter
+    the same revision/partial-report flow as model-detected overreach.
+    """
+    if statement["kind"] != "derived":
+        return None
+    statement_id = str(statement["statement_id"])
+    ungrounded = sorted(
+        str(premise["statement_id"])
+        for premise in statement["premises"]
+        if premise["kind"] not in {"evidence", "derived"}
+    )
+    if ungrounded:
+        return DerivedStatementDecision(
+            statement_id=statement_id,
+            inference_note="前提不承载可核对的证据",
+            status="overreach",
+            reason=(
+                f"推理前提 {', '.join(ungrounded)} 不承载证据；"
+                "derived 结论必须最终落到 evidence 或 derived 前提。"
+            ),
+        )
+    depth = int(statement["premise_depth"])
+    if depth > MAX_PREMISE_DEPTH:
+        return DerivedStatementDecision(
+            statement_id=statement_id,
+            inference_note="推理链超过可验证深度",
+            status="overreach",
+            reason=(
+                f"推理链深度为 {depth}，超过允许的 {MAX_PREMISE_DEPTH}；"
+                "请改为依赖较低层前提，或收窄为材料可支持的结论。"
+            ),
+        )
+    return None
+
+
 def materialize_findings(
     *,
     revision: int,
@@ -209,7 +249,7 @@ class OpenAIReportVerifier:
             messages=messages,  # type: ignore[arg-type]
             response_format={"type": "json_object"},
             max_tokens=MAX_DECISION_TOKENS,
-            extra_body=NO_THINKING_EXTRA_BODY,
+            extra_body=no_thinking_extra_body(self.model),
         )
         record_response_usage(response, self.model)
         if not getattr(response, "choices", None):
@@ -294,6 +334,18 @@ class OpenAIReportVerifier:
         decisions_by_id: dict[str, StatementDecision] = {}
         raw_outputs: dict[str, object] = {}
         errors: list[str] = []
+
+        for statement_id, item in list(remaining.items()):
+            payload = item.model_dump(mode="json")
+            decision = _deterministic_derived_overreach(payload)
+            if decision is None:
+                continue
+            decisions_by_id[statement_id] = decision
+            raw_outputs[statement_id] = {
+                "deterministic_rule": "derived_premise_grounding_or_depth",
+                "premise_depth": payload["premise_depth"],
+            }
+            remaining.pop(statement_id)
 
         while remaining and not errors:
             wave_ids = [
