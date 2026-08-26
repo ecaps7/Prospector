@@ -1,26 +1,27 @@
 import { StatusDot } from "../ui/StatusDot";
+import { PhaseTrack } from "./PhaseTrack";
 
 type Props = {
   status: string;
   statusLabel: string;
-  question: string;
+  phaseIndex: number;
   onCancel: () => void;
   cancellable: boolean;
 };
 
-export function MonitorHead({ status, statusLabel, question, onCancel, cancellable }: Props) {
+/** 状态、阶段轨道、取消按钮挤在同一条上。原来状态胶囊里还重复了一遍研究问题，
+ *  但正上方的任务栏一直挂着同一句，删掉不丢信息，省下一整行。 */
+export function MonitorHead({ status, statusLabel, phaseIndex, onCancel, cancellable }: Props) {
   return (
-    <div className="monitor-head">
-      <div className="job-capsule">
+    <div className="card monitor-bar">
+      <span className="job-state">
         <StatusDot status={status} />
         <span className="job-label">{statusLabel}</span>
-        <span className="job-q">{question}</span>
-      </div>
-      <div className="monitor-actions">
-        <button className="btn quiet sm" type="button" onClick={onCancel} disabled={!cancellable}>
-          取消任务
-        </button>
-      </div>
+      </span>
+      <PhaseTrack phaseIndex={phaseIndex} status={status} />
+      <button className="btn quiet sm" type="button" onClick={onCancel} disabled={!cancellable}>
+        取消任务
+      </button>
     </div>
   );
 }

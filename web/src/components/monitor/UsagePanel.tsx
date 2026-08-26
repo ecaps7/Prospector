@@ -26,25 +26,23 @@ export function UsagePanel({ metrics }: { metrics: UsageMetric[] }) {
   return (
     <div className="card usage-panel">
       <div className="panel-title">配额</div>
-      {bounded.map((metric) => (
-        <UsageRow key={metric.name} {...metric} />
-      ))}
+      <div className="usage-bounded">
+        {bounded.map((metric) => (
+          <UsageRow key={metric.name} {...metric} />
+        ))}
+      </div>
+      {/* 原来这里还有一行“累计用量 · 无上限”小标题，纯装饰性地占掉 60px：
+          有没有进度条已经把两类指标分开了，换成一条细分隔线就够。 */}
       {unbounded.length ? (
-        <>
-          <div className="panel-title usage-split">累计用量 · 无上限</div>
-          <div className="usage-tally">
-            {unbounded.map((metric) => (
-              <div className="tally-row" key={metric.name}>
-                <span className="name">{metric.name}</span>
-                <span className="val mono">{metric.value}</span>
-              </div>
-            ))}
-          </div>
-        </>
+        <div className="usage-tally">
+          {unbounded.map((metric) => (
+            <div className="tally-row" key={metric.name}>
+              <span className="name">{metric.name}</span>
+              <span className="val mono">{metric.value}</span>
+            </div>
+          ))}
+        </div>
       ) : null}
-      <p className="usage-note">
-        只有上方两项有硬上限，下方为累计计数。研究何时收尾由证据核对环节判定。
-      </p>
     </div>
   );
 }

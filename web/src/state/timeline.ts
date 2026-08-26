@@ -9,6 +9,7 @@ import {
   stageLabel,
 } from "../lib/labels";
 import { limitsForEffort } from "./budget";
+import type { TimelineDisplayClass, TimelineDisplayEntry } from "./timelineDisplay";
 
 const STOP_REASON_LABELS: Record<string, string> = {
   expected_evidence_satisfied: "证据目标满足",
@@ -40,14 +41,8 @@ function shortId(value: unknown): string {
   return String(value ?? "").slice(0, 8);
 }
 
-export type TimelineClass = "planner" | "tool" | "evidence" | "gap" | "phase" | "done" | "";
-
-export type TimelineEntry = {
-  createdAt: string;
-  tag: string;
-  text: string;
-  cls: TimelineClass;
-};
+export type TimelineClass = TimelineDisplayClass;
+export type TimelineEntry = TimelineDisplayEntry;
 
 export type TimelineContext = {
   effort: string;
@@ -65,15 +60,16 @@ function taskLabel(ctx: TimelineContext, taskId: string): string {
 
 function classify(eventType: string, text: string): TimelineClass {
   if (
+    eventType === "planner.started" ||
     eventType === "planner.decided" ||
     eventType === "planner.rejected" ||
     eventType === "replan.triggered"
   ) {
     return "planner";
   }
-  if (eventType === "task.tool_used") {
-    return text.includes("失败") ? "gap" : "tool";
-  }
+  // 工具失败仍是高频噪声（403/404 很常见），不升成 gap。
+  if (eventType === "task.tool_used") return "tool";
+  if (eventType === "task.round_advanced") return "round";
   if (eventType === "task.evidence_saved") return "evidence";
   if (eventType === "task.finished") return "done";
   if (eventType === "verifier.completed") {
@@ -120,6 +116,9 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
   if (eventType === "job.phase_changed") {
     return renderPhase(payload);
   }
+  if (eventType === "planner.started") {
+    return [`[轮 ${Number(payload.decision_round ?? 0)}] 正在制定研究计划`];
+  }
   if (eventType === "planner.decided") {
     return renderPlanner(ctx, payload);
   }
@@ -143,10 +142,7 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
     return ["[成文] 报告已渲染"];
   }
   if (eventType === "job.stopped") {
-    const status = jobStatusLabel(String(payload.status ?? ""));
-    const phase = phaseLabel(String(payload.phase ?? ""));
-    const outcome = payload.outcome ? ` · ${outcomeLabel(String(payload.outcome))}` : "";
-    return [`[结束] ${status} · ${phase}${outcome}`];
+    return renderStopped(payload);
   }
 
   const taskId = String(payload.task_id ?? event.task_id ?? "");
@@ -175,7 +171,11 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
     const assertions = Number(payload.assertion_count ?? 0);
     return [`[${label}] 收工：${reason}（轮 ${used}/${limit}，工具 ${tools} 次，累计断言 ${assertions} 条）`];
   }
-  if (eventType === "task.round_advanced") return [];
+  if (eventType === "task.round_advanced") {
+    return [
+      `[${label}] 完成第 ${Number(payload.rounds_used ?? 0)}/${Number(payload.rounds_limit ?? 0)} 轮调查`,
+    ];
+  }
   return [];
 }
 
@@ -189,10 +189,28 @@ function renderPhase(payload: Record<string, unknown>): string[] {
   if (phase === "revising") return ["[成文] 存在未通过的句子，正在修订"];
   if (phase === "verified") return ["[成文] 逐句验证全部通过"];
   if (phase === "revisions_exhausted") return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"];
+  if (phase === "rendering") return ["[成文] 正在渲染最终报告"];
   if (phase === "draft_rendered") return ["[成文] 报告渲染完成"];
-  if (phase === "failed") return [`[研究] 失败：${errorLabel(String(payload.error_code ?? "")) || "未知原因"}`];
-  if (phase === "cancelled" || phase === "cancelling") return [`[研究] ${phaseLabel(phase)}`];
+  // 终态只由 job.stopped 出一行：`cancelled` / `failed` 的 phase 事件后面永远
+  // 紧跟一条 job.stopped，两边都渲染就会连着出现两行"已取消"。
+  if (phase === "cancelled" || phase === "failed") return [];
+  if (phase === "cancelling") return [`[研究] ${phaseLabel(phase)}`];
   return [];
+}
+
+/**
+ * 收尾行。取消或失败时 status / phase / outcome 三个字段是同一个词，
+ * 去重后只留一次，失败再补上具体原因。
+ */
+function renderStopped(payload: Record<string, unknown>): string[] {
+  const labels = [
+    jobStatusLabel(String(payload.status ?? "")),
+    phaseLabel(String(payload.phase ?? "")),
+    outcomeLabel(String(payload.outcome ?? "")),
+  ].filter(Boolean);
+  const head = [...new Set(labels)].join(" · ");
+  const reason = errorLabel(String(payload.error_code ?? ""));
+  return [`[结束] ${head}${reason ? `：${reason}` : ""}`];
 }
 
 function renderPlanner(ctx: TimelineContext, payload: Record<string, unknown>): string[] {
@@ -247,6 +265,9 @@ function renderTool(label: string, payload: Record<string, unknown>): string[] {
   if (tool === "save_findings" && Number(payload.result_count ?? 0) === 0) {
     return [`[${label}] 落证：未产生新证据`];
   }
+  if (tool === "save_findings") {
+    return [`[${label}] 保存研究发现 → ${Number(payload.result_count ?? 0)} 条结果`];
+  }
   return [];
 }
 
@@ -256,6 +277,7 @@ export function renderEvent(ctx: TimelineContext, event: ServerEvent): TimelineE
     const tag = match?.[1] ?? tagFor(event.event_type, line, null);
     const text = match?.[2] ?? line;
     return {
+      eventId: event.id,
       createdAt: event.created_at ?? "",
       tag,
       text,

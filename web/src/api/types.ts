@@ -42,6 +42,8 @@ export type JobCancelResponse = {
   status: "cancelling" | "cancelled";
 };
 
+export type TaskStatus = "pending" | "running" | "done" | "failed" | "skipped" | "cancelled";
+
 export type JobListItem = {
   job_id: string;
   question: string | null;
@@ -60,7 +62,7 @@ export type JobTaskView = {
   subjects: string[];
   research_stage: string;
   research_mode: string;
-  status: string;
+  status: TaskStatus;
   stop_reason: string | null;
   budget: { max_worker_rounds?: number };
   tool_calls_used: number;
@@ -88,6 +90,7 @@ export type JobDetail = JobListItem & {
   brief_id: string | null;
   language: string | null;
   plan_version: number;
+  latest_event_id: number;
   tasks: JobTaskView[];
   usage: UsageView[];
   report: ReportView | null;

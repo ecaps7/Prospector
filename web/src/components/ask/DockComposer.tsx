@@ -86,9 +86,7 @@ export function DockComposer({
           </button>
         )}
       </form>
-      {busy ? (
-        <p className="composer-hint">Esc 停止展开</p>
-      ) : active ? (
+      {active && !busy ? (
         <p className="composer-hint">Enter 发送 · Shift+Enter 换行</p>
       ) : null}
     </div>

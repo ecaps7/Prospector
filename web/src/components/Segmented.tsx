@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useSegThumb } from "./useSegThumb";
 
 type Option<T> = {
   value: T;
@@ -13,42 +13,8 @@ type Props<T> = {
 };
 
 export function Segmented<T extends string | number>({ options, value, onChange, label }: Props<T>) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const thumbRef = useRef<HTMLSpanElement>(null);
   const activeIndex = options.findIndex((option) => option.value === value);
-
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    const thumb = thumbRef.current;
-    if (!root || !thumb || activeIndex < 0) return;
-
-    const measure = () => {
-      const active = root.querySelectorAll("button")[activeIndex];
-      if (!active) return;
-      // Written straight to the node on purpose. Holding the offset in React
-      // state puts the new value in the same pre-paint commit as the click, so
-      // the browser never sees the old one change and the thumb jumps instead
-      // of sliding.
-      thumb.style.transform = `translateX(${active.offsetLeft}px)`;
-      thumb.style.width = `${active.offsetWidth}px`;
-    };
-
-    measure();
-
-    if (!thumb.dataset.ready) {
-      // Commit the parked position while transitions are still off, then turn
-      // them on, so the thumb doesn't slide in from the left edge on mount.
-      void thumb.offsetWidth;
-      thumb.dataset.ready = "true";
-    }
-
-    // Widths shift when the row reflows, and again when the CJK webfont swaps
-    // in — either would leave the thumb parked over the wrong option.
-    const observer = new ResizeObserver(measure);
-    observer.observe(root);
-    void document.fonts?.ready.then(measure);
-    return () => observer.disconnect();
-  }, [activeIndex, options.length]);
+  const { rootRef, thumbRef } = useSegThumb(activeIndex, options.length);
 
   return (
     <div className="seg" role="radiogroup" aria-label={label} ref={rootRef}>

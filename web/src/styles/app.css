@@ -330,35 +330,9 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Styled by the shared .seg rules below, sliding thumb included. */
 .jobbar .tabs {
-  display: inline-flex;
-  background: color-mix(in srgb, var(--seed-fg) 6%, transparent);
-  border-radius: var(--r-sm);
-  padding: 3px;
-  gap: 2px;
   flex: none;
-}
-.jobbar .tabs a,
-.jobbar .tabs button {
-  border: 0;
-  background: transparent;
-  border-radius: calc(var(--r-sm) - 3px);
-  font-size: var(--fs-ui);
-  color: var(--text-2);
-  padding: 5px 14px;
-  font-weight: 500;
-  transition: 0.15s;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  text-decoration: none;
-}
-.jobbar .tabs a.on,
-.jobbar .tabs button.on {
-  background: var(--surface);
-  color: var(--text);
-  font-weight: 600;
-  box-shadow: var(--shadow-1);
 }
 .jobbar .tabs a[aria-disabled="true"] {
   opacity: 0.4;
@@ -752,7 +726,8 @@ kbd {
 .seg-thumb[data-ready="true"] {
   transition: transform 0.26s var(--ease-seg), width 0.26s var(--ease-seg);
 }
-.seg button {
+.seg > button,
+.seg > a {
   position: relative;
   z-index: 1;
   border: 0;
@@ -764,10 +739,16 @@ kbd {
   font-weight: 500;
   white-space: nowrap;
   transition: color 0.2s ease;
+  /* inline-block, not flex: the width-reserving ::before below has to stack
+     above the label, not sit next to it as a second flex item. */
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
 }
 /* Reserve the bold width on every option so switching weight can't reflow the
    row out from under the sliding thumb. */
-.seg button::before {
+.seg > button::before,
+.seg > a::before {
   content: attr(data-label);
   display: block;
   height: 0;
@@ -776,10 +757,12 @@ kbd {
   font-weight: 600;
   pointer-events: none;
 }
-.seg button:hover:not(.on) {
+.seg > button:hover:not(.on),
+.seg > a:hover:not(.on) {
   color: var(--text);
 }
-.seg button.on {
+.seg > button.on,
+.seg > a.on {
   color: var(--text);
   font-weight: 600;
 }
@@ -1130,25 +1113,25 @@ kbd {
   padding: 0 4px;
 }
 
-.monitor-head {
+.monitor-bar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
+  gap: 18px;
+  padding: 8px 16px;
+  margin-bottom: 16px;
 }
-.job-capsule {
+/* 这条上只有一个按钮，按默认尺寸它一个人撑高整条。 */
+.monitor-bar .btn.sm {
+  min-height: 28px;
+  padding: 5px 12px;
+}
+.job-state {
   display: flex;
   align-items: center;
-  gap: 11px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  padding: 8px 18px 8px 14px;
-  box-shadow: var(--shadow-1);
-  min-width: 0;
-  flex: 1;
-  max-width: 760px;
+  gap: 9px;
+  flex: none;
+  font-size: var(--fs-ui);
+  font-weight: 600;
 }
 .status-dot {
   width: 10px;
@@ -1188,36 +1171,23 @@ kbd {
 .status-dot.dim {
   background: var(--text-3);
 }
-.job-capsule .job-label {
-  font-size: var(--fs-body);
-  font-weight: 600;
+.job-state .job-label {
   white-space: nowrap;
-}
-.job-capsule .job-q {
-  font-size: var(--fs-ui);
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.monitor-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .phase-track {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 26px;
-  margin-bottom: 18px;
+  /* 卡片外壳由 .monitor-bar 提供，这里只负责排步骤。 */
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
 }
 .phase {
+  /* 横排：点和文字并肩，一行就够，比上下叠省一半高度。 */
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   position: relative;
   flex: none;
 }
@@ -1264,7 +1234,8 @@ kbd {
   flex: 1;
   height: 2px;
   background: var(--border);
-  margin: 0 6px 21px;
+  /* 横排后连接线要跟点对齐在同一条水平中线上，不再需要往上偏。 */
+  margin: 0 8px;
   border-radius: var(--r-pill);
   min-width: 26px;
   transition: 0.3s;
@@ -1272,15 +1243,75 @@ kbd {
 .phase-line.done {
   background: var(--ok);
 }
+/* 监控页恢复整页滚动：左栏是文档，想多长多长；右栏时间轴是仪表盘，定高吸在
+   视口里，滚页面时一直在那儿。 */
+.monitor-view {
+  padding: 16px 28px 40px;
+}
 .monitor-grid {
   display: grid;
-  grid-template-columns: 1.9fr 1fr;
+  grid-template-columns: minmax(0, 1.9fr) minmax(320px, 1fr);
   gap: 18px;
-  margin-bottom: 18px;
+  /* start 而不是默认的 stretch——右栏要能 sticky，就不能被拉成和左栏一样高。 */
+  align-items: start;
+}
+.monitor-main {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  /* 左栏至少和右栏一样高：任务少的那几页不会把整页高度缩到比时间轴还矮，
+     翻页时文档总高就不变，滚动位置也不会被夹着往回跳。 */
+  min-height: calc(100dvh - var(--chrome-h) - 36px);
+}
+.monitor-rail {
+  /* 跟着页面一起滚，不吸顶。 */
+  /* 高度只由视口决定。这是全屋最重要的一行：只要它去分“剩下的高度”，
+     配额卡多高、左栏多长、翻哪一页计划，都会传导成它自己忽高忽低。 */
+  height: calc(100dvh - var(--chrome-h) - 36px);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* 配额卡在宽栏里排成两列，免得几行数字被 space-between 拉到 700px 宽。 */
+.usage-bounded {
+  display: grid;
+  gap: 14px;
+}
+.monitor-main .usage-bounded {
+  grid-template-columns: 1fr 1fr;
+  column-gap: 28px;
+}
+/* 四项累计值排成一行，上面一条细线代替原来那个小标题。 */
+.monitor-main .usage-tally {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: 20px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 @media (max-width: 980px) {
+  /* 窄屏两栏叠成一列，时间轴不再吸附——它已经占满整行宽度了。 */
+  .monitor-view {
+    padding: 24px 28px 60px;
+  }
   .monitor-grid {
     grid-template-columns: 1fr;
+  }
+  .monitor-main {
+    min-height: 0;
+  }
+  .monitor-rail {
+    height: auto;
+  }
+  .monitor-main .usage-bounded,
+  .monitor-main .usage-tally {
+    grid-template-columns: 1fr;
+  }
+  .timeline-panel {
+    max-height: 420px;
   }
 }
 .plan-panel,
@@ -1288,12 +1319,55 @@ kbd {
 .timeline-panel {
   padding: 18px 20px;
 }
+/* 配额是常驻的参考信息，不是主角，比另外两张卡片再收紧一点。 */
+.usage-panel {
+  padding: 14px 18px;
+}
+/* 时间轴反过来：卡片内边距越省，留给事件列表的就越多。 */
+.timeline-panel {
+  padding: 14px 16px;
+}
 .plan-head {
   display: flex;
   align-items: baseline;
   gap: 10px;
   margin-bottom: 4px;
   flex-wrap: wrap;
+}
+.plan-nav {
+  /* 推到标题行最右侧，和左边的版本/配额标签分开。 */
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.plan-nav button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--fs-ui);
+  line-height: 1;
+  cursor: pointer;
+  transition: 0.18s;
+}
+.plan-nav button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.plan-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.plan-nav-at {
+  font-size: var(--fs-meta);
+  color: var(--text-3);
+  padding: 0 4px;
+  white-space: nowrap;
 }
 .plan-head .ver {
   font-size: var(--fs-body);
@@ -1428,12 +1502,6 @@ kbd {
   background: var(--primary);
 }
 /* 无上限的累计计数：纯数字，不给进度条，免得读成配额 */
-.usage-split {
-  margin-top: 16px;
-  margin-bottom: 8px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
 .usage-tally {
   display: flex;
   flex-direction: column;
@@ -1459,126 +1527,129 @@ kbd {
   line-height: 1.5;
 }
 .timeline-panel {
-  max-height: 300px;
+  position: relative;
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 200px;
 }
-.timeline-panel .panel-title {
-  margin-bottom: 10px;
+.tl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   flex: none;
+  margin-bottom: 8px;
+}
+.tl-head .panel-title {
+  margin-bottom: 0;
+}
+.tl-head .seg > button {
+  font-size: var(--fs-meta);
+  padding: 4px 10px;
 }
 .timeline {
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
+  min-height: 0;
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
 }
 .tl-row {
-  display: flex;
-  gap: 10px;
-  padding: 5px 2px;
-  border-radius: var(--r-xs);
+  /* 三列网格：HH:mm:ss / 标签 / 正文。时间列固定，正文起点不会随内容抖动。 */
+  display: grid;
+  grid-template-columns: 68px 3.4em minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 2px 2px 6px;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
   line-height: 1.5;
 }
 .tl-row:hover {
   background: color-mix(in srgb, var(--seed-fg) 4%, transparent);
 }
 .tl-time {
-  flex: none;
   color: var(--text-3);
-  width: 64px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .tl-tag {
-  flex: none;
-  width: 66px;
   font-weight: 600;
   text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tl-text {
   color: var(--text-2);
-  min-width: 0;
+  /* 派发事件的子行靠前导空格做树状缩进，pre-wrap 才留得住。 */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.tl-row.planner .tl-tag {
+/* 类名一律带 tl- 前缀：裸的 .phase 会撞上阶段轨道的 .phase，
+   把整行拉成竖排居中。 */
+.tl-row.tl-planner {
+  border-left-color: var(--replan);
+}
+.tl-row.tl-planner .tl-tag {
   color: var(--replan);
 }
-.tl-row.planner .tl-text {
+.tl-row.tl-planner .tl-text {
   color: var(--text);
 }
-.tl-row.gap .tl-tag {
+.tl-row.tl-gap {
+  border-left-color: var(--warn);
+}
+.tl-row.tl-gap .tl-tag {
   color: var(--warn);
 }
-.tl-row.gap .tl-text {
+.tl-row.tl-gap .tl-text {
   color: var(--text);
 }
-.tl-row.evidence .tl-tag {
+.tl-row.tl-evidence {
+  border-left-color: var(--ok);
+}
+.tl-row.tl-evidence .tl-tag {
   color: var(--ok);
 }
-.tl-row.tool {
+.tl-row.tl-tool {
   opacity: 0.72;
 }
-.tl-row.tool .tl-text {
+.tl-row.tl-tool .tl-text {
   color: var(--text-3);
 }
-.tl-row.phase .tl-tag {
+.tl-row.tl-phase {
+  border-left-color: var(--primary);
+}
+.tl-row.tl-phase .tl-tag {
   color: var(--primary);
 }
-.tl-row.phase .tl-text {
+.tl-row.tl-phase .tl-text {
   color: var(--text);
 }
-.tl-row.done .tl-tag {
+.tl-row.tl-done {
+  border-left-color: var(--ok);
+}
+.tl-row.tl-done .tl-tag {
   color: var(--ok);
 }
-.finish-card {
-  margin-top: 18px;
-  padding: 26px 28px;
-}
-.finish-card h3 {
-  font-size: var(--fs-h3);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.finish-card h3 .ok-dot,
-.finish-card h3 .warn-dot,
-.finish-card h3 .fail-dot {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  color: var(--white);
-  display: grid;
-  place-items: center;
+.tl-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  color: var(--text-2);
   font-size: var(--fs-meta);
+  cursor: pointer;
 }
-.finish-card h3 .ok-dot {
-  background: var(--ok);
-}
-.finish-card h3 .warn-dot {
-  background: var(--warn);
-}
-.finish-card h3 .fail-dot {
-  background: var(--danger);
-}
-.finish-rows {
-  display: flex;
-  gap: 34px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-}
-.finish-rows .item .k {
-  font-size: var(--fs-meta);
-  color: var(--text-3);
-}
-.finish-rows .item .v {
-  font-size: var(--fs-body);
-  font-weight: 600;
-  margin-top: 3px;
-}
-.finish-card .acts {
-  margin-top: 18px;
-  display: flex;
-  gap: 10px;
+.tl-jump:hover {
+  color: var(--text);
 }
 
 .report-head {
@@ -1625,6 +1696,81 @@ kbd {
   border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
   border-radius: var(--r-md);
   padding: 11px 15px;
+}
+/* 报告还没出来时的等待页：主句说清在等什么，阶段轨道给出佐证，
+   骨架屏只在撰写阶段露面——更早摆出来就是在骗人。 */
+.report-pending {
+  max-width: 720px;
+  animation: fade-up 0.28s ease;
+}
+.rp-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rp-head h1 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+}
+.rp-detail {
+  margin-top: 10px;
+  color: var(--text-2);
+  font-size: var(--fs-ui);
+  line-height: 1.7;
+  /* 秒数每跳一次都不该把后面的字推着走。 */
+  font-variant-numeric: tabular-nums;
+}
+.rp-track {
+  display: flex;
+  margin-top: 22px;
+  padding: 12px 16px;
+}
+.rp-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  font-size: var(--fs-ui);
+}
+.rp-foot .btn {
+  text-decoration: none;
+}
+.rp-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 34px;
+}
+.rp-skeleton .sk {
+  height: 12px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--seed-fg) 7%, transparent) 25%,
+    color-mix(in srgb, var(--seed-fg) 13%, transparent) 37%,
+    color-mix(in srgb, var(--seed-fg) 7%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: sk-shimmer 1.6s ease infinite;
+}
+.rp-skeleton .sk-h {
+  height: 17px;
+  width: 42%;
+  margin-top: 16px;
+}
+.rp-skeleton .sk-short {
+  width: 66%;
+}
+@keyframes sk-shimmer {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: 0 50%;
+  }
 }
 .report-layout {
   display: grid;
@@ -2053,18 +2199,6 @@ body:has(.brief-card) .toast {
 }
 .toast-act:hover {
   background: color-mix(in srgb, var(--bg) 30%, transparent);
-}
-.pagefoot {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 0 28px 40px;
-  width: 100%;
-  color: var(--text-3);
-  font-size: var(--fs-meta);
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
 }
 .muted {
   color: var(--text-2);

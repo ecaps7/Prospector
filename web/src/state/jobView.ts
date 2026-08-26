@@ -1,6 +1,7 @@
 import type { JobDetail, JobTaskView, ServerEvent, UsageView } from "../api/types";
 import { PHASE_STEPS } from "../lib/labels";
 import { renderEvent, type TimelineContext, type TimelineEntry } from "./timeline";
+import { appendTimelineEntries, timelineClock } from "./timelineDisplay";
 
 export type ViewTask = {
   taskId: string;
@@ -16,6 +17,15 @@ export type ViewTask = {
   seenToolCallIds: string[];
 };
 
+/** 一次 planner 派发 = 一页研究计划。任务表本身不记轮次，只有 planner.decided
+ *  事件带着 task_ids，所以分页只能在客户端按事件重建。 */
+export type PlanRound = {
+  round: number;
+  planVersion: number;
+  reason: string;
+  taskIds: string[];
+};
+
 export type JobViewState = {
   jobId: string;
   question: string;
@@ -29,6 +39,7 @@ export type JobViewState = {
   updatedAt: string;
   planVersion: number;
   planReason: string | null;
+  planRounds: PlanRound[];
   tasks: ViewTask[];
   usage: UsageView[];
   connectionState: "connected" | "reconnecting";
@@ -52,6 +63,7 @@ const PHASE_INDEX: Record<string, number> = {
   revising: 5,
   verified: 5,
   revisions_exhausted: 5,
+  rendering: 6,
   draft_rendered: 6,
   cancelling: 0,
   cancelled: 0,
@@ -88,13 +100,6 @@ function timelineContext(state: JobViewState): TimelineContext {
   };
 }
 
-function clock(value: string | null | undefined): string {
-  if (!value) return "--:--:--";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "--:--:--";
-  return parsed.toLocaleTimeString("en-GB", { hour12: false });
-}
-
 export function fromSnapshot(detail: JobDetail): JobViewState {
   return {
     jobId: detail.job_id,
@@ -109,6 +114,7 @@ export function fromSnapshot(detail: JobDetail): JobViewState {
     updatedAt: detail.updated_at,
     planVersion: detail.plan_version,
     planReason: null,
+    planRounds: [],
     tasks: detail.tasks.map(taskFromSnapshot),
     usage: [...detail.usage],
     connectionState: "connected",
@@ -140,7 +146,10 @@ export function mergeSnapshot(state: JobViewState, detail: JobDetail): JobViewSt
       roundsLimit: Number(snapshot.budget?.max_worker_rounds ?? current.roundsLimit),
       toolCallsUsed: Math.max(current.toolCallsUsed, snapshot.tool_calls_used),
       status:
-        snapshot.status === "done" || snapshot.status === "failed" || current.status === "pending"
+        snapshot.status === "done" ||
+        snapshot.status === "failed" ||
+        snapshot.status === "cancelled" ||
+        current.status === "pending"
           ? snapshot.status
           : current.status,
     };
@@ -201,6 +210,23 @@ export function fold(state: JobViewState, event: ServerEvent): JobViewState {
       phaseIndex: Math.max(next.phaseIndex, 1),
       researchDecisionsUsed: Number(payload.research_decisions_used ?? next.researchDecisionsUsed + 1),
     };
+    if (payload.decision === "dispatch") {
+      const taskIds = ((payload.task_ids as string[] | undefined) ?? []).map(String);
+      const round = Number(payload.decision_round ?? event.decision_round ?? next.planRounds.length + 1);
+      const entry: PlanRound = {
+        round,
+        planVersion: Number(payload.plan_version ?? next.planVersion),
+        reason: String(payload.reason ?? ""),
+        taskIds,
+      };
+      // 同一轮只会派发一次，但重连补发时同号事件可能再来一遍——按轮号覆盖而不是追加。
+      next = {
+        ...next,
+        planRounds: [...next.planRounds.filter((item) => item.round !== round), entry].sort(
+          (a, b) => a.round - b.round,
+        ),
+      };
+    }
   } else if (eventType === "replan.triggered") {
     next = { ...next, planVersion: Number(payload.plan_version ?? next.planVersion) };
   } else if (eventType === "task.started") {
@@ -263,12 +289,12 @@ export function fold(state: JobViewState, event: ServerEvent): JobViewState {
   const ctx = timelineContext(next);
   const entries = renderEvent(ctx, event).map((entry) => ({
     ...entry,
-    createdAt: clock(event.created_at),
+    createdAt: timelineClock(event.created_at),
   }));
   next = {
     ...next,
     researchDecisionsUsed: ctx.researchDecisionsUsed,
-    timeline: [...next.timeline, ...entries].slice(-80),
+    timeline: appendTimelineEntries(next.timeline, entries),
   };
   return next;
 }
@@ -312,6 +338,57 @@ export function elapsedSeconds(state: JobViewState, now = Date.now()): number {
   const start = new Date(state.createdAt).getTime();
   const end = state.stopped ? new Date(state.updatedAt).getTime() : now;
   return Math.max(0, Math.floor((end - start) / 1000));
+}
+
+export type PlanPageTask = { task: ViewTask; index: number };
+
+export type PlanPage = {
+  round: number;
+  planVersion: number;
+  reason: string | null;
+  tasks: PlanPageTask[];
+};
+
+/** 把任务按派发轮次切成一页一页。index 用任务在 state.tasks 里的全局序号，
+ *  这样卡片上的 T1/T2 和时间轴上的标号始终是同一套编号。 */
+export function planPages(state: JobViewState): PlanPage[] {
+  const order = new Map(state.tasks.map((task, index) => [task.taskId, index]));
+  const entry = (task: ViewTask): PlanPageTask => ({ task, index: order.get(task.taskId) ?? 0 });
+
+  if (state.planRounds.length === 0) {
+    return [
+      {
+        round: 0,
+        planVersion: state.planVersion,
+        reason: state.planReason,
+        tasks: state.tasks.map(entry),
+      },
+    ];
+  }
+
+  const byId = new Map(state.tasks.map((task) => [task.taskId, task]));
+  const claimed = new Set<string>();
+  const pages = state.planRounds.map((round) => {
+    const tasks: PlanPageTask[] = [];
+    for (const taskId of round.taskIds) {
+      const task = byId.get(taskId);
+      if (!task) continue;
+      claimed.add(taskId);
+      tasks.push(entry(task));
+    }
+    tasks.sort((left, right) => left.index - right.index);
+    return {
+      round: round.round,
+      planVersion: round.planVersion,
+      reason: round.reason || null,
+      tasks,
+    };
+  });
+
+  // 快照可能先于事件到达，落下没被任何一轮认领的任务——挂到最后一页，别让它们消失。
+  const orphans = state.tasks.filter((task) => !claimed.has(task.taskId)).map(entry);
+  if (orphans.length) pages[pages.length - 1].tasks.push(...orphans);
+  return pages;
 }
 
 export function shouldRefreshSnapshot(event: ServerEvent): boolean {

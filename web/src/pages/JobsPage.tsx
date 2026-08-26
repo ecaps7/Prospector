@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { JobListItem } from "../api/types";
 import { JobItem } from "../components/jobs/JobItem";
-import { Chip } from "../components/ui/Tag";
 import { Spinner } from "../components/ui/Status";
 import { apiErrorLabel } from "../lib/labels";
 
@@ -30,7 +29,6 @@ export function JobsPage() {
     <section className="view">
       <div className="jobs-head">
         <h1>任务历史</h1>
-        <Chip>本机单用户 · 一次只运行一个任务</Chip>
       </div>
       {error ? (
         <p className="form-error">

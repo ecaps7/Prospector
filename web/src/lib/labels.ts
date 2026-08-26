@@ -24,6 +24,8 @@ const OUTCOME: Record<string, string> = {
   verified: "已逐句核对",
   partial: "部分核对",
   draft_rendered: "未逐句核对",
+  cancelled: "已取消",
+  failed: "失败",
 };
 
 const STATUS: Record<string, string> = {
@@ -49,6 +51,7 @@ const PHASE: Record<string, string> = {
   verified: "核对完成",
   revisions_exhausted: "修订次数用尽",
   draft_rendered: "报告已生成",
+  failed: "失败",
   cancelling: "正在取消",
   cancelled: "已取消",
 };

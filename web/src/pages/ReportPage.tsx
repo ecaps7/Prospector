@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ApiError, api } from "../api/client";
+import { api } from "../api/client";
 import type { ExcerptView, ReportJson, ReportSource } from "../api/types";
 import { EvidenceDrawer } from "../components/report/EvidenceDrawer";
 import { ReportHead } from "../components/report/ReportHead";
+import { ReportPending } from "../components/report/ReportPending";
 import { ReportToc, type TocItem } from "../components/report/ReportToc";
 import { SourceList } from "../components/report/SourceList";
 import { StatementParagraphs } from "../components/report/StatementParagraphs";
 import { ErrorView, LoadingView } from "../components/ui/Status";
 import { apiErrorLabel } from "../lib/labels";
+import { useJobRoute } from "../state/jobRoute";
+import { reportGate } from "../state/reportGate";
 
 function slug(index: number, title: string): string {
   return `sec-${index}-${title.slice(0, 12)}`;
@@ -16,34 +19,38 @@ function slug(index: number, title: string): string {
 
 export function ReportPage() {
   const { jobId } = useParams();
-  const [report, setReport] = useState<ReportJson | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
+  const { job, jobError } = useJobRoute();
+  // 报告和错误都记着自己属于哪个任务：换任务时旧正文必须立刻从屏幕上消失，
+  // 而不是等新任务的请求回来才被顶掉。
+  const [loaded, setLoaded] = useState<{ jobId: string; report: ReportJson } | null>(null);
+  const [failure, setFailure] = useState<{ jobId: string; message: string } | null>(null);
   const [active, setActive] = useState<string>("");
   const [drawer, setDrawer] = useState<{ source: ReportSource; excerpts: ExcerptView[] } | null>(null);
   const [loadingExcerpt, setLoadingExcerpt] = useState(false);
   const [excerptError, setExcerptError] = useState<string | null>(null);
 
+  // 报告文件是否存在由任务快照说了算（`report.json_ref` 就是报告接口自己查的那一列），
+  // 所以这里不再靠 409 试探：门一开就取正文，取不到才是真的出了问题。
+  const gate = job ? reportGate(job) : null;
+  const ready = gate?.kind === "ready";
+  const report = loaded && loaded.jobId === jobId ? loaded.report : null;
+  const error = failure && failure.jobId === jobId ? failure.message : null;
+
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId || !ready) return;
     let cancelled = false;
     api
       .getReportJson(jobId)
       .then((payload) => {
-        if (!cancelled) setReport(payload);
+        if (!cancelled) setLoaded({ jobId, report: payload });
       })
       .catch((err) => {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.errorCode === "report_not_ready") {
-          setError("报告尚未就绪。研究完成后可在此阅读。");
-        } else {
-          setError(apiErrorLabel(err, "无法加载报告"));
-        }
+        if (!cancelled) setFailure({ jobId, message: apiErrorLabel(err, "无法加载报告") });
       });
     return () => {
       cancelled = true;
     };
-  }, [jobId, reloadKey]);
+  }, [jobId, ready]);
 
   const toc = useMemo<TocItem[]>(() => {
     if (!report) return [];
@@ -90,17 +97,12 @@ export function ReportPage() {
     }
   };
 
-  if (error)
-    return (
-      <ErrorView
-        message={error}
-        tone="muted"
-        onRetry={() => {
-          setError(null);
-          setReloadKey((key) => key + 1);
-        }}
-      />
-    );
+  if (!job) {
+    if (jobError) return <ErrorView message={jobError} />;
+    return <LoadingView>正在加载任务…</LoadingView>;
+  }
+  if (gate && gate.kind !== "ready") return <ReportPending job={job} kind={gate.kind} />;
+  if (error) return <ErrorView message={error} />;
   if (!report) return <LoadingView>正在加载报告…</LoadingView>;
 
   const failed = new Set(report.failed_statement_ids ?? []);

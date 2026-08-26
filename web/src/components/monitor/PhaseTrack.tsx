@@ -8,7 +8,7 @@ type Props = {
 export function PhaseTrack({ phaseIndex, status }: Props) {
   const completed = status === "completed";
   return (
-    <div className="card phase-track" aria-label="研究阶段轨道">
+    <div className="phase-track" aria-label="研究阶段轨道">
       {PHASE_LABELS.map((label, index) => {
         const done = completed || index < phaseIndex;
         const current = !completed && index === phaseIndex;

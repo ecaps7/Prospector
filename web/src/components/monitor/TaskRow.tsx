@@ -25,6 +25,11 @@ export function TaskRow({ task, index }: { task: ViewTask; index: number }) {
           <Tag tone="danger">失败</Tag>
         </span>
       ) : null}
+      {task.status === "cancelled" ? (
+        <span className="task-status">
+          <Tag tone="warn">已取消</Tag>
+        </span>
+      ) : null}
       {task.status === "running" ? (
         <span className="task-status">
           <span className="rounds-bar">

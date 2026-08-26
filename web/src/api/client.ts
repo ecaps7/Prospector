@@ -102,7 +102,10 @@ export const api = {
   getJob: (jobId: string) => request<JobDetail>(`/api/jobs/${jobId}`),
 
   cancelJob: (jobId: string) =>
-    request<JobCancelResponse>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
+    request<JobCancelResponse>(`/api/jobs/${jobId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ requested_via: "web_monitor" }),
+    }),
 
   getReportJson: (jobId: string) => request<ReportJson>(`/api/jobs/${jobId}/report?format=json`),
 
