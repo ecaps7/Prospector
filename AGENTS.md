@@ -59,7 +59,7 @@ api / runtime / cli
 
 1. **D12 联网路径**：`web_search` 只给元数据；`web_fetch` 把全文写入 Document 快照、把 Exa highlights 写入任务级 DocumentView；Worker 只选 `source_ref`，由 `save_findings` 解析后原子写入 Excerpt + Assertion。全文不进任何 Prospector LLM 上下文。不要做「搜索即摘要」或让 Worker 读整页。
 2. **证据链**：首次抓取就必须留 Document 快照与精确 Excerpt。核对不过的句子最多修订两轮；触顶后保留原文、标记 `partial`，**不得**给失败句生成已验证引用角标。
-3. **预算**：硬闸是 Planner 决策轮、分阶段并发、分阶段 Worker 决策轮。工具调用总数 / Job 墙钟不是硬停条件。停止研究不能绕过 Research Verifier、Claim 验证或成文审计。
+3. **预算**：硬闸是 Planner 决策轮，以及按 effort 注入的批次并发与 Worker 决策轮；运行时把可用动作、工具和具体上限直接反馈给模型。工具调用总数 / Job 墙钟不是硬停条件。停止研究不能绕过 Research Verifier、Claim 验证或成文审计。
 4. **Worker 动作**：每轮唯一 `search` / `save` / `finish`（严格 JSON Schema），不要改成供应商 Function Calling 参数。
 5. **Planner 线程准入封闭**：只追加决策对象、断言投影摘要 + 收工声明、拒绝/格式错误、verifier gap、预算余额。禁止塞 worker 原始轨迹、Document 正文、客户端句柄。
 6. **不要提前做 M2–M4**：Data Worker / `kb_*` / FigureSpec / Redis / 多用户调度均未实现。Spike 可以，不要当验收范围，也不要为它们加运行时兼容旧合同的分支。

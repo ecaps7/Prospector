@@ -94,11 +94,11 @@ Python 工程骨架、CI、Alembic、PostgreSQL 与 LangGraph PG checkpointer、
 
 1. interactive 与 brief-direct 产生同一 Research Brief 输入快照并进入同一主图。
 2. Planner 每轮强制输出 `dispatch` / `reflect` / `finish`，记录决策日志并生成版本化 Plan。
-3. 运行时按 `Brief.effort + ResearchTask.research_stage` 注入 Planner 决策轮、分阶段并发与 Worker 决策轮（具体数值见 [m1.md](./m1.md)）。
+3. 运行时按 `Brief.effort` 注入 Planner 决策轮、批次并发与 Worker 决策轮，并把可用动作、工具和具体上限直接反馈给模型（具体数值见 [m1.md](./m1.md)）。
 4. 并行通用 Research Worker 只使用 `web_search` / `web_fetch` / `save_findings`，联网来源统一使用持久化 Exa highlights。
 5. Document 快照、Excerpt、Assertion、Plan、Verifier run、Claim 与报告产物全链路落库。
 6. Research Verifier 检查 Plan 承诺、Brief 偏题、缺口与冲突；可补缺口在仍有决策预算时回到 Planner 形成新 Plan 版本。
-7. Report Verifier 逐句验证；每个 revision 全量重验，修订触顶后失败句保留在 `partial` 产物中且不生成已验证引用角标。
+7. Report Verifier 逐句验证；初稿与句级修订全量重验，阶段二失败后的修订只重跑整篇核验；修订触顶后失败句保留在 `partial` 产物中且不生成已验证引用角标。
 8. 单进程 API、PG 事件 SSE、usage/span 和 CLI `ask → attach → report` 闭环。
 
 完成标准（逐条判据见 [m1.md](./m1.md) §12）：端到端产出带引用报告且权威链机器校验 100%；多 Worker 并行不串号；预埋缺口产生 Plan 新版本并补搜；空手 `finish` 被拒绝；决策轮耗尽且零 Excerpt 直接失败；修订触顶产出 `partial` 并显式列出失败 statement；CLI 可提交、跟踪并查看或导出报告。
@@ -126,7 +126,7 @@ M2 的计算链与本地文档链相互独立，可按人力并行或对调。�
 | checkpoint 常开，图状态只存可序列化数据 | M0 |
 | Document 快照与精确 Excerpt 从首次抓取起不可省略 | M1 |
 | Brief 不是覆盖合同，Plan 才是执行合同 | M1 |
-| Planner 决策轮、分阶段并发与分阶段 Worker 决策轮是研究硬闸 | M1 |
+| Planner 决策轮、按 effort 注入的批次并发与 Worker 决策轮是研究硬闸 | M1 |
 | 停止研究不能绕过 Verifier、Claim 验证或成文审计 | M1 |
 | Computation 必须记录代码、输入血缘和输出 | M2 |
 | 定量忠实率门禁必须以人工真值为依据 | M3 |

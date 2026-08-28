@@ -62,7 +62,7 @@ flowchart TD
 
 **调度与公平全部内聚于 Dispatcher**。出队排序：interactive 类任务优先；准入控制：per-user 并发上限（直接 count PG 中该用户 running 任务）与全局深研任务并发上限。无信号量、无分布式锁、无优先级队列——单写者使它们不必存在。
 
-**限额执行**。§7 无 Worker/Job 工具总帽、无 Job 墙钟硬停：每 Worker 自守 `max_worker_rounds`，单轮最多并行 8 个工具调用；编排侧共享 Planner 决策轮与分阶段并发上限。token 与累计 tool_calls 写入 PG usage，**不**驱动停研究。
+**限额执行**。§7 无 Worker/Job 工具总帽、无 Job 墙钟硬停：每 Worker 自守 `max_worker_rounds`，单轮最多并行 8 个工具调用；编排侧共享 Planner 决策轮与按 effort 注入的批次并发上限。token 与累计 tool_calls 写入 PG usage，**不**驱动停研究。
 
 **SSE 跨副本**。事件双写：Redis Stream（`events:{job_id}`，任意 API 副本 XREAD 实时推送）+ PG 事件表（归档）。断线重连带 Last-Event-ID：Stream 内先回放，超出 Stream 保留窗口则从 PG 补。
 
