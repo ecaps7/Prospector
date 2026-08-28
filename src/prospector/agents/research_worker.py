@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    RootModel,
     StringConstraints,
     ValidationError,
     field_validator,
@@ -44,7 +45,6 @@ from prospector.tools.base import ToolContext, WorkerTool
 from prospector.tools.save_findings import SaveFindingsArguments
 
 WorkerDeclaredStopReason = Literal[
-    "expected_evidence_satisfied",
     "no_public_evidence",
     "low_information_gain",
     "blocked_by_scope",
@@ -60,11 +60,7 @@ SUMMARY_TOOL_NAME = "submit_worker_summary"
 # Rounds cap depth; this caps per-round breadth so a single round cannot fan out
 # unboundedly (each result still lengthens the thread and bills the Exa API).
 MAX_PARALLEL_TOOL_CALLS_PER_ROUND = 8
-# Auto-fetch depth follows the stage's job. scout screens a bounded candidate set, where
-# titles and snippets usually settle existence and naming, so pulling several full bodies
-# per query buys little and costs a lot of thread; deep_dive is where the evidence chain
-# is actually built and full text earns its place.
-AUTO_FETCH_TOP_N_BY_STAGE: dict[str, int] = {"scout": 1, "deep_dive": 3, "verify": 2}
+# Search auto-fetch is a concrete runtime capability, not a semantic research stage.
 AUTO_FETCH_TOP_N = 2
 # Fetched page bodies stay in the thread only while the Worker is still working on them.
 # Once they are older than this, the Evidence Store is the record; leaving stale copies in
@@ -94,24 +90,15 @@ def _require_first_choice(response: Any, *, label: str) -> Any:
 class WorkerFinish(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    goal_met: bool
     stop_reason: WorkerDeclaredStopReason
-    reason: str = Field(
-        ...,
-        min_length=1,
-        max_length=300,
-        description="一句极短中文：为何现在结束",
-    )
+    reason: str = Field(..., min_length=1, description="为何无法继续取得必需证据")
 
-    @model_validator(mode="after")
-    def _validate_goal_and_reason(self) -> WorkerFinish:
-        satisfied = self.stop_reason == "expected_evidence_satisfied"
-        if self.goal_met != satisfied:
-            raise ValueError("goal_met must be true exactly when expected_evidence is satisfied")
-        self.reason = self.reason.strip()
-        if not self.reason:
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, value: str) -> str:
+        if not value.strip():
             raise ValueError("reason is required when the worker stops")
-        return self
+        return value.strip()
 
 
 class WorkerSearch(BaseModel):
@@ -135,7 +122,6 @@ class WorkerFindingInput(BaseModel):
 
     source_refs: list[EvidenceSourceRef] = Field(..., min_length=1)
     statement: str = Field(..., min_length=1)
-    topic_tags: list[str] = Field(..., max_length=12)
 
     @field_validator("source_refs")
     @classmethod
@@ -157,30 +143,58 @@ class WorkerSaveBatch(BaseModel):
     findings: list[WorkerFindingInput] = Field(..., min_length=1)
 
 
-class WorkerAction(BaseModel):
-    """One strict, runtime-dispatched Worker action for a single decision round."""
-
+class WorkerSearchAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["search", "save", "finish"]
-    searches: list[WorkerSearch] = Field(..., max_length=MAX_PARALLEL_TOOL_CALLS_PER_ROUND)
-    save_batches: list[WorkerSaveBatch] = Field(
+    action: Literal["search"]
+    searches: list[WorkerSearch] = Field(
         ...,
+        min_length=1,
         max_length=MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
     )
-    finish: WorkerFinish | None
 
-    @model_validator(mode="after")
-    def _validate_single_action_kind(self) -> WorkerAction:
-        if self.action == "search":
-            if not self.searches or self.save_batches or self.finish is not None:
-                raise ValueError("search action requires searches only")
-        elif self.action == "save":
-            if self.searches or not self.save_batches or self.finish is not None:
-                raise ValueError("save action requires save_batches only")
-        elif self.searches or self.save_batches or self.finish is None:
-            raise ValueError("finish action requires finish only")
-        return self
+
+class WorkerSaveAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["save"]
+    save_batches: list[WorkerSaveBatch] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
+    )
+
+
+class WorkerFinishAction(WorkerFinish):
+    action: Literal["finish"]
+
+
+WorkerActionPayload = Annotated[
+    WorkerSearchAction | WorkerSaveAction | WorkerFinishAction,
+    Field(discriminator="action"),
+]
+
+
+class WorkerAction(RootModel[WorkerActionPayload]):
+    """One strict, flat Worker action for a single decision round."""
+
+    @property
+    def action(self) -> Literal["search", "save", "finish"]:
+        return self.root.action
+
+    @property
+    def searches(self) -> list[WorkerSearch]:
+        return self.root.searches if isinstance(self.root, WorkerSearchAction) else []
+
+    @property
+    def save_batches(self) -> list[WorkerSaveBatch]:
+        return self.root.save_batches if isinstance(self.root, WorkerSaveAction) else []
+
+    @property
+    def finish(self) -> WorkerFinish | None:
+        if not isinstance(self.root, WorkerFinishAction):
+            return None
+        return WorkerFinish(stop_reason=self.root.stop_reason, reason=self.root.reason)
 
 
 # DeepSeek 等供应商只支持 response_format=text/json_object，不支持 json_schema；
@@ -197,12 +211,12 @@ class SummaryItem(BaseModel):
 
 class WorkerSummary(BaseModel):
     items: list[SummaryItem]
-    finish_reason: str = Field(..., min_length=1, max_length=300)
+    finish_reason: str = Field(..., min_length=1)
 
 
 class WorkerCoverageAssessment(BaseModel):
     goal_met: bool
-    reason: str = Field(..., min_length=1, max_length=300)
+    reason: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
     def _validate_reason(self) -> WorkerCoverageAssessment:
@@ -295,7 +309,7 @@ class EvidenceSourceRegistry:
                     FindingInput(
                         source_ids=source_ids,
                         statement=finding.statement,
-                        topic_tags=finding.topic_tags,
+                        topic_tags=[],
                     )
                 )
         return [
@@ -713,6 +727,7 @@ class ResearchWorker:
                         used_worker_rounds=worker_rounds_used,
                         remaining_worker_rounds=remaining_worker_rounds,
                         max_parallel_tool_calls=MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
+                        auto_fetch_top_n=AUTO_FETCH_TOP_N,
                     ),
                 }
             )
@@ -729,7 +744,6 @@ class ResearchWorker:
             await raise_if_cancelled()
             messages.append(action.assistant_message)
             if action.finish is not None:
-                goal_met = action.finish.goal_met
                 finish_reason = action.finish.reason
                 stop_reason = action.finish.stop_reason
                 break
@@ -759,7 +773,7 @@ class ResearchWorker:
             if search_executions:
                 urls_to_fetch = _extract_top_urls(
                     search_executions,
-                    top_n=AUTO_FETCH_TOP_N_BY_STAGE.get(task.research_stage, AUTO_FETCH_TOP_N),
+                    top_n=AUTO_FETCH_TOP_N,
                 )
                 if urls_to_fetch:
                     fetch_calls = [

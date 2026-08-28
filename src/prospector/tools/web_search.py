@@ -20,7 +20,6 @@ class SearchResult(BaseModel):
     url: str
     published_date: str | None = None
     author: str | None = None
-    summary: str | None = None
 
 
 class ExaClient:
@@ -94,7 +93,6 @@ class WebSearchTool:
                 url=str(item.get("url") or item.get("id") or ""),
                 published_date=item.get("publishedDate"),
                 author=item.get("author"),
-                summary=item.get("summary"),
             )
             for item in raw.get("results", [])
             if item.get("url") or item.get("id")

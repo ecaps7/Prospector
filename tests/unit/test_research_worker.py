@@ -13,11 +13,12 @@ from pydantic import ValidationError
 
 from prospector.agents.prompts.research_worker import (
     worker_coverage_message,
+    worker_runtime_message,
     worker_system_prompt,
+    worker_task_message,
 )
 from prospector.agents.research_worker import (
     AUTO_FETCH_TOP_N,
-    AUTO_FETCH_TOP_N_BY_STAGE,
     KEEP_FULL_FETCH_ROUNDS,
     WORKER_ACTION_RESPONSE_FORMAT,
     WORKER_ACTION_SCHEMA,
@@ -174,7 +175,6 @@ class ParallelWorkerModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="两条独立路径均未发现可保存证据。",
             ),
@@ -253,7 +253,6 @@ class PartialFailureModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="网页快照已保存，但压缩失败，未获得可提交证据。",
             ),
@@ -326,7 +325,6 @@ class FailThenSucceedModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="重试后仍无可用公开证据。",
             ),
@@ -371,7 +369,6 @@ class FailTwiceThenSucceedModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="更换检索路径后仍无可用公开证据。",
             ),
@@ -486,7 +483,6 @@ class SaveThenSatisfiedModel:
                             {
                                 "source_refs": ["s1:h1"],
                                 "statement": "目标事实已有带原文定位的直接证据。",
-                                "topic_tags": ["目标事实"],
                             }
                         ],
                     },
@@ -525,7 +521,6 @@ class SlotSummaryModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="仍缺少独立来源。",
             ),
@@ -550,9 +545,6 @@ def _task(max_worker_rounds: int = 5) -> ResearchTask:
     return ResearchTask(
         task_id=uuid4(),
         question="核验两个彼此独立的公开资料路径，并记录当前能够获得的直接证据。",
-        subjects=["目标公司"],
-        research_stage="verify",
-        research_mode="factual",
         expected_evidence="至少一条能够定位到原文段落的直接证据",
         budget=TaskBudget(max_worker_rounds=max_worker_rounds),
     )
@@ -564,6 +556,30 @@ def test_worker_prompt_excludes_invalid_concepts() -> None:
     assert "synthesize" not in system
     assert "completion_criteria" not in system
     assert "一次只调用一个工具" not in system
+
+
+def test_worker_task_message_contains_only_research_semantics() -> None:
+    payload = json.loads(worker_task_message(_task()).split("\n", 1)[1])
+
+    assert set(payload) == {"question", "expected_evidence"}
+    assert "allowed_tools" not in payload
+    assert "budget" not in payload
+    assert "task_id" not in payload
+
+
+def test_worker_runtime_message_exposes_actions_and_concrete_limits() -> None:
+    message = worker_runtime_message(
+        max_worker_rounds=48,
+        used_worker_rounds=6,
+        remaining_worker_rounds=42,
+        max_parallel_tool_calls=8,
+        auto_fetch_top_n=2,
+    )
+
+    assert "search、save、finish" in message
+    assert "自动抓取排名前 2 个结果" in message
+    assert "剩余决策轮：42" in message
+    assert "单轮并行工具调用上限：8" in message
 
 
 async def test_openai_summary_uses_required_fixed_slots_and_returns_ledger_order() -> None:
@@ -611,19 +627,19 @@ async def test_openai_summary_rejects_missing_fixed_slot() -> None:
         await model.summarize([assertion])
 
 
-def test_worker_finish_requires_goal_and_reason_to_agree() -> None:
+def test_worker_cannot_self_declare_expected_evidence_satisfied() -> None:
     with pytest.raises(ValidationError):
-        WorkerFinish(
-            goal_met=True,
-            stop_reason="no_public_evidence",
-            reason="目标与原因不一致",
+        WorkerFinish.model_validate(
+            {
+                "stop_reason": "expected_evidence_satisfied",
+                "reason": "研究员不能自行宣布证据目标满足",
+            }
         )
 
 
 def test_worker_finish_requires_reason() -> None:
     with pytest.raises(ValidationError):
         WorkerFinish(
-            goal_met=False,
             stop_reason="no_public_evidence",
             reason="",
         )
@@ -633,13 +649,8 @@ async def test_openai_worker_action_uses_json_object_format() -> None:
     content = json.dumps(
         {
             "action": "finish",
-            "searches": [],
-            "save_batches": [],
-            "finish": {
-                "goal_met": True,
-                "stop_reason": "expected_evidence_satisfied",
-                "reason": "已覆盖任务要求的直接证据。",
-            },
+            "stop_reason": "no_public_evidence",
+            "reason": "未找到满足任务要求的直接证据。",
         },
         ensure_ascii=False,
     )
@@ -650,9 +661,11 @@ async def test_openai_worker_action_uses_json_object_format() -> None:
     action = await model.next_action([])
 
     assert action.finish is not None
-    assert action.finish.reason == "已覆盖任务要求的直接证据。"
+    assert action.finish.reason == "未找到满足任务要求的直接证据。"
     assert WORKER_ACTION_RESPONSE_FORMAT == {"type": "json_object"}
-    assert json.loads(WORKER_ACTION_SCHEMA)["additionalProperties"] is False
+    action_schema = json.loads(WORKER_ACTION_SCHEMA)
+    assert action_schema["discriminator"]["propertyName"] == "action"
+    assert len(action_schema["oneOf"]) == 3
     system_prompt = worker_system_prompt(action_schema=WORKER_ACTION_SCHEMA)
     assert "JSON Schema" in system_prompt
     assert client.completions.request is not None
@@ -672,19 +685,16 @@ async def test_openai_worker_save_action_keeps_findings_as_an_array() -> None:
     content = json.dumps(
         {
             "action": "save",
-            "searches": [],
             "save_batches": [
                 {
                     "findings": [
                         {
                             "source_refs": ["s1:h1"],
                             "statement": "带原文定位的事实。",
-                            "topic_tags": [],
                         }
                     ],
                 }
             ],
-            "finish": None,
         },
         ensure_ascii=False,
     )
@@ -726,7 +736,6 @@ def test_source_registry_resolves_runtime_refs_without_exposing_storage_ids() ->
                 {
                     "source_refs": ["s1:h1"],
                     "statement": "原文支持目标事实。",
-                    "topic_tags": [],
                 }
             ]
         }
@@ -746,7 +755,6 @@ def test_source_registry_resolves_runtime_refs_without_exposing_storage_ids() ->
                     {
                         "source_refs": ["s99:h1"],
                         "statement": "不得接受编造的引用。",
-                        "topic_tags": [],
                     }
                 ]
             }
@@ -1124,7 +1132,6 @@ class SearchThenFinishModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="搜索结果均无可保存证据。",
             ),
@@ -1170,7 +1177,6 @@ class ParallelSearchThenFinishModel:
         return WorkerModelAction(
             assistant_message={"role": "assistant", "content": "finish"},
             finish=WorkerFinish(
-                goal_met=False,
                 stop_reason="no_public_evidence",
                 reason="两条搜索路径均未发现可保存证据。",
             ),
@@ -1457,29 +1463,19 @@ async def test_fetched_bodies_leave_the_thread_once_they_are_no_longer_current()
     assert "目标事实的原文证据。" not in pruned[0]
 
 
-def test_auto_fetch_depth_follows_the_research_stage() -> None:
-    """scout screens breadth-first, so it should not pull the most full text."""
-    assert AUTO_FETCH_TOP_N_BY_STAGE["scout"] < AUTO_FETCH_TOP_N_BY_STAGE["verify"]
-    assert AUTO_FETCH_TOP_N_BY_STAGE["verify"] < AUTO_FETCH_TOP_N_BY_STAGE["deep_dive"]
-
-
-async def test_scout_fetches_fewer_bodies_than_deep_dive() -> None:
+async def test_search_auto_fetch_uses_the_explicit_runtime_limit() -> None:
     urls = [f"https://example.test/{i}" for i in range(5)]
+    fetch_tool = RecordingFetchTool()
+    worker = ResearchWorker(
+        cast(ResearchRepository, FakeRepository()),
+        [
+            SearchWithResultsTool([{"url": url} for url in urls]),
+            fetch_tool,
+            ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
+        ],
+        SearchThenFinishModel(),
+    )
 
-    async def fetched_for(stage: str) -> list[str]:
-        fetch_tool = RecordingFetchTool()
-        worker = ResearchWorker(
-            cast(ResearchRepository, FakeRepository()),
-            [
-                SearchWithResultsTool([{"url": url} for url in urls]),
-                fetch_tool,
-                ConcurrentTool("save_findings", {"active": 0, "max_active": 0}),
-            ],
-            SearchThenFinishModel(),
-        )
-        task = _task().model_copy(update={"research_stage": stage, "subjects": ["目标公司"]})
-        await worker.run(uuid4(), task, worker_id=f"rw_{stage}")
-        return fetch_tool.fetched_urls
+    await worker.run(uuid4(), _task(), worker_id="rw_01")
 
-    assert len(await fetched_for("scout")) == AUTO_FETCH_TOP_N_BY_STAGE["scout"]
-    assert len(await fetched_for("deep_dive")) == AUTO_FETCH_TOP_N_BY_STAGE["deep_dive"]
+    assert len(fetch_tool.fetched_urls) == AUTO_FETCH_TOP_N

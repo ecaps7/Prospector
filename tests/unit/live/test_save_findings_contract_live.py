@@ -59,8 +59,8 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
                 "content": (
                     "输出一个 save 动作 JSON，保存两条断言。"
                     "第一条使用 source_ref s1:h1，断言为第一条事实；"
-                    "第二条使用 source_ref s1:h2，断言为第二条事实；标签均为空。"
-                    "searches 必须为空数组，finish 必须为 null。只输出 JSON。"
+                    "第二条使用 source_ref s1:h2，断言为第二条事实。"
+                    "只填写 action 和 save_batches。只输出 JSON。"
                 ),
             },
         ],
@@ -72,10 +72,8 @@ async def test_model_returns_strict_save_action_matching_the_schema() -> None:
     parsed = WorkerAction.model_validate_json(content)
 
     assert parsed.action == "save"
-    assert parsed.searches == []
     assert parsed.finish is None
     assert len(parsed.save_batches) == 1
     batch = parsed.save_batches[0]
     assert len(batch.findings) == 2
     assert batch.findings[0].source_refs == ["s1:h1"]
-    assert all(finding.topic_tags == [] for finding in batch.findings)
