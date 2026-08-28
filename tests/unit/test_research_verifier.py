@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from prospector.agents.prompts.planner import planner_system_prompt
 from prospector.agents.prompts.research_verifier import research_verifier_messages
 from prospector.agents.research_verifier import (
     OpenAIResearchVerifier,
@@ -43,6 +44,22 @@ EXCERPT_A = UUID("30000000-0000-0000-0000-000000000001")
 EXCERPT_B = UUID("30000000-0000-0000-0000-000000000002")
 
 
+def _verifier_snapshot() -> dict[str, object]:
+    return {
+        "brief": {},
+        "plans": [],
+        "tasks": [{"task_id": str(TASK_ID)}],
+        "assertions": [
+            {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
+            {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_B)]},
+        ],
+        "excerpts": [
+            {"excerpt_id": str(EXCERPT_A)},
+            {"excerpt_id": str(EXCERPT_B)},
+        ],
+    }
+
+
 def _gaps(
     *,
     severity: str = "minor",
@@ -54,11 +71,8 @@ def _gaps(
             "severity": severity,
             "related_task_ids": [str(TASK_ID)],
             "related_assertion_ids": [str(ASSERTION_ID)],
-            "related_excerpt_ids": [str(EXCERPT_A)],
             "description": "关键比较口径尚未核实",
-            "attempted_paths": ["查找公开材料"],
-            "why_insufficient": "现有证据无法支持核心比较",
-            "recommended_research": "补查独立来源并统一口径",
+            "evidence_needed": ("补充独立来源并统一口径" if severity == "major" else ""),
         }
     ]
 
@@ -72,18 +86,14 @@ def _llm_decision(
 ) -> VerifierLlmDecision:
     return VerifierLlmDecision.model_validate(
         {
-            "release_decision": release,
-            "decision_reason": (
+            "decision": release,
+            "reason": (
                 "现有证据存在影响结论的重大缺口"
                 if release == "needs_research"
                 else "现有证据足以履行 Plan"
             ),
-            "brief_alignment": "misaligned" if kind == "brief_alignment" else "aligned",
-            "coverage_rationale": "已逐项对照 Plan。",
-            "brief_alignment_rationale": "研究仍围绕用户问题。",
-            "credibility_rationale": "关键结论具有直接来源。",
             "gaps": _gaps(severity=severity, kind=kind),
-            "conflict_judgements": [],
+            "conflicts": [],
             "assertion_dispositions": dispositions or [],
         }
     )
@@ -117,16 +127,27 @@ def test_decision_requires_major_gap_exactly_when_research_is_needed() -> None:
         VerifierLlmDecision.model_validate(
             {
                 **_llm_decision().model_dump(mode="json"),
-                "release_decision": "needs_research",
+                "decision": "needs_research",
                 "gaps": [],
             }
         )
 
 
-def test_misalignment_requires_matching_major_gap() -> None:
+def test_major_gap_requires_evidence_needed() -> None:
     payload = _llm_decision().model_dump(mode="json")
-    payload["brief_alignment"] = "misaligned"
-    with pytest.raises(ValidationError, match="major brief_alignment gap"):
+    payload["decision"] = "needs_research"
+    payload["gaps"] = [{**_gaps(severity="major")[0], "evidence_needed": ""}]
+    with pytest.raises(ValidationError, match="major gap requires evidence_needed"):
+        VerifierLlmDecision.model_validate(payload)
+
+
+def test_verifier_rejects_blank_reason_and_gap_description() -> None:
+    payload = _llm_decision().model_dump(mode="json")
+    with pytest.raises(ValidationError, match="reason must not be blank"):
+        VerifierLlmDecision.model_validate({**payload, "reason": "\n"})
+
+    payload["gaps"] = [{**_gaps()[0], "description": "\n"}]
+    with pytest.raises(ValidationError, match="description must not be blank"):
         VerifierLlmDecision.model_validate(payload)
 
 
@@ -137,15 +158,13 @@ def test_conflict_judgement_enforces_winner_contract() -> None:
         "rationale": "来源口径不同。",
     }
     payload = _llm_decision().model_dump(mode="json")
-    payload["conflict_judgements"] = [
+    payload["conflicts"] = [
         {**base, "decision": "present_both", "winning_assertion_ids": [str(ASSERTION_ID)]}
     ]
     with pytest.raises(ValidationError, match="must not select winners"):
         VerifierLlmDecision.model_validate(payload)
 
-    payload["conflict_judgements"] = [
-        {**base, "decision": "adjudicated", "winning_assertion_ids": []}
-    ]
+    payload["conflicts"] = [{**base, "decision": "adjudicated", "winning_assertion_ids": []}]
     with pytest.raises(ValidationError, match="requires winning_assertion_ids"):
         VerifierLlmDecision.model_validate(payload)
 
@@ -281,7 +300,6 @@ def test_source_credibility_gap_rejects_excerpt_only_pointers() -> None:
         {
             **_gaps(severity="major", kind="source_credibility")[0],
             "related_assertion_ids": [],
-            "related_excerpt_ids": [str(EXCERPT_A)],
         }
     ]
     with pytest.raises(ValidationError, match="related_assertion_ids"):
@@ -366,17 +384,16 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
     assert all(field in prompt for field in ("url", "title", "author"))
     assert '"publisher"' not in prompt
     assert '"tier"' not in prompt
-    assert "没有来源 tier 分类机制" in prompt
-    assert "decision_reason 必须用一句极短中文" in prompt
+    assert "来源元数据" not in prompt or "来源" in prompt
+    assert "reason 直接说明为何放行或返回 Planner" in prompt
     assert "document_text" not in prompt
     assert "worker_trace" not in prompt
-    assert "conflict_judgements" in prompt
-    assert "只引用参与冲突的 assertion_id" in prompt
-    assert "禁止在冲突字段填写 excerpt_id" in prompt
+    assert "conflicts" in prompt
+    assert "conflicts 只引用 Assertion ID" in prompt
     assert "assertion_dispositions" in prompt
     assert "effective_unusable_assertion_ids" in prompt
-    assert "status=unusable" in prompt
-    assert "minor 表示可在报告中披露、但结论仍然成立" in prompt
+    assert "status=restored" in prompt
+    assert "minor 是可以在报告中披露" in prompt
     assert '"conflict_resolutions"' not in schema
     conflict_def = (
         VerifierLlmDecision.model_json_schema().get("$defs", {}).get("ConflictJudgement", {})
@@ -423,15 +440,7 @@ def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
     )
 
-    result = verifier.verify(
-        {
-            "brief": {},
-            "plans": [],
-            "tasks": [],
-            "assertions": [],
-            "excerpts": [],
-        }
-    )
+    result = verifier.verify(_verifier_snapshot())
 
     assert result.decision.release_decision == "pass"
     assert result.decision.conflict_resolutions == []
@@ -449,7 +458,7 @@ def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> 
     The repair model never sees the snapshot, so asking it to fix a judgement contract
     would be asking it to re-decide the evidence while looking at none of it.
     """
-    snapshot = {"brief": {}, "plans": [], "tasks": [], "assertions": [], "excerpts": []}
+    snapshot = _verifier_snapshot()
     illegal = json.dumps(
         {
             **_llm_decision().model_dump(mode="json"),
@@ -482,9 +491,32 @@ def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> 
     assert cast(dict[str, Any], result.raw_output)["retried_content"] == legal
 
 
-def test_verifier_binds_conflict_judgements_to_excerpt_ids() -> None:
+def test_unknown_snapshot_reference_goes_back_to_the_verifier() -> None:
+    snapshot = _verifier_snapshot()
+    unknown_task_id = uuid4()
+    illegal_payload = _llm_decision().model_dump(mode="json")
+    illegal_payload["gaps"][0]["related_task_ids"] = [str(unknown_task_id)]
+    illegal = json.dumps(illegal_payload, ensure_ascii=False)
+    legal = json.dumps(_llm_decision().model_dump(mode="json"), ensure_ascii=False)
+    completions = _FakeCompletions([illegal, legal])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    )
+
+    result = verifier.verify(snapshot)
+
+    assert result.decision.gaps[0].related_task_ids == [TASK_ID]
+    assert [request["model"] for request in completions.requests] == [
+        "qwen-strong",
+        "qwen-strong",
+    ]
+    assert "outside the current Job" in completions.requests[1]["messages"][-1]["content"]
+
+
+def test_verifier_binds_conflicts_to_excerpt_ids() -> None:
     llm = _llm_decision().model_dump(mode="json")
-    llm["conflict_judgements"] = [
+    llm["conflicts"] = [
         {
             "disputed_point": "市场规模口径",
             "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
@@ -500,14 +532,7 @@ def test_verifier_binds_conflict_judgements_to_excerpt_ids() -> None:
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
     )
 
-    result = verifier.verify(
-        {
-            "assertions": [
-                {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
-                {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_B)]},
-            ]
-        }
-    )
+    result = verifier.verify(_verifier_snapshot())
 
     assert len(result.decision.conflict_resolutions) == 1
     resolution = result.decision.conflict_resolutions[0]
@@ -523,14 +548,13 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
     research died the first time the model filed a same-excerpt contradiction as a source
     conflict. It now returns to the Verifier like any other contract violation.
     """
-    snapshot = {
-        "assertions": [
-            {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
-            {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_A)]},
-        ]
-    }
+    snapshot = _verifier_snapshot()
+    snapshot["assertions"] = [
+        {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
+        {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_A)]},
+    ]
     illegal_payload = _llm_decision().model_dump(mode="json")
-    illegal_payload["conflict_judgements"] = [
+    illegal_payload["conflicts"] = [
         {
             "disputed_point": "论文发表年份是 2024 还是 2025",
             "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
@@ -566,7 +590,7 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
 
 
 def test_verifier_raises_when_structural_repair_is_still_invalid() -> None:
-    completions = _FakeCompletions("not json", repaired='{"release_decision":"pass"}')
+    completions = _FakeCompletions("not json", repaired='{"decision":"pass"}')
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -614,6 +638,14 @@ class _FakeRepository:
     def set_research_outcome(self, job_id: UUID, **kwargs: object) -> None:
         del job_id
         self.outcomes.append(kwargs)
+
+    def count_excerpts(self, job_id: UUID) -> int:
+        del job_id
+        return 1
+
+    def get_job_effort(self, job_id: UUID) -> str:
+        del job_id
+        return "quick"
 
     def list_unusable_assertion_details(
         self, job_id: UUID, dispositions: object
@@ -810,13 +842,13 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
                         "severity": "major",
                         "kind": "plan_coverage",
                         "description": "关键比较口径尚未核实",
-                        "recommended_research": "补查独立来源并统一口径",
+                        "evidence_needed": "补充独立来源并统一口径",
                     },
                     {
                         "severity": "major",
                         "kind": "brief_alignment",
                         "description": "Brief 要求的反例仍缺",
-                        "recommended_research": "",
+                        "evidence_needed": "补充能够回答核心问题的反例证据",
                     },
                 ],
             },
@@ -824,8 +856,9 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
     ) == [
         "[核验] Plan v1 不通过：2 个重大缺口（次要 0，冲突 0，废证 0）",
         "  ├─ 重大·覆盖：关键比较口径尚未核实",
-        "  │     建议：补查独立来源并统一口径",
+        "  │     待补证据：补充独立来源并统一口径",
         "  └─ 重大·Brief对齐：Brief 要求的反例仍缺",
+        "        待补证据：补充能够回答核心问题的反例证据",
         "[核验] 返回 Planner 补查（余 5 轮）：关键比较口径仍缺证据",
     ]
     assert renderer.render(
@@ -870,3 +903,40 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
             },
         }
     ) == ["[成文] Research Verifier 已放行，等待 Writer"]
+    assert renderer.render(
+        {
+            "event_type": "job.phase_changed",
+            "payload": {"phase": "verifying"},
+        }
+    ) == ["[核验] Report Verifier 正在逐句验证"]
+
+
+def test_verifier_checks_core_question_and_constraints_not_every_brief_direction() -> None:
+    prompt = "\n".join(
+        message["content"]
+        for message in research_verifier_messages(
+            {
+                "brief": {
+                    "question": "q",
+                    "brief_text": "b",
+                    "user_constraints": {"regions": ["中国"]},
+                }
+            }
+        )
+    )
+
+    assert "不是必须逐项覆盖的清单" in prompt
+    assert "brief_alignment" in prompt
+    assert "user_constraints" in prompt
+    assert "完全没有进入任何研究计划的方向" not in prompt
+
+
+def test_planner_prompt_defines_execution_roles_without_prescribing_research_strategy() -> None:
+    prompt = planner_system_prompt(today="2026-08-26")
+
+    assert "dispatch" in prompt
+    assert "finish" in prompt
+    assert "question" in prompt
+    assert "expected_evidence" in prompt
+    assert "任务内容、拆分方式和研究取舍由你判断" in prompt
+    assert "唯一的机制" not in prompt

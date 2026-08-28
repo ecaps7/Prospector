@@ -24,6 +24,8 @@ from prospector.schemas.verifier import (
     VerifierLlmDecision,
     assertion_excerpt_map_from_snapshot,
     materialize_verifier_decision,
+    validate_verifier_references,
+    verifier_reference_ids_from_snapshot,
 )
 
 
@@ -136,10 +138,18 @@ class OpenAIResearchVerifier:
         that made it. Left outside, it killed Jobs that had already finished their research.
         """
         llm_decision = self._parse_llm(content)
-        return materialize_verifier_decision(
+        decision = materialize_verifier_decision(
             llm_decision,
             assertion_excerpt_map_from_snapshot(snapshot),
         )
+        task_ids, assertion_ids, excerpt_ids = verifier_reference_ids_from_snapshot(snapshot)
+        validate_verifier_references(
+            decision,
+            task_ids=task_ids,
+            assertion_ids=assertion_ids,
+            excerpt_ids=excerpt_ids,
+        )
+        return decision
 
     def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
         messages = research_verifier_messages(snapshot)

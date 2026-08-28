@@ -25,11 +25,21 @@ class VerifierGap(BaseModel):
     severity: GapSeverity
     related_task_ids: list[UUID] = Field(default_factory=list)
     related_assertion_ids: list[UUID] = Field(default_factory=list)
-    related_excerpt_ids: list[UUID] = Field(default_factory=list)
     description: str = Field(..., min_length=1)
-    attempted_paths: list[str] = Field(default_factory=list)
-    why_insufficient: str = Field(..., min_length=1)
-    recommended_research: str = Field(..., min_length=1)
+    evidence_needed: str = Field(
+        default="",
+        description="重大缺口仍需要什么证据；不规定 Planner 如何拆分或执行任务",
+    )
+
+    @model_validator(mode="after")
+    def _major_gap_names_needed_evidence(self) -> VerifierGap:
+        self.description = self.description.strip()
+        self.evidence_needed = self.evidence_needed.strip()
+        if not self.description:
+            raise ValueError("gap description must not be blank")
+        if self.severity == "major" and not self.evidence_needed:
+            raise ValueError("major gap requires evidence_needed")
+        return self
 
 
 class ConflictJudgement(BaseModel):
@@ -96,7 +106,6 @@ class AssertionDisposition(BaseModel):
 
 def _decision_matches_gaps(
     release_decision: Literal["pass", "needs_research"],
-    brief_alignment: Literal["aligned", "misaligned"],
     gaps: list[VerifierGap],
 ) -> None:
     major_gaps = [gap for gap in gaps if gap.severity == "major"]
@@ -104,10 +113,6 @@ def _decision_matches_gaps(
         raise ValueError("pass must not contain major gaps")
     if release_decision == "needs_research" and not major_gaps:
         raise ValueError("needs_research requires at least one major gap")
-    if brief_alignment == "misaligned" and not any(
-        gap.kind == "brief_alignment" and gap.severity == "major" for gap in gaps
-    ):
-        raise ValueError("misaligned requires a major brief_alignment gap")
 
 
 DERIVED_UNUSABLE_REASON = (
@@ -222,18 +227,10 @@ class VerifierLlmDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    release_decision: Literal["pass", "needs_research"]
-    decision_reason: str = Field(
-        ...,
-        min_length=1,
-        description="一句极短中文：为何作出当前放行判断",
-    )
-    brief_alignment: Literal["aligned", "misaligned"]
-    coverage_rationale: str = Field(..., min_length=1)
-    brief_alignment_rationale: str = Field(..., min_length=1)
-    credibility_rationale: str = Field(..., min_length=1)
+    decision: Literal["pass", "needs_research"]
+    reason: str = Field(..., min_length=1, description="为何放行或返回 Planner")
     gaps: list[VerifierGap] = Field(default_factory=list)
-    conflict_judgements: list[ConflictJudgement] = Field(default_factory=list)
+    conflicts: list[ConflictJudgement] = Field(default_factory=list)
     assertion_dispositions: list[AssertionDisposition] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -241,7 +238,10 @@ class VerifierLlmDecision(BaseModel):
         # Model-facing shape: only rules the model can always satisfy by writing more
         # carefully. Consistency between credibility gaps and disposals is *derived* on
         # the way to VerifierDecision, so it must not reject the model's output here.
-        _decision_matches_gaps(self.release_decision, self.brief_alignment, self.gaps)
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("Verifier reason must not be blank")
+        _decision_matches_gaps(self.decision, self.gaps)
         _validate_assertion_dispositions(self.assertion_dispositions)
         _validate_credibility_gaps_name_assertions(self.gaps)
         return self
@@ -253,15 +253,7 @@ class VerifierDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     release_decision: Literal["pass", "needs_research"]
-    decision_reason: str = Field(
-        ...,
-        min_length=1,
-        description="一句极短中文：为何作出当前放行判断",
-    )
-    brief_alignment: Literal["aligned", "misaligned"]
-    coverage_rationale: str = Field(..., min_length=1)
-    brief_alignment_rationale: str = Field(..., min_length=1)
-    credibility_rationale: str = Field(..., min_length=1)
+    decision_reason: str = Field(..., min_length=1, description="为何放行或返回 Planner")
     gaps: list[VerifierGap] = Field(default_factory=list)
     conflict_resolutions: list[ConflictResolution] = Field(default_factory=list)
     assertion_dispositions: list[AssertionDisposition] = Field(default_factory=list)
@@ -271,7 +263,10 @@ class VerifierDecision(BaseModel):
         # Persisted shape: the full invariant, which now holds by construction because
         # derive_credibility_dispositions ran first. It is a genuine assertion about
         # system state rather than a bet on how the model filled in two fields.
-        _decision_matches_gaps(self.release_decision, self.brief_alignment, self.gaps)
+        self.decision_reason = self.decision_reason.strip()
+        if not self.decision_reason:
+            raise ValueError("Verifier decision_reason must not be blank")
+        _decision_matches_gaps(self.release_decision, self.gaps)
         _validate_assertion_dispositions(self.assertion_dispositions)
         _validate_credibility_gaps_name_assertions(self.gaps)
         _validate_major_credibility_is_discarded(self.gaps, self.assertion_dispositions)
@@ -354,15 +349,11 @@ def materialize_verifier_decision(
 ) -> VerifierDecision:
     """Convert LLM output into the persisted VerifierDecision shape."""
     return VerifierDecision(
-        release_decision=llm_decision.release_decision,
-        decision_reason=llm_decision.decision_reason,
-        brief_alignment=llm_decision.brief_alignment,
-        coverage_rationale=llm_decision.coverage_rationale,
-        brief_alignment_rationale=llm_decision.brief_alignment_rationale,
-        credibility_rationale=llm_decision.credibility_rationale,
+        release_decision=llm_decision.decision,
+        decision_reason=llm_decision.reason,
         gaps=llm_decision.gaps,
         conflict_resolutions=materialize_conflict_resolutions(
-            llm_decision.conflict_judgements,
+            llm_decision.conflicts,
             assertion_excerpts,
         ),
         assertion_dispositions=derive_credibility_dispositions(
@@ -400,6 +391,27 @@ def assertion_excerpt_map_from_snapshot(snapshot: dict[str, object]) -> dict[UUI
     return mapping
 
 
+def verifier_reference_ids_from_snapshot(
+    snapshot: dict[str, object],
+) -> tuple[set[UUID], set[UUID], set[UUID]]:
+    """Return the task, assertion, and excerpt ids the Verifier was allowed to name."""
+
+    def ids(rows: object, key: str) -> set[UUID]:
+        if not isinstance(rows, list):
+            return set()
+        return {
+            UUID(str(row[key]))
+            for row in rows
+            if isinstance(row, dict) and row.get(key) is not None
+        }
+
+    return (
+        ids(snapshot.get("tasks"), "task_id"),
+        ids(snapshot.get("assertions"), "assertion_id"),
+        ids(snapshot.get("excerpts"), "excerpt_id"),
+    )
+
+
 def validate_verifier_references(
     decision: VerifierDecision,
     *,
@@ -413,8 +425,6 @@ def validate_verifier_references(
             raise ValueError("Verifier gap references a task outside the current Job")
         if not set(gap.related_assertion_ids).issubset(assertion_ids):
             raise ValueError("Verifier gap references an assertion outside the current Job")
-        if not set(gap.related_excerpt_ids).issubset(excerpt_ids):
-            raise ValueError("Verifier gap references an excerpt outside the current Job")
     for resolution in decision.conflict_resolutions:
         if not set(resolution.excerpt_ids).issubset(excerpt_ids):
             raise ValueError("Conflict resolution references an excerpt outside the current Job")
