@@ -6,9 +6,6 @@ import { appendTimelineEntries, timelineClock } from "./timelineDisplay";
 export type ViewTask = {
   taskId: string;
   question: string;
-  subjects: string[];
-  researchStage: string;
-  researchMode: string;
   status: string;
   stopReason: string | null;
   roundsUsed: number;
@@ -79,9 +76,6 @@ function taskFromSnapshot(task: JobTaskView): ViewTask {
   return {
     taskId: task.task_id,
     question: task.question,
-    subjects: [...task.subjects],
-    researchStage: task.research_stage,
-    researchMode: task.research_mode,
     status: task.status,
     stopReason: task.stop_reason,
     roundsUsed: 0,
@@ -139,9 +133,6 @@ export function mergeSnapshot(state: JobViewState, detail: JobDetail): JobViewSt
     tasks[index] = {
       ...current,
       question: snapshot.question,
-      subjects: [...snapshot.subjects],
-      researchStage: snapshot.research_stage,
-      researchMode: snapshot.research_mode,
       stopReason: snapshot.stop_reason,
       roundsLimit: Number(snapshot.budget?.max_worker_rounds ?? current.roundsLimit),
       toolCallsUsed: Math.max(current.toolCallsUsed, snapshot.tool_calls_used),

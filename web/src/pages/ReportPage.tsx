@@ -124,6 +124,7 @@ export function ReportPage() {
         verified={verified}
         statementCount={statementCount}
         failedCount={failed.size}
+        requirementFailureCount={report.requirement_failures?.length ?? 0}
       />
 
       <div className="report-layout">

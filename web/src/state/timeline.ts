@@ -3,10 +3,8 @@ import {
   effortLabel,
   errorLabel,
   jobStatusLabel,
-  modeLabel,
   outcomeLabel,
   phaseLabel,
-  stageLabel,
 } from "../lib/labels";
 import { limitsForEffort } from "./budget";
 import type { TimelineDisplayClass, TimelineDisplayEntry } from "./timelineDisplay";
@@ -23,9 +21,6 @@ const STOP_REASON_LABELS: Record<string, string> = {
 
 const REJECTION_LABELS: Record<string, string> = {
   over_concurrency: "派发任务超过并发上限",
-  over_scope: "单任务申报对象超出工具预算可覆盖范围",
-  mixed_stage: "同一批任务混用了多个调查阶段",
-  stage_order: "尚未摸底就直接进入深挖阶段",
   schema_error: "输出格式不合法",
   empty_finish: "尚无证据，不能结束研究",
 };
@@ -150,10 +145,8 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
   const label = taskLabel(ctx, taskId);
 
   if (eventType === "task.started") {
-    const stage = stageLabel(String(payload.research_stage)) || "未知";
-    const mode = modeLabel(String(payload.research_mode)) || "未知";
     const budget = (payload.budget as { max_worker_rounds?: number } | undefined) ?? {};
-    return [`[${label}] 开始：${stage}阶段 / ${mode}（调查轮次预算 ${budget.max_worker_rounds ?? 0} 轮）`];
+    return [`[${label}] 开始调查（调查轮次预算 ${budget.max_worker_rounds ?? 0} 轮）`];
   }
   if (eventType === "task.tool_used") {
     return renderTool(label, payload);
@@ -185,7 +178,7 @@ function renderPhase(payload: Record<string, unknown>): string[] {
   if (phase === "verifier") return ["[研究] 研究阶段结束，等待核验"];
   if (phase === "composition_pending") return ["[成文] 证据核对已放行，准备撰写"];
   if (phase === "writing") return ["[成文] 正在组织深度研究报告"];
-  if (phase === "verifying") return ["[成文] 正在逐句核对报告"];
+  if (phase === "verifying") return ["[核验] Report Verifier 正在逐句验证"];
   if (phase === "revising") return ["[成文] 存在未通过的句子，正在修订"];
   if (phase === "verified") return ["[成文] 逐句验证全部通过"];
   if (phase === "revisions_exhausted") return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"];
@@ -232,7 +225,6 @@ function renderPlanner(ctx: TimelineContext, payload: Record<string, unknown>): 
     });
     return lines;
   }
-  if (decision === "reflect") return [`[轮 ${round}] 暂不派发，先复盘：${firstLine(payload.note)}`];
   if (decision === "finish") return [`[轮 ${round}] 判定可以收尾：${firstLine(payload.reason)}`];
   return [];
 }

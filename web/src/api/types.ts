@@ -59,9 +59,6 @@ export type JobListItem = {
 export type JobTaskView = {
   task_id: string;
   question: string;
-  subjects: string[];
-  research_stage: string;
-  research_mode: string;
   status: TaskStatus;
   stop_reason: string | null;
   budget: { max_worker_rounds?: number };
@@ -162,6 +159,25 @@ export type ReportSource = {
 export type ReportJson = {
   verification_status: "pending" | "verified" | "partial";
   failed_statement_ids: string[];
+  requirement_failures: Array<{
+    kind:
+      | "core_answer"
+      | "user_constraint"
+      | "conclusion_support"
+      | "internal_consistency"
+      | "material_omission"
+      | "overall_calibration";
+    repair_scope: "paragraph" | "report";
+    paragraph_ids: string[];
+    statement_ids: string[];
+    reason: string;
+  }>;
+  quality_reminders: Array<{
+    kind: "evidence_listing" | "repetition" | "section_without_judgement" | "long_reasoning_chain";
+    location: string;
+    statement_ids: string[];
+    reason: string;
+  }>;
   job_id: string;
   draft: ReportDraft;
   statement_citations: Record<string, number[]>;

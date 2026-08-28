@@ -167,8 +167,7 @@ export function MonitorPage() {
   if (!view) return <LoadingView>正在加载任务…</LoadingView>;
 
   const limits = limitsForEffort(view.effort);
-  const currentStage = view.tasks.find((task) => task.status === "running")?.researchStage;
-  const concMax = maxConcurrency(view.effort, currentStage);
+  const concMax = maxConcurrency(view.effort);
   const conc = runningTasks(view);
   const tokIn = totalInputTokens(view);
   const tokOut = totalOutputTokens(view);

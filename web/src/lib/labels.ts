@@ -1,7 +1,7 @@
 /**
  * The single place that turns backend enum values into words a user reads.
  * Nothing outside this file should render a raw `status`, `outcome`, `phase`,
- * `effort`, `research_stage` or `error_code` straight from the API.
+ * `effort` or `error_code` straight from the API.
  *
  * Unknown values fall through to the raw string on purpose: silently swallowing
  * a value the backend added is worse than showing it once and fixing the map.
@@ -56,20 +56,6 @@ const PHASE: Record<string, string> = {
   cancelled: "已取消",
 };
 
-const STAGE: Record<string, string> = {
-  scout: "摸底",
-  deep_dive: "深挖",
-  verify: "求证",
-};
-
-const MODE: Record<string, string> = {
-  factual: "事实核验",
-  comparison: "对比",
-  counterargument: "反证",
-  risk_scan: "风险扫描",
-  timeline: "时间线",
-};
-
 const ERROR: Record<string, string> = {
   research_budget_exhausted_without_evidence: "调查预算用尽，仍未找到足够证据",
   verifier_major_gap: "证据核对发现重大缺口",
@@ -96,8 +82,6 @@ const pick = (map: Record<string, string>, value: string | null | undefined): st
 export const effortLabel = (value: string | null | undefined): string => pick(EFFORT, value);
 export const languageLabel = (value: string | null | undefined): string => pick(LANGUAGE, value);
 export const phaseLabel = (value: string | null | undefined): string => pick(PHASE, value);
-export const stageLabel = (value: string | null | undefined): string => pick(STAGE, value);
-export const modeLabel = (value: string | null | undefined): string => pick(MODE, value);
 export const errorLabel = (value: string | null | undefined): string => pick(ERROR, value);
 
 /**

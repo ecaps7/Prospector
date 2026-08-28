@@ -28,6 +28,13 @@ function lines(events: ServerEvent[]): string[] {
   );
 }
 
+test("report verifier start is a 核验 line", () => {
+  assert.deepEqual(
+    lines([event(1, "job.phase_changed", { phase: "verifying" })]),
+    ["[核验] Report Verifier 正在逐句验证"],
+  );
+});
+
 test("cancelling a job reports 已取消 exactly once", () => {
   assert.deepEqual(
     lines([
@@ -73,6 +80,19 @@ test("web_fetch 403 stays a tool event and is hidden from the key view", () => {
   assert.equal(filterTimelineEntries(rows, "all").length, 1);
 });
 
+test("task start shows its concrete budget without a research stage", () => {
+  assert.deepEqual(
+    lines([
+      event(1, "task.started", {
+        task_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        question: "核验公开数据",
+        budget: { max_worker_rounds: 48 },
+      }),
+    ]),
+    ["[T1] 开始调查（调查轮次预算 48 轮）"],
+  );
+});
+
 test("verifier rejection remains a key gap, unlike tool fetch noise", () => {
   const rows = renderEvent(
     ctx(),
@@ -105,9 +125,6 @@ test("plan cards follow the canonical task order instead of planner array order"
   const tasks = taskIds.map((taskId) => ({
     taskId,
     question: taskId,
-    subjects: ["subject"],
-    researchStage: "scout",
-    researchMode: "factual",
     status: "pending",
     stopReason: null,
     roundsUsed: 0,
