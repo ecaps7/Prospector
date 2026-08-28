@@ -140,12 +140,17 @@ def _run_research_graph(
                 result = graph.invoke(initial_state, thread_config(str(job_id)))
         finally:
             follower.stop()
+    except VerifierMajorGapError:
+        # The decision budget is exhausted, so a resume would only hit the same wall:
+        # this is a graph-decided terminal failure and earns the unique job.stopped.
+        JobRepository().finalize_failure(job_id, fallback_error_code="verifier_major_gap")
+        raise
     except Exception:
-        # Close the job row the way the API scheduler does. Nothing else can: create_job
-        # writes 'running' and set_research_outcome's status clause only ever writes
-        # 'failed', so without this a local run leaves the row claiming to be running --
-        # and a run that failed once stays 'failed' even after a successful resume.
-        JobRepository().finalize_failure(job_id, fallback_error_code="job_execution_error")
+        # An escaped exception interrupts the attempt; it is not a terminal state.
+        # Finalizing here would write job.stopped and strand the checkpoint forever:
+        # finalize's idempotency guard would then veto the completed write of a later
+        # successful resume. Leave the row as-is ('running', or 'failed' when the graph
+        # already recorded a contract outcome) so the run stays resumable.
         raise
     JobRepository().finalize_success(job_id, result)
     typer.echo(
@@ -291,6 +296,14 @@ def job_resume(
     try:
         _bootstrap(require_llm=True)
         repository = ResearchRepository()
+        if JobRepository().stopped_event_id(parsed_job_id) is not None:
+            typer.secho(
+                f"JOB_NOT_RESUMABLE: {parsed_job_id} 已写入终态 job.stopped，"
+                "没有可恢复的断点（已完成、已取消或预算耗尽的终态失败）。",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
         effort = repository.get_job_effort(parsed_job_id)
         typer.echo(f"JOB_RESUMED: {parsed_job_id}", err=True)
         _run_research_graph(repository, parsed_job_id, effort=effort, initial_state=None)

@@ -128,11 +128,13 @@ class JobScheduler:
                     if await asyncio.to_thread(self.repository.cancel_requested, job_id):
                         await asyncio.to_thread(self.repository.finalize_cancelled, job_id)
                     else:
-                        log.exception("job.execute_failed", job_id=str(job_id), message=str(exc))
-                        await asyncio.to_thread(
-                            self.repository.finalize_failure,
-                            job_id,
-                            fallback_error_code="job_execution_error",
+                        # An escaped exception interrupts the attempt; it is not a terminal
+                        # state. Finalizing here would write job.stopped and strand the
+                        # checkpoint: the row stays 'running' (or 'failed' when the graph
+                        # already recorded a contract outcome), so a scheduler restart
+                        # recovers it and an explicit resume can still finalize success.
+                        log.exception(
+                            "job.execute_interrupted", job_id=str(job_id), message=str(exc)
                         )
                 else:
                     if await asyncio.to_thread(self.repository.cancel_requested, job_id):

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from prospector.api.scheduler import JobScheduler
+from prospector.flow.research_graph import VerifierMajorGapError
 from prospector.schemas.brief import ResearchBrief
 
 
@@ -121,18 +122,48 @@ async def test_scheduler_reports_first_running_then_fifo_queued() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_converts_unhandled_graph_error_to_stable_failure() -> None:
+async def test_scheduler_leaves_an_interrupted_job_recoverable() -> None:
+    """An unhandled graph error interrupts the attempt without a terminal write.
+
+    Finalizing failure here would write job.stopped and veto the completed write of a
+    later resume; the row stays recoverable instead, and the loop moves on.
+    """
+    repository = FakeJobRepository()
+    interrupted: list[UUID] = []
+
+    def run_job(job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
+        if not interrupted:
+            interrupted.append(job_id)
+            raise RuntimeError("transient execution error")
+        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+
+    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    await scheduler.start()
+    try:
+        first = await scheduler.submit(ResearchBrief(question="Q", brief_text="Brief"))
+        second = await scheduler.submit(ResearchBrief(question="Q2", brief_text="Brief2"))
+        await _wait_until(lambda: second["job_id"] in repository.completed)
+        assert interrupted == [first["job_id"]]
+        assert repository.failed == []
+        assert first["job_id"] not in repository.completed
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_finalizes_verifier_major_gap_as_terminal_failure() -> None:
+    """The decision budget is exhausted, so a resume would only hit the same wall."""
     repository = FakeJobRepository()
 
     def run_job(_job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
-        raise RuntimeError("private failure detail")
+        raise VerifierMajorGapError("major gap, budget exhausted")
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()
     try:
         created = await scheduler.submit(ResearchBrief(question="Q", brief_text="Brief"))
         await _wait_until(lambda: bool(repository.failed))
-        assert repository.failed == [(created["job_id"], "job_execution_error")]
+        assert repository.failed == [(created["job_id"], "verifier_major_gap")]
     finally:
         await scheduler.stop()
 

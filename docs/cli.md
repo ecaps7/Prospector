@@ -89,6 +89,7 @@ GET  /api/healthz                    # serve 启动自检 + CLI 连接探测
 - **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/api/scope` 与 `/api/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /api/jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
 - **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
 - **取消同样持久化**：queued Job 直接进入 `cancelled`；running Job 先进入 `cancelling`，事件记录 `requested_via`，在当前模型或工具调用结束后的安全边界停止；未完成 Task 一并进入 `cancelled`（`stop_reason=job_cancelled`），随后写入唯一 `job.stopped`，服务重启不会恢复。
+- **中断不是终态**：异常逃出研究图时不写 `job.stopped`——行保持 `running`（合同错误保留图内已落的 `failed`），事件流停在原地，由服务重启恢复或 `prospector-local job resume` 从 checkpoint 续跑；恢复成功后的收尾照常写入唯一 `job.stopped`。`job resume` 对已写 stopped 的 Job（完成/取消/预算耗尽的终态失败）直接拒绝。
 - **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
 - **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`。请求校验失败额外带稳定的 `details: [{ path, reason }]`（字段路径 + 原因），供表单定位；`path` 为空表示请求级错误。CLI 按 `error_code` 决定退出码，不解析 message 文本。
 

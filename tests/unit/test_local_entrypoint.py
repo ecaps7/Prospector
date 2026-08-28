@@ -6,7 +6,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+import typer
 
+from prospector.flow.research_graph import VerifierMajorGapError
 from prospector.runtime.entrypoints import local
 
 
@@ -84,10 +86,15 @@ def test_a_finished_local_run_closes_the_job_row(monkeypatch: pytest.MonkeyPatch
     assert stopped == [True]
 
 
-def test_a_failed_local_run_closes_the_job_row_and_reraises(
+def test_an_interrupted_local_run_leaves_the_job_resumable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The caller still sees the failure; the row stops claiming the run is in flight."""
+    """A generic escaped exception is an interruption, not a terminal state.
+
+    Finalizing here would write job.stopped, and the finalize idempotency guard would
+    then veto the completed write of a later successful resume -- stranding the job as
+    'failed' even after the checkpoint re-entry rendered the report.
+    """
     calls: list[tuple[str, UUID, Any]] = []
     stopped: list[bool] = []
     _patch_graph(monkeypatch, calls, stopped, error=RuntimeError("graph exploded"))
@@ -101,5 +108,51 @@ def test_a_failed_local_run_closes_the_job_row_and_reraises(
             initial_state=None,
         )
 
-    assert calls == [("failure", job_id, "job_execution_error")]
+    assert calls == []
     assert stopped == [True]
+
+
+def test_verifier_major_gap_is_terminal_and_closes_the_job_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decision budget is exhausted, so a resume would only hit the same wall."""
+    calls: list[tuple[str, UUID, Any]] = []
+    stopped: list[bool] = []
+    _patch_graph(monkeypatch, calls, stopped, error=VerifierMajorGapError("major gap"))
+    job_id = uuid4()
+
+    with pytest.raises(VerifierMajorGapError, match="major gap"):
+        local._run_research_graph(
+            _FakeRepository(),  # type: ignore[arg-type]
+            job_id,
+            effort="quick",
+            initial_state=None,
+        )
+
+    assert calls == [("failure", job_id, "verifier_major_gap")]
+    assert stopped == [True]
+
+
+def test_job_resume_refuses_a_job_that_already_reached_a_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job with job.stopped has no checkpoint left to re-enter: completed and cancelled
+    jobs are done, and a budget-exhausted failure would only re-raise on resume."""
+
+    class _Jobs:
+        def stopped_event_id(self, job_id: UUID) -> int | None:
+            return 42
+
+    class _Research:
+        def __init__(self) -> None:
+            pass
+
+    monkeypatch.setattr(local, "_bootstrap", lambda **kwargs: None)
+    monkeypatch.setattr(local, "JobRepository", _Jobs)
+    monkeypatch.setattr(local, "ResearchRepository", _Research)
+    monkeypatch.setattr(local, "close_pool", lambda: None)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        local.job_resume(str(uuid4()))
+
+    assert exc_info.value.exit_code == 1

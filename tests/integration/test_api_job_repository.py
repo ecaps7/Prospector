@@ -108,6 +108,54 @@ def test_atomic_fifo_lifecycle_and_stopped_event_idempotency() -> None:
                 )
 
 
+def test_interrupted_job_without_stopped_event_finalizes_success_after_resume() -> None:
+    """The resume contract: an interruption never writes job.stopped.
+
+    A contract error leaves the row 'failed' via set_research_outcome but keeps the
+    checkpoint resumable; when the resumed run later renders the report, finalize_success
+    must win over the stale 'failed' row and write the one and only job.stopped.
+    """
+    jobs = JobRepository()
+    research = ResearchRepository(engine=jobs.engine)
+    brief = ResearchBrief(
+        question="Resume semantics",
+        brief_text="Interrupt a job, then finalize the resumed run as completed.",
+    )
+    created = jobs.create_with_brief(brief, start_immediately=True)
+    job_id = created["job_id"]
+    try:
+        research.set_research_outcome(
+            job_id,
+            outcome="failed",
+            error_code="writer_contract_error",
+            phase="failed",
+        )
+        interrupted_view = jobs.get_job(job_id)
+        assert interrupted_view is not None
+        assert interrupted_view["status"] == "failed"
+        # A failed row needs a fix before re-entry, so it waits for an explicit
+        # `job resume` instead of the scheduler's automatic crash recovery.
+        assert job_id not in {row["job_id"] for row in jobs.recoverable_jobs()}
+
+        jobs.finalize_success(job_id, {"phase": "draft_rendered", "outcome": "draft_rendered"})
+
+        view = jobs.get_job(job_id)
+        assert view is not None
+        assert view["status"] == "completed"
+        assert view["outcome"] == "draft_rendered"
+        assert view["error_code"] is None
+        stopped = [
+            event
+            for event in jobs.list_events_after(job_id, 0)
+            if event["event_type"] == "job.stopped"
+        ]
+        assert len(stopped) == 1
+        assert stopped[0]["payload"]["status"] == "completed"
+    finally:
+        with jobs.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
 def test_scope_job_and_sse_http_flow_uses_persisted_events() -> None:
     repository = JobRepository()
     brief = ResearchBrief(
@@ -213,12 +261,11 @@ def test_job_detail_orders_tasks_by_first_plan_appearance() -> None:
                     text(
                         """
                         INSERT INTO app.tasks
-                          (id, job_id, question, subjects, research_stage, research_mode,
-                           source_policy, allowed_tools, expected_evidence, depends_on, budget,
-                           status, created_at)
+                          (id, job_id, question, allowed_tools,
+                           expected_evidence, depends_on, budget, status, created_at)
                         VALUES
-                          (:id, :job_id, :question, '["subject"]'::jsonb, 'scout', 'factual',
-                           '{}'::jsonb, '["web_search"]'::jsonb, 'One exact source excerpt',
+                          (:id, :job_id, :question, '["web_search"]'::jsonb,
+                           'One exact source excerpt',
                            '[]'::jsonb, '{"max_worker_rounds": 2}'::jsonb, 'pending',
                            '2026-08-26T12:00:00Z'::timestamptz)
                         """
@@ -272,12 +319,11 @@ def test_queued_and_running_jobs_reach_idempotent_cancelled_terminal_state() -> 
                     text(
                         """
                         INSERT INTO app.tasks
-                          (id, job_id, question, subjects, research_stage, research_mode,
-                           source_policy, allowed_tools, expected_evidence, depends_on, budget,
-                           status, created_at, started_at)
+                          (id, job_id, question, allowed_tools,
+                           expected_evidence, depends_on, budget, status, created_at, started_at)
                         VALUES
-                          (:id, :job_id, :question, '["subject"]'::jsonb, 'scout', 'factual',
-                           '{}'::jsonb, '["web_search"]'::jsonb, :expected_evidence,
+                          (:id, :job_id, :question, '["web_search"]'::jsonb,
+                           :expected_evidence,
                            '[]'::jsonb, '{"max_worker_rounds": 2}'::jsonb,
                            :status, NOW(), CASE WHEN :status='running' THEN NOW() ELSE NULL END)
                         """
