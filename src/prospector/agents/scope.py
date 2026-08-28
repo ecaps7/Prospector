@@ -7,10 +7,18 @@ import re
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from prospector.agents.llm import get_openai_client, mid_model, no_thinking_extra_body
+from prospector.agents.llm import (
+    get_openai_client,
+    mid_model,
+    no_thinking_extra_body,
+    strong_model,
+    thinking_extra_body,
+)
 from prospector.agents.prompts.scope import clarify_prompt, write_brief_prompt
+from prospector.agents.streaming import stream_text
+from prospector.agents.usage import record_response_usage
 from prospector.config import Settings
 from prospector.obs.logging import get_logger
 from prospector.schemas.brief import (
@@ -63,36 +71,91 @@ def _chat_json(
     user_prompt: str,
     label: str,
 ) -> str:
-    """Ask for a JSON object. Prefer json_object mode; fall back to plain chat."""
+    """Ask for a JSON object. Transport errors propagate; there is no plain-chat retry."""
     messages: list[ChatCompletionMessageParam] = [
         {"role": "user", "content": user_prompt},
     ]
     log.info("llm.call", label=label, model=model)
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.0,
-            messages=messages,
-            response_format={"type": "json_object"},
-            extra_body=no_thinking_extra_body(model),
-        )
-    except Exception:
-        log.debug("llm.call.json_object_fallback", label=label, model=model)
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.0,
-            messages=messages,
-            extra_body=no_thinking_extra_body(model),
-        )
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0.0,
+        messages=messages,
+        response_format={"type": "json_object"},
+        extra_body=no_thinking_extra_body(model),
+    )
+    record_response_usage(response, model)
     content = None
     if getattr(response, "choices", None):
         content = response.choices[0].message.content
     if not content:
         raise RuntimeError(f"empty LLM response for {label}")
-    usage = getattr(response, "usage", None)
-    if usage:
-        log.debug("llm.call.tokens", label=label, total_tokens=usage.total_tokens)
     return content
+
+
+def _repair_brief_prompt(broken_output: str) -> str:
+    schema = json.dumps(ResearchBrief.model_json_schema(), ensure_ascii=False)
+    return f"""下面是一段本应为合法 JSON 的模型输出，但解析或校验失败。
+请把它修复为符合 JSON Schema 的单个 JSON 对象后输出。
+只允许修复语法和结构（引号、逗号、字段名、包裹层级、去除多余文本），
+不得改写研究内容或补充新事实。
+
+JSON Schema：
+{schema}
+
+待修复输出：
+{broken_output}
+
+只输出修复后的 JSON 对象，不要任何其他文本。"""
+
+
+def _stream_brief_json(
+    client: OpenAI,
+    *,
+    model: str,
+    user_prompt: str,
+) -> str:
+    """Thinking-mode Brief: stream without response_format, then parse JSON.
+
+    供应商约束（百炼「思考模式模型如何结构化输出」、错误码
+    ``Json mode response is not supported when enable_thinking is true`` /
+    ``parameter.enable_thinking only support stream call``）：深度思考必须以
+    stream=True 调用，且不能依赖 response_format。解析失败时按文档两步法，
+    用关闭思考的 json_object 调用修复一次。
+    """
+    log.info("llm.call", label="research_brief", model=model)
+    content = stream_text(
+        client,
+        agent="scope",
+        model=model,
+        messages=[{"role": "user", "content": user_prompt}],
+        temperature=0.0,
+        extra_body=thinking_extra_body(model),
+    )
+    if not content.strip():
+        raise RuntimeError("empty LLM response for research_brief")
+    return content
+
+
+def _repair_brief_json(client: OpenAI, *, model: str, broken_output: str) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0.0,
+        messages=[{"role": "user", "content": _repair_brief_prompt(broken_output)}],
+        response_format={"type": "json_object"},
+        extra_body=no_thinking_extra_body(model),
+    )
+    record_response_usage(response, model)
+    if not getattr(response, "choices", None):
+        return ""
+    return response.choices[0].message.content or ""
+
+
+def _parse_research_brief(content: str, *, client: OpenAI, repair_model: str) -> ResearchBrief:
+    try:
+        return _parse_json_model(content, ResearchBrief)
+    except (ValidationError, TypeError, ValueError, json.JSONDecodeError):
+        repaired = _repair_brief_json(client, model=repair_model, broken_output=content)
+        return _parse_json_model(repaired, ResearchBrief)
 
 
 def decide_clarification(
@@ -147,7 +210,7 @@ def write_research_brief(
     openai = client or get_openai_client(settings)
     model_name = model or mid_model(settings)
     clarified_question, clarified_answer = clarification or (None, None)
-    raw = _chat_json(
+    content = _stream_brief_json(
         openai,
         model=model_name,
         user_prompt=write_brief_prompt(
@@ -160,10 +223,9 @@ def write_research_brief(
             language=language,
             effort=effort,
         ),
-        label="research_brief",
     )
     log.info("scope.brief", effort=effort, language=language, question_len=len(text))
-    brief = _parse_json_model(raw, ResearchBrief)
+    brief = _parse_research_brief(content, client=openai, repair_model=model_name)
     # Honor caller effort unless the model already set a valid one from prompt.
     if brief.effort != effort:
         brief = brief.model_copy(update={"effort": effort})
@@ -197,7 +259,7 @@ def run_scope(
     )
 
     openai = client or get_openai_client(settings)
-    model_name = model or mid_model(settings)
+    model_name = model or strong_model(settings)
 
     if clarification is not None:
         clarified_question, clarified_answer = clarification
