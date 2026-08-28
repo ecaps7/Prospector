@@ -25,6 +25,7 @@ from prospector.schemas.claims import (
     ReportVerifierFindings,
     ReportVerifierSnapshot,
     ReportVerifierStatementInput,
+    StatementDecision,
 )
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.events import EventType
@@ -519,14 +520,12 @@ class ResearchRepository:
                     text(
                         """
                         INSERT INTO app.tasks
-                          (id, job_id, question, subjects, research_stage, research_mode,
-                           source_policy, allowed_tools, expected_evidence, depends_on, budget,
-                           status, created_at)
+                          (id, job_id, question, allowed_tools,
+                           expected_evidence, depends_on, budget, status, created_at)
                         VALUES
-                          (:id, :job_id, :question, CAST(:subjects AS JSONB),
-                           :research_stage, :research_mode,
-                           CAST(:source_policy AS JSONB), CAST(:allowed_tools AS JSONB),
-                           :expected_evidence, CAST(:depends_on AS JSONB),
+                          (:id, :job_id, :question,
+                           CAST(:allowed_tools AS JSONB), :expected_evidence,
+                           CAST(:depends_on AS JSONB),
                            CAST(:budget AS JSONB), :status, :created_at)
                         """
                     ),
@@ -534,10 +533,6 @@ class ResearchRepository:
                         "id": task.task_id,
                         "job_id": job_id,
                         "question": task.question,
-                        "subjects": _json(payload["subjects"]),
-                        "research_stage": task.research_stage,
-                        "research_mode": task.research_mode,
-                        "source_policy": _json(payload["source_policy"]),
                         "allowed_tools": _json(payload["allowed_tools"]),
                         "expected_evidence": task.expected_evidence,
                         "depends_on": _json(payload["depends_on"]),
@@ -615,10 +610,6 @@ class ResearchRepository:
             {
                 "task_id": row["id"],
                 "question": row["question"],
-                "subjects": row["subjects"],
-                "research_stage": row["research_stage"],
-                "research_mode": row["research_mode"],
-                "source_policy": row["source_policy"],
                 "allowed_tools": row["allowed_tools"],
                 "expected_evidence": row["expected_evidence"],
                 "depends_on": row["depends_on"],
@@ -641,10 +632,6 @@ class ResearchRepository:
                 event_type=EventType.TASK_STARTED,
                 payload={
                     "task_id": str(task.task_id),
-                    "research_stage": task.research_stage,
-                    "research_mode": task.research_mode,
-                    "subjects": task.subjects,
-                    "source_policy": task.source_policy.model_dump(),
                     "question": task.question.splitlines()[0],
                     "budget": task.budget.model_dump(),
                 },
@@ -1297,7 +1284,8 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                        SELECT b.question, b.brief_text, b.output_format, b.language, b.effort
+                        SELECT b.question, b.brief_text, b.user_constraints,
+                               b.output_format, b.language, b.effort
                         FROM app.briefs b JOIN app.jobs j ON j.brief_id=b.id
                         WHERE j.id=:job_id
                         """
@@ -1325,8 +1313,8 @@ class ResearchRepository:
                 for row in conn.execute(
                     text(
                         """
-                        SELECT id AS task_id, question, subjects, research_stage, research_mode,
-                               expected_evidence, status, stop_reason, finish_reason
+                        SELECT id AS task_id, question, expected_evidence,
+                               status, stop_reason, finish_reason
                         FROM app.tasks WHERE job_id=:job_id ORDER BY created_at, id
                         """
                     ),
@@ -1366,7 +1354,7 @@ class ResearchRepository:
                 planner_finish_reason = conn.execute(
                     text(
                         """
-                        SELECT decision_payload->'finish'->>'reason'
+                        SELECT decision_payload->>'reason'
                         FROM app.decision_log
                         WHERE job_id=:job_id AND decision_type='finish' AND status='accepted'
                         ORDER BY decision_round DESC LIMIT 1
@@ -1460,10 +1448,6 @@ class ResearchRepository:
             {
                 "release_decision": row["release_decision"],
                 "decision_reason": row["decision_reason"],
-                "brief_alignment": row["brief_alignment"],
-                "coverage_rationale": row["coverage_rationale"],
-                "brief_alignment_rationale": row["brief_alignment_rationale"],
-                "credibility_rationale": row["credibility_rationale"],
                 "gaps": row["gaps"],
                 "conflict_resolutions": resolutions,
                 "assertion_dispositions": dispositions,
@@ -1582,10 +1566,6 @@ class ResearchRepository:
                     UPDATE app.verifier_runs
                     SET raw_output=CAST(:raw_output AS JSONB),
                         decision_reason=:decision_reason,
-                        coverage_rationale=:coverage_rationale,
-                        brief_alignment=:brief_alignment,
-                        brief_alignment_rationale=:brief_alignment_rationale,
-                        credibility_rationale=:credibility_rationale,
                         release_decision=:release_decision,
                         gaps=CAST(:gaps AS JSONB), status='completed', completed_at=:now
                     -- 'failed' is retryable on purpose: a resumed Job re-asks the same
@@ -1596,10 +1576,6 @@ class ResearchRepository:
                 {
                     "raw_output": _json(raw_output),
                     "decision_reason": decision.decision_reason,
-                    "coverage_rationale": decision.coverage_rationale,
-                    "brief_alignment": decision.brief_alignment,
-                    "brief_alignment_rationale": decision.brief_alignment_rationale,
-                    "credibility_rationale": decision.credibility_rationale,
                     "release_decision": decision.release_decision,
                     "gaps": _json([gap.model_dump(mode="json") for gap in decision.gaps]),
                     "now": now,
@@ -1638,10 +1614,8 @@ class ResearchRepository:
                             "severity": gap.severity,
                             "kind": gap.kind,
                             "description": gap.description.splitlines()[0],
-                            "recommended_research": (
-                                gap.recommended_research.splitlines()[0]
-                                if gap.recommended_research
-                                else ""
+                            "evidence_needed": (
+                                gap.evidence_needed.splitlines()[0] if gap.evidence_needed else ""
                             ),
                         }
                         for gap in decision.gaps
@@ -1854,7 +1828,8 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                        SELECT b.question, b.brief_text, b.output_format, b.language, b.effort
+                        SELECT b.question, b.brief_text, b.user_constraints,
+                               b.output_format, b.language, b.effort
                         FROM app.briefs b JOIN app.jobs j ON j.brief_id=b.id
                         WHERE j.id=:job_id
                         """
@@ -1895,7 +1870,7 @@ class ResearchRepository:
                 for row in conn.execute(
                     text(
                         """
-                        SELECT id, question, research_stage, research_mode, expected_evidence,
+                        SELECT id, question, expected_evidence,
                                status, stop_reason, finish_reason
                         FROM app.tasks WHERE job_id=:job_id ORDER BY created_at, id
                         """
@@ -1999,7 +1974,9 @@ class ResearchRepository:
             }
         )
 
-    def get_report_revision(self, job_id: UUID) -> dict[str, Any] | None:
+    def get_report_revision(
+        self, job_id: UUID, *, revision: int | None = None
+    ) -> dict[str, Any] | None:
         with self.engine.connect() as conn:
             row = (
                 conn.execute(
@@ -2010,11 +1987,12 @@ class ResearchRepository:
                                rr.status AS revision_status, r.markdown_ref, r.json_ref
                         FROM app.reports r
                         JOIN app.report_revisions rr
-                          ON rr.report_id=r.id AND rr.revision=r.current_revision
+                          ON rr.report_id=r.id
+                         AND rr.revision = COALESCE(:revision, r.current_revision)
                         WHERE r.job_id=:job_id
                         """
                     ),
-                    {"job_id": job_id},
+                    {"job_id": job_id, "revision": revision},
                 )
                 .mappings()
                 .first()
@@ -2034,10 +2012,11 @@ class ResearchRepository:
         *,
         bump: bool = False,
     ) -> tuple[UUID, int]:
-        """Start a Writer revision. ``bump=False`` creates/reuses revision 1;
+        """Start a Writer revision. ``bump=False`` creates or reuses the current revision
+        (first write, or replay of an already-opened rewrite).
 
-        ``bump=True`` increments ``current_revision`` for a sentence-level rewrite.
-        Returns ``(report_id, revision)``.
+        ``bump=True`` increments ``current_revision`` when a generated draft must be
+        rewritten. Returns ``(report_id, revision)``.
         """
         report_id = uuid4()
         now = datetime.now(UTC)
@@ -2193,9 +2172,11 @@ class ResearchRepository:
                 revision=revision,
             )
             statement_order = 0
-            paragraph_groups = [
-                (section.section_id, section.paragraphs) for section in draft.sections
-            ] + [("sec_conclusion", draft.conclusion)]
+            paragraph_groups = (
+                [("sec_introduction", draft.introduction)]
+                + [(section.section_id, section.paragraphs) for section in draft.sections]
+                + [("sec_conclusion", draft.conclusion)]
+            )
             for section_id, paragraphs in paragraph_groups:
                 for paragraph in paragraphs:
                     for statement in paragraph.statements:
@@ -2302,29 +2283,46 @@ class ResearchRepository:
         run_id = uuid4()
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
+            report = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT job_id FROM app.reports
+                        WHERE id=:report_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {"report_id": report_id},
+                )
+                .mappings()
+                .one()
+            )
             existing = (
                 conn.execute(
                     text(
                         """
-                    SELECT id, status FROM app.report_verifier_runs
-                    WHERE report_id=:report_id AND revision=:revision AND round=:round
-                    """
+                        SELECT id, status, attempt FROM app.report_verifier_runs
+                        WHERE report_id=:report_id AND revision=:revision AND round=:round
+                        ORDER BY attempt DESC
+                        LIMIT 1
+                        """
                     ),
                     {"report_id": report_id, "revision": revision, "round": round_number},
                 )
                 .mappings()
                 .first()
             )
-            if existing is not None:
+            if existing is not None and existing["status"] != "failed":
                 return UUID(str(existing["id"]))
+            attempt = 1 if existing is None else int(existing["attempt"]) + 1
             conn.execute(
                 text(
                     """
                     INSERT INTO app.report_verifier_runs
-                      (id, report_id, revision, round, status, dirty_statement_ids,
-                       created_at)
+                      (id, report_id, revision, round, attempt, status,
+                       dirty_statement_ids, created_at)
                     VALUES
-                      (:id, :report_id, :revision, :round, 'running',
+                      (:id, :report_id, :revision, :round, :attempt, 'running',
                        CAST(:dirty AS JSONB), :now)
                     """
                 ),
@@ -2333,6 +2331,7 @@ class ResearchRepository:
                     "report_id": report_id,
                     "revision": revision,
                     "round": round_number,
+                    "attempt": attempt,
                     "dirty": _json(dirty_statement_ids),
                     "now": now,
                 },
@@ -2346,6 +2345,24 @@ class ResearchRepository:
                 ),
                 {"report_id": report_id, "now": now},
             )
+            if existing is not None:
+                job_id = UUID(str(report["job_id"]))
+                conn.execute(
+                    text(
+                        """
+                        UPDATE app.jobs
+                        SET status='running', outcome=NULL, error_code=NULL, updated_at=:now
+                        WHERE id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id, "now": now},
+                )
+                self._phase_event(
+                    conn,
+                    job_id=job_id,
+                    phase="verifying",
+                    revision=revision,
+                )
         return run_id
 
     def get_report_verifier_run(
@@ -2360,10 +2377,13 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                        SELECT id, report_id, revision, round, status, dirty_statement_ids,
-                               findings, statement_checks, error, created_at, completed_at
+                        SELECT id, report_id, revision, round, attempt, status,
+                               dirty_statement_ids, findings, statement_checks, error,
+                               created_at, completed_at
                         FROM app.report_verifier_runs
                         WHERE report_id=:report_id AND revision=:revision AND round=:round
+                        ORDER BY attempt DESC
+                        LIMIT 1
                         """
                     ),
                     {
@@ -2388,15 +2408,50 @@ class ResearchRepository:
                 conn.execute(
                     text(
                         """
-                        SELECT id, report_id, revision, round, status, dirty_statement_ids,
-                               findings, statement_checks, error, created_at, completed_at
+                        SELECT id, report_id, revision, round, attempt, status,
+                               dirty_statement_ids, findings, statement_checks, error,
+                               created_at, completed_at
                         FROM app.report_verifier_runs
                         WHERE report_id=:report_id
-                        ORDER BY revision DESC, round DESC
+                        ORDER BY revision DESC, round DESC, attempt DESC
                         LIMIT 1
                         """
                     ),
                     {"report_id": report_id},
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        if result["findings"] is not None:
+            result["findings"] = ReportVerifierFindings.model_validate(result["findings"])
+        return result
+
+    def get_prior_completed_report_verifier_run(
+        self,
+        report_id: UUID,
+        *,
+        before_revision: int,
+    ) -> dict[str, Any] | None:
+        """Return the latest completed run on a strictly earlier revision."""
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, report_id, revision, round, attempt, status,
+                               dirty_statement_ids, findings, statement_checks, error,
+                               created_at, completed_at
+                        FROM app.report_verifier_runs
+                        WHERE report_id=:report_id AND revision < :revision
+                          AND status='completed'
+                        ORDER BY revision DESC, round DESC, attempt DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"report_id": report_id, "revision": before_revision},
                 )
                 .mappings()
                 .first()
@@ -2624,7 +2679,9 @@ class ResearchRepository:
         for decision in decisions:
             if isinstance(decision, BridgeStatementDecision):
                 continue
-            statement = statement_by_id[decision.statement_id]
+            statement = statement_by_id.get(decision.statement_id)
+            if statement is None:
+                continue
             grounding = "evidence" if isinstance(decision, EvidenceStatementDecision) else "derived"
             existing = conn.execute(
                 text(
@@ -2666,7 +2723,7 @@ class ResearchRepository:
                 )
             claim_ids[decision.statement_id] = claim_id
 
-            if isinstance(decision, EvidenceStatementDecision):
+            if isinstance(decision, (EvidenceStatementDecision, DerivedStatementDecision)):
                 for pair in decision.pairs:
                     conn.execute(
                         text(
@@ -2685,7 +2742,7 @@ class ResearchRepository:
                             "now": now,
                         },
                     )
-            elif isinstance(decision, DerivedStatementDecision):
+            if isinstance(decision, DerivedStatementDecision) and statement.premise_statement_ids:
                 premise_claim_ids = [
                     str(claim_ids[premise_id])
                     for premise_id in statement.premise_statement_ids
@@ -2779,18 +2836,24 @@ class ResearchRepository:
         round_number: int,
         dirty_statement_ids: set[str],
         draft: ReportDraft,
+        skip_statement_verification: bool = False,
+        reused_statement_decisions: list[StatementDecision] | None = None,
     ) -> ReportVerifierSnapshot:
         with self.engine.connect() as conn:
-            brief_question = conn.execute(
-                text(
-                    """
-                    SELECT b.question FROM app.briefs b
+            brief = (
+                conn.execute(
+                    text(
+                        """
+                    SELECT b.question, b.brief_text, b.user_constraints FROM app.briefs b
                     JOIN app.jobs j ON j.brief_id=b.id
                     WHERE j.id=:job_id
                     """
-                ),
-                {"job_id": job_id},
-            ).scalar_one()
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
             excerpts = {
                 UUID(str(row["excerpt_id"])): dict(row)
                 for row in conn.execute(
@@ -2798,7 +2861,9 @@ class ResearchRepository:
                         """
                         SELECT e.id AS excerpt_id, e.text, e.doc_version,
                                d.source_uri AS url,
-                               d.source_meta->>'title' AS title
+                               d.source_meta->>'title' AS title,
+                               d.source_meta->>'author' AS author,
+                               d.source_meta->>'published_at' AS published_at
                         FROM app.excerpts e JOIN app.documents d ON d.id=e.doc_id
                         WHERE e.job_id=:job_id
                         """
@@ -2806,33 +2871,69 @@ class ResearchRepository:
                     {"job_id": job_id},
                 ).mappings()
             }
+            conflict_rows = [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT cr.conflict_key, cr.disputed_point, cr.excerpt_ids,
+                               cr.decision, cr.winning_excerpt_ids, cr.rationale
+                        FROM app.conflict_resolutions cr
+                        JOIN app.reports r ON r.verifier_run_id=cr.verifier_run_id
+                        WHERE r.id=:report_id
+                        ORDER BY cr.conflict_key
+                        """
+                    ),
+                    {"report_id": report_id},
+                ).mappings()
+            ]
+            unusable = self._effective_unusable_assertion_ids(conn, job_id)
+            research_assertions = [
+                {
+                    "assertion_id": str(row["id"]),
+                    "research_question": row["question"],
+                    "statement": row["statement"],
+                }
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT a.id, a.statement, t.question
+                        FROM app.assertions a
+                        JOIN app.tasks t ON t.id=a.task_id
+                        WHERE a.job_id=:job_id
+                        ORDER BY a.created_at, a.id
+                        """
+                    ),
+                    {"job_id": job_id},
+                ).mappings()
+                if UUID(str(row["id"])) not in unusable
+            ]
+            verifier_gaps = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT vr.gaps
+                        FROM app.verifier_runs vr
+                        JOIN app.reports r ON r.verifier_run_id=vr.id
+                        WHERE r.id=:report_id
+                        """
+                    ),
+                    {"report_id": report_id},
+                ).scalar_one_or_none()
+                or []
+            )
             passed_ids = self.get_passed_statement_ids(report_id, revision=revision)
 
         statement_map = {item.statement_id: item for item in draft.statements()}
-        # Where each statement sits, so a derived verdict can be judged against the
-        # paragraph it generalizes over instead of its premise ids alone.
-        location: dict[str, tuple[str | None, list[dict[str, Any]]]] = {}
-        scopes: list[tuple[str | None, list[ReportParagraph]]] = [
-            (None, list(draft.introduction)),
-            *((section.title, list(section.paragraphs)) for section in draft.sections),
-            (None, list(draft.conclusion)),
+        scopes: list[tuple[str, str | None, list[ReportParagraph]]] = [
+            ("introduction", None, list(draft.introduction)),
+            *(("section", section.title, list(section.paragraphs)) for section in draft.sections),
+            ("conclusion", None, list(draft.conclusion)),
         ]
-        for section_title, paragraphs in scopes:
-            for paragraph in paragraphs:
-                rendered = [
-                    {
-                        "statement_id": item.statement_id,
-                        "text": item.text,
-                        "kind": item.kind,
-                    }
-                    for item in paragraph.statements
-                ]
-                for item in paragraph.statements:
-                    location[item.statement_id] = (section_title, rendered)
 
-        # Depth is a structural measurement. It must be carried without clamping so
-        # Report Verifier can reject an over-deep statement through the normal
-        # revision/partial-report path.
+        # Depth is carried without clamping for the non-blocking report-quality review.
+        # Sentence verification checks whether the chain is rooted and sound, not how
+        # many layers it contains.
         depth_cache: dict[str, int] = {}
 
         def statement_depth(statement_id: str) -> int:
@@ -2847,6 +2948,61 @@ class ResearchRepository:
                 default=0,
             )
             return depth_cache[statement_id]
+
+        root_excerpt_cache: dict[str, set[UUID]] = {}
+
+        def root_excerpt_ids(statement_id: str) -> set[UUID]:
+            if statement_id in root_excerpt_cache:
+                return root_excerpt_cache[statement_id]
+            statement = statement_map[statement_id]
+            roots = set(statement.candidate_excerpt_ids)
+            for premise_id in statement.premise_statement_ids:
+                roots.update(root_excerpt_ids(premise_id))
+            root_excerpt_cache[statement_id] = roots
+            return roots
+
+        report_context = {
+            "brief_question": str(brief["question"]),
+            "brief_text": str(brief["brief_text"]),
+            "user_constraints": brief["user_constraints"] or {},
+            "title": draft.title,
+            "research_context": {
+                "findings": research_assertions,
+                "conflicts": [
+                    {
+                        "conflict_key": row["conflict_key"],
+                        "disputed_point": row["disputed_point"],
+                        "decision": row["decision"],
+                        "rationale": row["rationale"],
+                    }
+                    for row in conflict_rows
+                ],
+                "limitations": [gap for gap in verifier_gaps if gap.get("severity") == "minor"],
+            },
+            "scopes": [
+                {
+                    "kind": scope_kind,
+                    "title": section_title,
+                    "paragraphs": [
+                        {
+                            "paragraph_id": paragraph.paragraph_id,
+                            "statements": [
+                                {
+                                    "statement_id": statement.statement_id,
+                                    "text": statement.text,
+                                    "kind": statement.kind,
+                                    "premise_statement_ids": list(statement.premise_statement_ids),
+                                    "premise_depth": statement_depth(statement.statement_id),
+                                }
+                                for statement in paragraph.statements
+                            ],
+                        }
+                        for paragraph in paragraphs
+                    ],
+                }
+                for scope_kind, section_title, paragraphs in scopes
+            ],
+        }
 
         inputs: list[ReportVerifierStatementInput] = []
         allowed_excerpt_ids: list[UUID] = []
@@ -2864,6 +3020,8 @@ class ResearchRepository:
                         "text": row["text"],
                         "url": row["url"],
                         "title": row["title"],
+                        "author": row["author"],
+                        "published_at": row["published_at"],
                         "document_version": row["doc_version"],
                     }
                 )
@@ -2889,6 +3047,8 @@ class ResearchRepository:
                         ),
                         "title": excerpts[excerpt_id]["title"],
                         "url": excerpts[excerpt_id]["url"],
+                        "author": excerpts[excerpt_id]["author"],
+                        "published_at": excerpts[excerpt_id]["published_at"],
                     }
                     for excerpt_id in premise.candidate_excerpt_ids
                     if excerpt_id in excerpts
@@ -2902,8 +3062,35 @@ class ResearchRepository:
                         "excerpts": premise_excerpts,
                     }
                 )
-            section_title, paragraph_statements = location.get(statement.statement_id, (None, []))
-            derived = statement.kind == "derived"
+            roots = root_excerpt_ids(statement.statement_id)
+            known_conflicts = []
+            for conflict in conflict_rows:
+                conflict_excerpt_ids = {UUID(str(value)) for value in conflict["excerpt_ids"]}
+                if roots.isdisjoint(conflict_excerpt_ids):
+                    continue
+                known_conflicts.append(
+                    {
+                        "conflict_key": str(conflict["conflict_key"]),
+                        "disputed_point": conflict["disputed_point"],
+                        "decision": conflict["decision"],
+                        "winning_excerpt_ids": [
+                            str(value) for value in conflict["winning_excerpt_ids"]
+                        ],
+                        "rationale": conflict["rationale"],
+                        "excerpts": [
+                            {
+                                "excerpt_id": str(excerpt_id),
+                                "text": excerpts[excerpt_id]["text"],
+                                "url": excerpts[excerpt_id]["url"],
+                                "title": excerpts[excerpt_id]["title"],
+                                "author": excerpts[excerpt_id]["author"],
+                                "published_at": excerpts[excerpt_id]["published_at"],
+                            }
+                            for excerpt_id in conflict_excerpt_ids
+                            if excerpt_id in excerpts
+                        ],
+                    }
+                )
             inputs.append(
                 ReportVerifierStatementInput(
                     statement_id=statement.statement_id,
@@ -2913,20 +3100,23 @@ class ResearchRepository:
                     premises=premises,
                     premises_all_passed=premises_all_passed,
                     premise_depth=statement_depth(statement.statement_id),
-                    section_title=section_title if derived else None,
-                    paragraph_statements=paragraph_statements if derived else [],
+                    known_conflicts=known_conflicts,
                 )
             )
-        if not inputs:
+        if not inputs and not skip_statement_verification:
             raise RuntimeError("Report verifier snapshot has no dirty statements")
         return ReportVerifierSnapshot(
             job_id=job_id,
             report_id=report_id,
             revision=revision,
             round=round_number,
-            brief_question=str(brief_question),
+            brief_question=str(brief["question"]),
+            user_constraints=UserConstraints.model_validate(brief["user_constraints"] or {}),
             statements=inputs,
             allowed_excerpt_ids=allowed_excerpt_ids,
+            report_context=report_context,
+            skip_statement_verification=skip_statement_verification,
+            reused_statement_decisions=list(reused_statement_decisions or []),
         )
 
     def get_verified_citation_map(self, report_id: UUID, *, revision: int) -> dict[str, list[UUID]]:
@@ -2982,6 +3172,7 @@ class ResearchRepository:
         json_ref: str,
         json_hash: str,
         verification_status: str = "verified",
+        structure: dict[str, Any] | None = None,
     ) -> None:
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
@@ -3036,6 +3227,7 @@ class ResearchRepository:
                     "verification_status": verification_status,
                     "markdown_ref": markdown_ref,
                     "json_ref": json_ref,
+                    "structure": structure or {},
                 },
             )
             conn.execute(

@@ -35,6 +35,26 @@ def _alias_replacer(snapshot: WriterSnapshot) -> Callable[[object], object]:
     return replace
 
 
+def _source_caveats(snapshot: WriterSnapshot) -> dict[UUID, str]:
+    """Map each Assertion named by a minor source-credibility gap to that gap's finding.
+
+    Only ``source_credibility`` gaps qualify: they are the ones whose subject is "this
+    evidence rests on a weak carrier", which is a fact about the sentence that will cite
+    it. The other gap kinds describe what the research missed, which belongs to the
+    report's limitations rather than to any one finding.
+    """
+    caveats: dict[UUID, str] = {}
+    for gap in snapshot.minor_gaps:
+        if gap.get("kind") != "source_credibility":
+            continue
+        description = str(gap.get("description") or "").strip()
+        if not description:
+            continue
+        for assertion_id in gap.get("related_assertion_ids") or []:
+            caveats.setdefault(UUID(str(assertion_id)), description)
+    return caveats
+
+
 def _aliased_material(snapshot: WriterSnapshot) -> str:
     """Render the material as research strands over a deduplicated Excerpt library.
 
@@ -43,18 +63,28 @@ def _aliased_material(snapshot: WriterSnapshot) -> str:
     chronological pile. Excerpt text is rendered once in a library the cards point into:
     Assertions outnumber Excerpts and share them, so inlining passages per card would
     pay for the same text several times over.
+
+    A source-credibility caveat is attached to the finding it applies to, not left for
+    the Writer to resolve out of the gap list by id. Research Verifier already knows
+    which Assertions rest on a weak carrier; a warning the Writer has to cross-reference
+    is a warning that reaches the report as a disclaimer in the last paragraph instead
+    of as attribution in the sentence that uses the number.
     """
     alias_map = excerpt_alias_map(snapshot)
     replace = _alias_replacer(snapshot)
+    caveats = _source_caveats(snapshot)
 
     cards_by_task: dict[str, list[dict[str, object]]] = {}
     for card in snapshot.evidence_cards:
-        cards_by_task.setdefault(str(card.task_id), []).append(
-            {
-                "statement": card.assertion_statement,
-                "excerpt_ids": [alias_map[excerpt.excerpt_id] for excerpt in card.excerpts],
-            }
-        )
+        finding: dict[str, object] = {
+            "assertion_id": str(card.assertion_id),
+            "statement": card.assertion_statement,
+            "excerpt_ids": [alias_map[excerpt.excerpt_id] for excerpt in card.excerpts],
+        }
+        caveat = caveats.get(card.assertion_id)
+        if caveat is not None:
+            finding["source_caveat"] = caveat
+        cards_by_task.setdefault(str(card.task_id), []).append(finding)
 
     # Plan order, so the material arrives in the shape the research actually took.
     groups: list[dict[str, object]] = []
@@ -66,8 +96,6 @@ def _aliased_material(snapshot: WriterSnapshot) -> str:
             groups.append(
                 {
                     "research_question": task.get("question"),
-                    "research_stage": task.get("research_stage"),
-                    "research_mode": task.get("research_mode"),
                     "expected_evidence": task.get("expected_evidence"),
                     "stop_reason": task.get("stop_reason"),
                     "findings": findings,
@@ -93,7 +121,7 @@ def _aliased_material(snapshot: WriterSnapshot) -> str:
 
     payload = replace(
         {
-            "brief": snapshot.brief,
+            "brief": snapshot.brief.model_dump(mode="json"),
             "research_groups": groups,
             "excerpt_library": library,
             "conflicts": [conflict.model_dump(mode="json") for conflict in snapshot.conflicts],
@@ -107,97 +135,57 @@ def report_writer_messages(snapshot: WriterSnapshot) -> list[dict[str, str]]:
     material = _aliased_material(snapshot)
     system = dedent(
         """
-    你是深度研究报告的撰写者。你负责把输入的研究材料写成一篇论证充分、结构清晰、读起来顺畅的研究报告。
+    你是**深度研究**报告的撰写者。请根据输入的冻结研究材料写成完整详细的报告。
+    报告的内容取舍、结构、详略和表达由你决定。
 
-    ## 唯一的硬性红线
-    报告中的任何一句话都不得引入研究材料之外的内容：
-    材料里没有的数字、比例、金额、时间点，材料里没有出现过的机构、人物、地区、研究、事件或专有名词，
-    以及材料无法支撑的因果结论和归因断言，一律不得出现。
-    也不要用“研究表明”“专家指出”这类说法引述材料中并不存在的来源。
+    报告必须直接回答 `brief.question`，并遵守 `brief.user_constraints` 中所有非空要求。
+    `brief.brief_text` 是可自由取舍的研究方向，不是必须逐项覆盖的清单。
 
-    这条红线之内你是自由的：解释机制、复述细节、把分散在多处的材料串联起来、指出趋势与张力、
-    说明边界与局限——都可以充分展开，篇幅和信息密度不设上限，也不设下限。
+    正文中的事实、数字、引述和来源归属必须与研究材料一致，不得编造材料中没有的内容。
 
     ## 研究材料的形状
     * `research_groups`：研究是分成若干条线索做的，每组是一条线索——`research_question`
-      是这条线索要回答的问题，`findings` 是它查到的结论。这是材料的结构，不是报告的结构：
-      不要一组写一节，也不要照抄这些问题当章节标题。
+      是这条线索要回答的问题，`findings` 是它查到的结果。
+    * `source_caveat`：某条 finding 带这个字段，表示审稿已经查出它的来源有问题
+      （单一来源、聚合站转述、无独立佐证等）。用到这条 finding 时，必须在相关句子中写明转述关系。
     * `excerpt_library`：每条 `findings` 指向的原文片段，按 `excerpt_id` 去重后集中列出。
-      `findings` 里的一句话是压缩过的结论，**原文才是你真正的写作材料**：数字的口径、
-      事实的前因后果、来源自己的措辞与限定，都只在原文里。写到某条结论时先读它的原文。
-
-    ## 写作要求
-    1. 论证优先于篇幅。该展开的地方展开到位；材料撑不住的地方，宁可写短，不要用措辞把它填满。
-       报告的长度应当是研究深度的结果，不是目标。
-    2. **每段先立论点，再用材料支撑它**。段落的第一句应当说出这一段要说明什么，
-       后续句子用事实、数字、对比和边界把它撑起来，段末不必再复述一遍。
-       严禁把一段写成"事实、事实、事实……以上事实同时发生"这种清单加收尾的形状。
-    3. **一条 finding 不等于一句正文**。材料条数和正文句数没有对应关系：
-       同一条原文的不同细节可以拆到不同地方用；多条讲同一件事的结论应当合并成一句；
-       与报告主线无关的条目**不必写进正文**。不要为了用完材料而罗列。
-    4. 罗列同类案例时，先说清楚你要用这批案例说明什么，再举其中最有说服力的几个，
-       并写明这是一批什么样的案例（覆盖哪些行业、来自什么口径的来源）。
-       把十几个案例平铺成十几句，读者得不到任何判断。
-    5. 来源强弱要写进正文。同一个数字来自机构原始报告还是转载聚合站，
-       在句子里就要说清楚（"据某站转述的某机构调查"），不要留到最后统一免责。
-    6. 标题必须是有实质内容的专业短语，严禁出现"事实层""分析层""现象与归因"一类框架术语。
-    7. 正文 `text` 中绝对禁止出现"基于 s_03""如材料所述"等后台逻辑标记。
-    8. 段落切分服从语义：写完一个完整的意思就输出一条 {"record":"paragraph"} 另起一段，
-       不按条数机械换段。
-
-    ## 内部组织思路（仅用于你规划结构，禁止写进标题）
-    现象与界定 → 归因与机理 → 效应与影响 → 判断与展望。
-    章节数量、顺序和详略由问题本身和材料的厚度决定，不必强行套用这四段。
+      `findings` 是压缩结果，原文片段是事实、数字口径和来源限定的依据。
 
     ## 输出格式
-    每行输出 1 个 JSON 对象。
-    顺序：title → introduction → (statement/paragraph)... → (section → (statement/paragraph)...)...
-          → conclusion → (statement/paragraph)... → end
+    每行只输出 1 个完整、合法的 JSON 对象，不要输出 Markdown 代码块或 JSON 之外的文字。
+    `paragraph` 表示开始一个新段落，必须放在该段第一条 statement 之前。
+    报告完成后才输出 `end`。
 
-    {"record":"title","text":"..."}
-    {"record":"introduction"}                    # 之后直接输出引言的 statement 与 paragraph
-    {"record":"section","title":"..."}
+    ## kind 是核验路径
+    kind 只说明这句话应该如何核验，不规定句子应该怎么写。
+    先写出自然、完整的正文，再根据这句话的实际内容和依据选择 kind；
+    不要为了区分事实与判断，把原本完整的句子拆开。
+
+    * evidence：整句都在直接转述材料事实；必须输出 `candidate_excerpt_ids`，
+      不能输出 `premise_statement_ids`。
+    * derived：句子包含分析、概括、比较、解释或判断；可输出 `candidate_excerpt_ids`、此前已输出的
+      `premise_statement_ids`，或同时输出两者，但至少要有一种依据。结论依赖的每一条关键前文
+      事实都必须列入 premise；物理上位于同一段不能代替显式绑定。
+    * elaboration：不承载需要外部材料核对的内容。
+    * limitation：只说明现有材料的边界或未覆盖之处。
+
+    引言、正文和结论中的句子都按同一格式输出。`statement_id` 必须全文唯一。
+    引用只能使用研究材料中的 excerpt_id 短编号和此前已输出的 statement_id。
+    没有使用的引用字段直接省略，不要输出空数组。
+
+    ## 完整格式示例
+    {"record":"title","text":"……"}
+    {"record":"introduction"}
     {"record":"paragraph"}
+    {"record":"statement","statement_id":"s_01","text":"……","kind":"derived","candidate_excerpt_ids":["e_01"]}
+    {"record":"section","title":"……"}
+    {"record":"paragraph"}
+    {"record":"statement","statement_id":"s_02","text":"……","kind":"evidence","candidate_excerpt_ids":["e_02"]}
+    {"record":"statement","statement_id":"s_03","text":"……","kind":"derived","candidate_excerpt_ids":["e_03"],"premise_statement_ids":["s_02"]}
     {"record":"conclusion"}
-    {"record":"end"}                             # 报告未完成禁止输出 end
-    {
-      "record": "statement",
-      "statement_id": "s_...",
-      "text": "...",
-      "kind": "evidence" | "derived" | "elaboration" | "limitation",
-      "candidate_excerpt_ids": [],
-      "premise_statement_ids": []
-    }
-
-    ## kind 的选择
-    * evidence：直接依据材料原文陈述事实。candidate_excerpt_ids 须逐字复制材料中的 excerpt_id
-      （如 "e_01"），premise_statement_ids 必须为空。
-    * derived：在已写出的句子之上做推理。premise_statement_ids 非空，且只能引用此前已输出的
-      statement_id；candidate_excerpt_ids 必须为空。推理是否越界、是否最终落到证据，由
-      后续 Report Verifier 逐句核对，不在写作阶段拒绝。
-      **归纳是本职工作，不要因为怕被打回就不写判断**；要写的是**带范围的判断**：
-      写明这个概括依据的是什么（"这些案例显示""在本报告收集到的材料范围内"
-      "至少五套评测均显示"），避免"普遍""必然""所有""标志着"这类超出材料的表述。
-      材料只能支持到同时发生或先后关系时，就写成同时发生或先后关系，不要写成因果。
-      章节论点可以架在分论点之上，全文论点可以架在章节论点之上，不必把每句都直接挂到事实。
-    * elaboration：只承担章节转折、下文预告和前文收束，两个引用字段都为空。
-      含有具体数字、年份、机构、人物、地点或事件的句子必须写成 evidence 并绑定 Excerpt；
-      在已有事实之上形成的解释或判断必须写成 derived 并绑定 premise。
-      不得因为一句话是在复述材料，就把本应是 evidence 的事实写成无引用的 elaboration。
-    * limitation：只说明现有材料的边界或未覆盖之处，两个引用字段都为空；
-      不得借 limitation 声称未经材料验证的外部事实。
-
-    引言和结论同样逐句输出 statement，遵循与正文完全相同的 kind 规则，没有例外。
-    引言同样先写 evidence，再在这些已输出的事实之上写 derived；不能把需要来源的核心判断
-    伪装成 elaboration。全文任何位置都没有无引用的事实通道。
-
-    ## 格式示例（只示范记录形式与引用关系，与你的实际主题无关）
-    {"record":"section","title":"……有实质内容的章节标题……"}
-    {"record":"statement","statement_id":"s_11","text":"……直接依据某条材料原文作出的事实陈述……","kind":"evidence","candidate_excerpt_ids":["e_01"],"premise_statement_ids":[]}
-    {"record":"statement","statement_id":"s_12","text":"……下一节将讨论这一事实可能带来的影响……","kind":"elaboration","candidate_excerpt_ids":[],"premise_statement_ids":[]}
     {"record":"paragraph"}
-    {"record":"statement","statement_id":"s_13","text":"……在 s_11 的事实之上得出的判断……","kind":"derived","candidate_excerpt_ids":[],"premise_statement_ids":["s_11"]}
-    {"record":"statement","statement_id":"s_14","text":"……材料未覆盖的边界或反例风险……","kind":"limitation","candidate_excerpt_ids":[],"premise_statement_ids":[]}
+    {"record":"statement","statement_id":"s_04","text":"……","kind":"derived","premise_statement_ids":["s_01","s_03"]}
+    {"record":"end"}
     """
     ).strip()
     user = f"""请根据下面冻结的研究材料，按系统提示中的逐行 JSON 记录流格式撰写深度研究报告。
@@ -242,6 +230,9 @@ def report_writer_revision_messages(
     draft: ReportDraft,
     findings: ReportVerifierFindings,
 ) -> list[dict[str, str]]:
+    if findings.report_rewrite_required:
+        return report_writer_full_revision_messages(snapshot, draft, findings)
+
     material = _aliased_material(snapshot)
     aliases = {str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()}
 
@@ -256,34 +247,49 @@ def report_writer_revision_messages(
 
     aliased_draft = replace(draft.model_dump(mode="json"))
     failure_ids = [item.statement_id for item in findings.failures]
+    paragraph_ids = sorted(findings.paragraph_repair_ids)
+    revision_findings = replace(
+        {
+            "round": findings.round,
+            "revision": findings.revision,
+            "failures": [item.model_dump(mode="json") for item in findings.failures],
+            "requirement_failures": [
+                item.model_dump(mode="json") for item in findings.requirement_failures
+            ],
+        }
+    )
     system = dedent(
         """
-        你是研究报告的修订写作者。审稿人指出了若干未通过句子。你只能输出补丁，不得重写全文。
+        你是研究报告的修订写作者。审稿人指出了单句或局部段落问题。
+        你只能输出获准范围的补丁，不得重写全文。
 
         ## 硬约束
-        1. 只输出 findings 中列出的 statement_id 的替换；未点名句子一个字都不能改。
-        2. 不得新增 statement_id，不得改 title / section 标题 / 段落结构。
-        3. 换证只能使用材料中已有的 excerpt_id 短编号（如 e_01）；禁止暗示去搜新来源。
-        4. 每行一个 JSON；全部补丁结束后输出 {"record":"end"}。
+        1. patch_statement 只能替换 findings 中列出的 statement_id；不得新增 statement_id。
+        2. patch_paragraph 只能替换 findings 中 repair_scope=paragraph 点名的完整段落；
+           可以重写该段全部句子，但 paragraph_id 不变。
+        3. 同一段不能同时使用 patch_statement 和 patch_paragraph。
+        4. 不得改 title、section 标题或未点名段落。
+        5. 段落外仍被后文 premise 引用的旧 statement_id 必须保留；否则完整补丁集会被拒绝。
+        6. 换证只能使用材料中已有的 excerpt_id 短编号（如 e_01）；禁止暗示去搜新来源。
+        7. 每行一个 JSON；全部补丁结束后输出 {"record":"end"}。
 
         ## 补丁记录
-        {
-          "record": "patch_statement",
-          "statement_id": "s_...",
-          "text": "...",
-          "kind": "evidence" | "derived" | "elaboration" | "limitation",
-          "candidate_excerpt_ids": [],
-          "premise_statement_ids": []
-        }
+        单句替换输出：
+        {"record":"patch_statement","statement_id":"s_...","text":"...","kind":"derived","candidate_excerpt_ids":["e_01"],"premise_statement_ids":["s_01"]}
+        完整段落替换输出：
+        {"record":"patch_paragraph","paragraph_id":"p_...","statements":[{"statement_id":"s_...","text":"...","kind":"derived","premise_statement_ids":["s_01"]}]}
         kind 约束与初稿相同：evidence 必须带候选 excerpt 且不带 premise；
-        derived 必须带此前 statement 的 premise 且不带 excerpt；
-        elaboration / limitation 两个引用字段皆空。推理是否越界由后续 Report Verifier 核对。
+        derived 可带 excerpt、此前 statement 的 premise 或两者，但至少要有一种；
+        elaboration / limitation 不带引用字段。没有使用的字段直接省略。
+        derived 必须列出结论依赖的所有关键前文句子，同段相邻不能代替 premise。
+        推理是否越界由后续报告核验者核对。
+        kind 只决定核验路径，不决定句子的写法；修订时也不要为了分开事实与判断而拆句。
 
         ## premise 的顺序（修订时最容易踩的坑）
         premise 只能引用在草稿中排在该句之前的句子。你看到的是完整草稿，
         但读者是顺序读下来的：把根据挂在后面才出现的句子上，读者读到该句时它还不存在。
         给某句找依据时只在它前面的句子里找；前面没有合适依据，
-        就改用 evidence 直接挂 excerpt，或降级为 limitation 如实说明。
+        derived 可以直接挂 excerpt，或改为 evidence / limitation。
 
         ## 怎么改
         elaboration / limitation 被判不合格，说明它承载了需要核对的事实或判断。
@@ -305,10 +311,57 @@ def report_writer_revision_messages(
         """
     ).strip()
     user = (
-        "请根据审稿意见，只输出需要替换的句子补丁。\n\n"
+        "请根据审稿意见，只输出获准的句子或段落补丁。\n\n"
         f"需要修订的 statement_id：{json.dumps(failure_ids, ensure_ascii=False)}\n\n"
-        f"审稿 findings：\n{json.dumps(findings.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+        f"需要重写的 paragraph_id：{json.dumps(paragraph_ids, ensure_ascii=False)}\n\n"
+        f"审稿 findings：\n{json.dumps(revision_findings, ensure_ascii=False)}\n\n"
         f"当前草稿：\n{json.dumps(aliased_draft, ensure_ascii=False)}\n\n"
         f"可用研究材料：\n{material}"
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def report_writer_full_revision_messages(
+    snapshot: WriterSnapshot,
+    draft: ReportDraft,
+    findings: ReportVerifierFindings,
+) -> list[dict[str, str]]:
+    """Request a complete rewrite when the report as a whole missed its contract."""
+
+    aliases = {str(excerpt_id): alias for excerpt_id, alias in excerpt_alias_map(snapshot).items()}
+
+    def replace(value: object) -> object:
+        if isinstance(value, str):
+            return aliases.get(value, value)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    system = report_writer_messages(snapshot)[0]["content"] + dedent(
+        """
+
+        ## 本轮是整份报告修订
+        当前草稿没有履行核心问题或用户明确要求，因此必须重新输出完整报告，
+        从 title 开始，到 end 结束。可以调整标题、章节、段落和句子；不要输出 patch_statement。
+        同时修正 findings 中的逐句核验失败。保留仍有材料支持且不妨碍修订的内容。
+        """
+    )
+    revision_findings = replace(
+        {
+            "round": findings.round,
+            "revision": findings.revision,
+            "requirement_failures": [
+                item.model_dump(mode="json") for item in findings.requirement_failures
+            ],
+            "statement_failures": [item.model_dump(mode="json") for item in findings.failures],
+        }
+    )
+    user = (
+        "请依据审稿结果重写完整报告。\n\n"
+        f"审稿 findings：\n{json.dumps(revision_findings, ensure_ascii=False)}\n\n"
+        f"当前草稿：\n{json.dumps(replace(draft.model_dump(mode='json')), ensure_ascii=False)}\n\n"
+        f"冻结研究材料：\n{_aliased_material(snapshot)}"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]

@@ -39,7 +39,7 @@ from prospector.flow.research_graph import (
 )
 from prospector.flow.state import ResearchState, initial_research_state
 from prospector.runtime.timeline import ResearchTimelineRenderer, drain_timeline
-from prospector.schemas.brief import ResearchBrief
+from prospector.schemas.brief import ResearchBrief, UserConstraints
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.evidence import Assertion, Document, SourceRef
 from prospector.schemas.report import ReportDraft, WriterSnapshot
@@ -75,16 +75,24 @@ def _environment() -> Iterator[None]:
 
 
 def _task(label: str) -> dict[str, Any]:
-    # scout, because the runtime now refuses a first batch that skips screening; these
-    # fixtures are the Planner's opening move.
     return {
         "question": f"调查 {label} 的公开事实、时间口径和可能推翻当前解释的相反信号。",
-        "subjects": [label],
-        "research_stage": "scout",
-        "research_mode": "counterargument",
-        "source_policy": {"preferred_tiers": ["official", "industry"]},
         "expected_evidence": "至少保存一条带原文 highlight、时间和限定条件的直接证据",
     }
+
+
+def _dispatch(*tasks: dict[str, Any], reason: str) -> PlannerDecision:
+    return PlannerDecision.model_validate(
+        {
+            "decision": "dispatch",
+            "tasks": list(tasks),
+            "reason": reason,
+        }
+    )
+
+
+def _finish(reason: str) -> PlannerDecision:
+    return PlannerDecision.model_validate({"decision": "finish", "reason": reason})
 
 
 class ScriptedPlanner:
@@ -101,14 +109,14 @@ class ScriptedPlanner:
 
 
 class PassingVerifier:
+    def __init__(self) -> None:
+        self.snapshot: dict[str, Any] | None = None
+
     def verify(self, snapshot: dict[str, Any]) -> VerifierModelResult:
+        self.snapshot = snapshot
         decision = VerifierDecision(
             release_decision="pass",
             decision_reason="测试证据足以履行 Plan。",
-            brief_alignment="aligned",
-            coverage_rationale="测试证据履行了 Plan。",
-            brief_alignment_rationale="测试研究未偏离 Brief。",
-            credibility_rationale="测试来源足以支撑当前研究出口。",
         )
         return VerifierModelResult(
             full_prompt=research_verifier_messages(snapshot),
@@ -131,19 +139,13 @@ class CredibilityGapVerifier:
             decision = VerifierDecision(
                 release_decision="needs_research",
                 decision_reason="核心断言依赖不可信来源。",
-                brief_alignment="aligned",
-                coverage_rationale="假断言不能履行 Plan。",
-                brief_alignment_rationale="研究仍围绕 Brief。",
-                credibility_rationale="来源不可信。",
                 gaps=[
                     VerifierGap(
                         kind="source_credibility",
                         severity="major",
                         related_assertion_ids=[assertion_id],
                         description="核心断言来源不可信",
-                        attempted_paths=["查阅现有落证"],
-                        why_insufficient="缺乏独立真实来源",
-                        recommended_research="在权威来源中补查替代证据",
+                        evidence_needed="权威来源中的替代证据",
                     )
                 ],
                 assertion_dispositions=[
@@ -158,10 +160,6 @@ class CredibilityGapVerifier:
             decision = VerifierDecision(
                 release_decision="pass",
                 decision_reason="补查后真实证据已足够。",
-                brief_alignment="aligned",
-                coverage_rationale="剩余可用证据履行 Plan。",
-                brief_alignment_rationale="研究仍围绕 Brief。",
-                credibility_rationale="可信来源已到位。",
                 assertion_dispositions=[
                     AssertionDisposition(
                         assertion_id=assertion_id,
@@ -180,6 +178,7 @@ class CredibilityGapVerifier:
 class PassingReportVerifier:
     def __init__(self) -> None:
         self.calls = 0
+        self.snapshots: list[Any] = []
 
     def verify(self, snapshot: Any) -> Any:
         from prospector.agents.report_verifier import (
@@ -194,42 +193,57 @@ class PassingReportVerifier:
         )
 
         self.calls += 1
-        decisions: list[Any] = []
-        for item in snapshot.statements:
-            if item.kind == "evidence":
-                decisions.append(
-                    EvidenceStatementDecision(
-                        statement_id=item.statement_id,
-                        claim_type="fact",
-                        pairs=[
-                            EvidencePairDecision(
-                                excerpt_id=excerpt["excerpt_id"],
-                                relation="support",
-                            )
-                            for excerpt in item.candidate_excerpts
-                        ],
-                        status="pass",
-                        reason="测试放行：候选片段支持该事实句",
+        self.snapshots.append(snapshot)
+        assert snapshot.report_context["brief_question"]
+        assert snapshot.report_context["scopes"][-1]["kind"] == "conclusion"
+        assert snapshot.report_context["research_context"]["findings"]
+        assert all("paragraph_statements" not in item.model_dump() for item in snapshot.statements)
+        if snapshot.skip_statement_verification:
+            decisions = list(snapshot.reused_statement_decisions)
+        else:
+            decisions = []
+            for item in snapshot.statements:
+                if item.kind == "evidence":
+                    decisions.append(
+                        EvidenceStatementDecision(
+                            statement_id=item.statement_id,
+                            claim_type="fact",
+                            pairs=[
+                                EvidencePairDecision(
+                                    excerpt_id=excerpt["excerpt_id"],
+                                    relation="support",
+                                )
+                                for excerpt in item.candidate_excerpts
+                            ],
+                            status="pass",
+                            reason="测试放行：候选片段支持该事实句",
+                        )
                     )
-                )
-            elif item.kind == "derived":
-                decisions.append(
-                    DerivedStatementDecision(
-                        statement_id=item.statement_id,
-                        inference_note="测试推理",
-                        status="pass",
-                        reason="测试放行：推理合理",
+                elif item.kind == "derived":
+                    decisions.append(
+                        DerivedStatementDecision(
+                            statement_id=item.statement_id,
+                            inference_note="测试推理",
+                            pairs=[
+                                EvidencePairDecision(
+                                    excerpt_id=excerpt["excerpt_id"],
+                                    relation="support",
+                                )
+                                for excerpt in item.candidate_excerpts
+                            ],
+                            status="pass",
+                            reason="测试放行：推理合理",
+                        )
                     )
-                )
-            else:
-                decisions.append(
-                    BridgeStatementDecision(
-                        statement_id=item.statement_id,
-                        kind=item.kind,
-                        contains_factual_claim=False,
-                        reason="测试放行：仅承担衔接作用",
+                else:
+                    decisions.append(
+                        BridgeStatementDecision(
+                            statement_id=item.statement_id,
+                            kind=item.kind,
+                            contains_factual_claim=False,
+                            reason="测试放行：仅承担衔接作用",
+                        )
                     )
-                )
         findings = materialize_findings(
             revision=snapshot.revision,
             round_number=snapshot.round,
@@ -237,6 +251,32 @@ class PassingReportVerifier:
             allowed_excerpt_ids=list(snapshot.allowed_excerpt_ids),
         )
         return ReportVerifierModelResult(findings=findings, decisions=decisions, raw_outputs={})
+
+
+class RequirementThenPassingReportVerifier(PassingReportVerifier):
+    def verify(self, snapshot: Any) -> Any:
+        from prospector.agents.report_verifier import ReportVerifierModelResult
+        from prospector.schemas.claims import ReportRequirementFailure
+
+        result = super().verify(snapshot)
+        if self.calls != 1:
+            return result
+        findings = result.findings.model_copy(
+            update={
+                "requirement_failures": [
+                    ReportRequirementFailure(
+                        kind="core_answer",
+                        statement_ids=["s_conclusion_1"],
+                        reason="测试：结论尚未直接回答核心问题。",
+                    )
+                ]
+            }
+        )
+        return ReportVerifierModelResult(
+            findings=findings,
+            decisions=result.decisions,
+            raw_outputs=result.raw_outputs,
+        )
 
 
 class BrokenReportVerifier:
@@ -255,12 +295,33 @@ class BrokenReportVerifier:
         )
 
 
+class FailingOnceReportVerifier(PassingReportVerifier):
+    def verify(self, snapshot: Any) -> Any:
+        if self.calls == 0:
+            self.calls += 1
+            statement_id = snapshot.statements[0].statement_id
+            raise ReportVerifierOutputError(
+                f"invalid Report Verifier decision for {statement_id}",
+                {
+                    "attempts": [
+                        {
+                            "content": '{"statement_id":"s_intro","reason":"',
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+        return super().verify(snapshot)
+
+
 class PassingWriter:
     def __init__(self) -> None:
         self.calls = 0
+        self.snapshot: WriterSnapshot | None = None
 
     def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:
         self.calls += 1
+        self.snapshot = snapshot
         excerpt_id = snapshot.evidence_cards[0].excerpts[0].excerpt_id
         fact = "研究材料显示了一个可核对的年度事实。" * 120
         analysis = "综合现有材料，这一事实需要结合相反信号与适用边界理解。" * 100
@@ -300,7 +361,7 @@ class PassingWriter:
                                         "statement_id": "s_analysis",
                                         "text": analysis,
                                         "kind": "derived",
-                                        "candidate_excerpt_ids": [],
+                                        "candidate_excerpt_ids": [str(excerpt_id)],
                                         "premise_statement_ids": ["s_fact"],
                                     },
                                 ],
@@ -453,21 +514,21 @@ class LedgerWorkerModel:
 
     async def next_action(self, messages: list[dict[str, Any]]) -> WorkerModelAction:
         task = self._task(messages)
-        task_id = task["task_id"]
+        task_key = task["question"]
         runtime_messages = [
             message
             for message in messages
             if str(message.get("content", "")).startswith("上一轮运行结果：")
         ]
         if not runtime_messages:
-            self.research_runs[task_id] = self.research_runs.get(task_id, 0) + 1
+            self.research_runs[task_key] = self.research_runs.get(task_key, 0) + 1
             return WorkerModelAction(
                 assistant_message={"role": "assistant", "content": None},
                 tool_calls=[
                     WorkerToolCall(
                         tool_name="web_search",
-                        tool_call_id=f"search-{task_id}",
-                        arguments={"query": task_id, "num_results": 5},
+                        tool_call_id=f"search-{task_key}",
+                        arguments={"query": task_key, "num_results": 5},
                     )
                 ],
             )
@@ -485,13 +546,12 @@ class LedgerWorkerModel:
                 tool_calls=[
                     WorkerToolCall(
                         tool_name="save_findings",
-                        tool_call_id=f"save-{task_id}",
+                        tool_call_id=f"save-{task_key}",
                         arguments={
                             "findings": [
                                 {
                                     "source_refs": [source_ref],
-                                    "statement": f"任务 {task_id} 找到带年度口径的公开事实。",
-                                    "topic_tags": ["公开事实"],
+                                    "statement": f"任务 {task_key} 找到带年度口径的公开事实。",
                                 }
                             ],
                         },
@@ -569,13 +629,8 @@ def test_two_workers_snapshotting_one_url_keep_the_document() -> None:
     document that had in fact been retrieved as a web_fetch failure, and its evidence was lost.
     """
     job_id, _, repository = _create_research_job("quick")
-    draft = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {"tasks": [_task("并发抓取同一来源")], "reason": "验证幂等落库"},
-        }
-    ).dispatch
-    assert draft is not None
+    draft = _dispatch(_task("并发抓取同一来源"), reason="验证幂等落库")
+    assert draft.tasks is not None
     plan = repository.create_plan(
         job_id,
         1,
@@ -632,6 +687,7 @@ def _create_research_job(effort: str = "standard") -> tuple[UUID, UUID, Research
         ResearchBrief(
             question="并行研究测试",
             brief_text="比较两条独立证据路径，主动寻找相反信号，不预设结论。",
+            user_constraints=UserConstraints(regions=["中国"]),
             effort=effort,  # type: ignore[arg-type]
         ),
     )
@@ -683,13 +739,8 @@ async def test_all_web_media_use_the_same_persisted_exa_highlights_contract(
     expected_excerpt: str,
 ) -> None:
     job_id, _, repository = _create_research_job("quick")
-    draft = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {"tasks": [_task(f"{label} highlights")], "reason": "验证统一落证路径"},
-        }
-    ).dispatch
-    assert draft is not None
+    draft = _dispatch(_task(f"{label} highlights"), reason="验证统一落证路径")
+    assert draft.tasks is not None
     plan = repository.create_plan(
         job_id,
         1,
@@ -817,28 +868,16 @@ async def test_all_web_media_use_the_same_persisted_exa_highlights_contract(
 
 
 def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() -> None:
-    over_limit = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {
-                # scout allows 6 concurrent tasks at standard, so overshoot needs 7.
-                "tasks": [_task(str(index)) for index in range(7)],
-                "reason": "先一次派七条路径",
-            },
-        }
+    over_limit = _dispatch(
+        *[_task(str(index)) for index in range(7)],
+        reason="先一次派七条路径",
     )
-    valid_dispatch = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {
-                "tasks": [_task("直接证据"), _task("相反信号")],
-                "reason": "缩小为两条相互独立的路径",
-            },
-        }
+    valid_dispatch = _dispatch(
+        _task("直接证据"),
+        _task("相反信号"),
+        reason="缩小为两条相互独立的路径",
     )
-    finish = PlannerDecision.model_validate(
-        {"decision": "finish", "finish": {"reason": "已有两条落库证据，交质量门"}}
-    )
+    finish = _finish("已有两条落库证据，交质量门")
     planner = ScriptedPlanner(
         [
             PlannerOutputError("未调用强制决策工具", {"content": "我认为应该开始研究"}),
@@ -864,6 +903,8 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert exa.max_active >= 2
         writer = cast(PassingWriter, services.writer)
         assert writer.calls == 1
+        assert writer.snapshot is not None
+        assert writer.snapshot.brief.user_constraints.regions == ["中国"]
         replay = _writer_node(services)(cast(Any, result))
         assert replay["outcome"] == "draft_rendered"
         assert writer.calls == 1
@@ -893,6 +934,10 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
             event for event in events if event["event_type"] == "verifier.completed"
         )
         assert verifier_event["payload"]["decision_reason"] == "测试证据足以履行 Plan。"
+        verifier_snapshot = cast(PassingVerifier, services.verifier).snapshot
+        assert verifier_snapshot is not None
+        assert verifier_snapshot["brief"]["user_constraints"]["regions"] == ["中国"]
+        assert verifier_snapshot["planner_exit"]["finish_reason"] == ("已有两条落库证据，交质量门")
 
         timeline_lines: list[str] = []
         standard_limits = limits_for_effort("standard")
@@ -914,16 +959,22 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
         assert any(line.startswith("[T1] 搜索 ") for line in timeline_lines)
         assert any(line.startswith("[T2] 搜索 ") for line in timeline_lines)
         assert sum("：已保存任务要求的直接证据。" in line for line in timeline_lines) == 2
-        scout_budget = standard_limits.stages["scout"]
         assert any(
-            f"Worker 决策轮预算 {scout_budget.max_worker_rounds} 轮" in line
+            f"Worker 决策轮预算 {standard_limits.max_worker_rounds} 轮" in line
             for line in timeline_lines
         )
         assert "[核验] Plan v1 通过（重大缺口 0，冲突裁决 0，废证 0）" in timeline_lines
         assert "[核验] 收工：测试证据足以履行 Plan。" in timeline_lines
         assert "[成文] Research Verifier 已放行，等待 Writer" in timeline_lines
         assert "[成文] Writer 正在组织深度研究报告" in timeline_lines
+        assert "[核验] Report Verifier 正在逐句验证" in timeline_lines
         assert any(line.startswith("[成文] 报告已渲染") for line in timeline_lines)
+        # Structure metrics are recorded and surfaced, never enforced: the statement-level
+        # revision loop cannot repair a paragraph that is a run of facts, so gating on
+        # them would only fail Jobs.
+        assert any(
+            line.startswith("[成文] 正文结构：事实句 1 / 推理句 3") for line in timeline_lines
+        )
         assert timeline_lines[-1] == "[成文] 报告渲染完成"
         assert any(
             line.startswith("[研究] 研究阶段结束，等待核验（Plan v1，触发：")
@@ -959,7 +1010,7 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
                 conn.execute(
                     text(
                         """
-                        SELECT r.status, rr.full_prompt, rr.body_char_count,
+                        SELECT r.id AS report_id, r.status, rr.full_prompt, rr.body_char_count,
                                r.markdown_ref, r.json_ref,
                                (SELECT COUNT(*) FROM app.report_statements rs
                                 WHERE rs.report_id=r.id) AS statement_count
@@ -972,14 +1023,65 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
                 .mappings()
                 .one()
             )
+            hybrid_relations = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT
+                          (SELECT COUNT(*) FROM app.claim_evidence ce
+                           JOIN app.claims c ON c.id=ce.claim_id
+                           WHERE c.report_id=r.id
+                             AND c.statement_id='s_analysis') AS evidence_count,
+                          (SELECT COUNT(*) FROM app.claim_premises cp
+                           JOIN app.claims c ON c.id=cp.claim_id
+                           WHERE c.report_id=r.id AND c.statement_id='s_analysis') AS premise_count
+                        FROM app.reports r WHERE r.job_id=:job_id
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            report_verifier_record = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT rv.findings, rv.statement_checks
+                        FROM app.report_verifier_runs rv
+                        JOIN app.reports r ON r.id=rv.report_id
+                        WHERE r.job_id=:job_id AND rv.status='completed'
+                        ORDER BY rv.revision DESC, rv.round DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
         assert len(prompts) == 4
         assert len(assertions) == 2
         assert verifier_reason == "测试证据足以履行 Plan。"
         assert report_row["status"] == "draft_rendered"
         assert int(report_row["body_char_count"]) > 0
-        assert int(report_row["statement_count"]) == 4
+        # Introduction statements are part of the draft and must be persisted alongside
+        # section and conclusion statements.
+        assert int(report_row["statement_count"]) == 5
         assert str(report_row["markdown_ref"]).endswith("/report.md")
         assert str(report_row["json_ref"]).endswith("/report.json")
+        assert int(hybrid_relations["evidence_count"]) == 1
+        assert int(hybrid_relations["premise_count"]) == 1
+        assert report_verifier_record["findings"]["quality_reminders"] == []
+        assert report_verifier_record["statement_checks"][-1] == {
+            "kind": "report_quality",
+            "requirement_failures": [],
+            "reminders": [],
+        }
+        citation_map = repository.get_verified_citation_map(
+            UUID(str(report_row["report_id"])), revision=1
+        )
+        assert len(citation_map["s_analysis"]) == 1
         # The Writer reads the Excerpt it will cite; the Document body it came from
         # still never reaches any Prospector LLM context (D12).
         writer_prompt = json.dumps(report_row["full_prompt"], ensure_ascii=False)
@@ -995,18 +1097,46 @@ def test_schema_and_concurrency_rejection_then_parallel_evidence_and_finish() ->
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
 
 
-def test_report_verifier_contract_failure_closes_every_persisted_state() -> None:
-    dispatch = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {"tasks": [_task("逐句验证失败")], "reason": "先取得一条证据"},
-        }
+def test_report_requirement_failure_triggers_a_full_revision_before_verification() -> None:
+    planner = ScriptedPlanner(
+        [
+            _dispatch(_task("报告履约修订"), reason="先取得一条证据"),
+            _finish("已有证据，进入成文"),
+        ]
     )
-    finish = PlannerDecision.model_validate(
-        {"decision": "finish", "finish": {"reason": "已有证据，进入成文"}}
-    )
+    report_verifier = RequirementThenPassingReportVerifier()
+    services, _, _ = _services(planner, report_verifier=report_verifier)
+    job_id, brief_id, repository = _create_research_job("quick")
+    try:
+        with checkpointer_session() as checkpointer:
+            result = build_research_graph(checkpointer, services).invoke(
+                initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
+                thread_config(str(job_id)),
+            )
+
+        writer = cast(PassingWriter, services.writer)
+        assert result["outcome"] == "draft_rendered"
+        assert writer.calls == 2
+        assert report_verifier.calls == 2
+        assert report_verifier.snapshots[0].skip_statement_verification is False
+        assert report_verifier.snapshots[1].skip_statement_verification is True
+        assert report_verifier.snapshots[1].statements == []
+        assert report_verifier.snapshots[1].reused_statement_decisions
+        stored = repository.get_report_revision(job_id)
+        assert stored is not None
+        assert stored["revision"] == 2
+        assert stored["report_status"] == "draft_rendered"
+        assert "本轮是整份报告修订" in stored["full_prompt"][0]["content"]
+    finally:
+        with repository.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_report_verifier_contract_failure_can_resume_with_a_new_attempt() -> None:
+    dispatch = _dispatch(_task("逐句验证失败"), reason="先取得一条证据")
+    finish = _finish("已有证据，进入成文")
     planner = ScriptedPlanner([dispatch, finish])
-    services, _, _ = _services(planner, report_verifier=BrokenReportVerifier())
+    services, _, _ = _services(planner, report_verifier=FailingOnceReportVerifier())
     job_id, brief_id, repository = _create_research_job("quick")
     try:
         with checkpointer_session() as checkpointer:
@@ -1019,39 +1149,46 @@ def test_report_verifier_contract_failure_closes_every_persisted_state() -> None
                     initial_research_state(job_id=str(job_id), brief_id=str(brief_id)),
                     thread_config(str(job_id)),
                 )
+            result = graph.invoke(None, thread_config(str(job_id)))
 
+        assert result["outcome"] == "draft_rendered"
         with repository.engine.connect() as conn:
-            row = (
+            rows = (
                 conn.execute(
                     text(
                         """
-                        SELECT j.status AS job_status, r.status AS report_status,
+                        SELECT j.status AS job_status, j.outcome, j.error_code,
+                               r.status AS report_status, rv.attempt,
                                rv.status AS run_status, rv.error
                         FROM app.jobs j
                         JOIN app.reports r ON r.job_id=j.id
                         JOIN app.report_verifier_runs rv ON rv.report_id=r.id
                         WHERE j.id=:job_id
+                        ORDER BY rv.attempt
                         """
                     ),
                     {"job_id": job_id},
                 )
                 .mappings()
-                .one()
+                .all()
             )
-        assert row["job_status"] == "failed"
-        assert row["report_status"] == "verification_failed"
-        assert row["run_status"] == "failed"
-        assert "s_intro" in row["error"]["message"]
-        assert row["error"]["raw_output"]["attempts"][0]["finish_reason"] == "stop"
+        assert [(row["attempt"], row["run_status"]) for row in rows] == [
+            (1, "failed"),
+            (2, "completed"),
+        ]
+        assert rows[0]["job_status"] == "running"
+        assert rows[0]["outcome"] == "draft_rendered"
+        assert rows[0]["error_code"] is None
+        assert rows[0]["report_status"] == "draft_rendered"
+        assert "s_intro" in rows[0]["error"]["message"]
+        assert rows[0]["error"]["raw_output"]["attempts"][0]["finish_reason"] == "stop"
     finally:
         with repository.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
 
 
 def test_empty_finish_burns_every_round_then_fails_without_verifier() -> None:
-    empty_finish = PlannerDecision.model_validate(
-        {"decision": "finish", "finish": {"reason": "没有证据也尝试结束"}}
-    )
+    empty_finish = _finish("没有证据也尝试结束")
     round_limit = limits_for_effort("quick").decision_round_limit
     planner = ScriptedPlanner([empty_finish] * round_limit)
     services, _, _ = _services(planner)
@@ -1080,30 +1217,10 @@ def test_empty_finish_burns_every_round_then_fails_without_verifier() -> None:
 
 
 def test_unusable_disposition_filters_assertions_and_replans() -> None:
-    dispatch = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {
-                "tasks": [_task("废证")],
-                "reason": "先落一条证据再触发废证",
-            },
-        }
-    )
-    finish = PlannerDecision.model_validate(
-        {"decision": "finish", "finish": {"reason": "证据已落库，交给核验"}}
-    )
-    replan_dispatch = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {
-                "tasks": [_task("补查")],
-                "reason": "按废证缺口补查真实来源",
-            },
-        }
-    )
-    finish_again = PlannerDecision.model_validate(
-        {"decision": "finish", "finish": {"reason": "补查完成，再次交给核验"}}
-    )
+    dispatch = _dispatch(_task("废证"), reason="先落一条证据再触发废证")
+    finish = _finish("证据已落库，交给核验")
+    replan_dispatch = _dispatch(_task("补查"), reason="按废证缺口补查真实来源")
+    finish_again = _finish("补查完成，再次交给核验")
     verifier = CredibilityGapVerifier()
     planner = ScriptedPlanner([dispatch, finish, replan_dispatch, finish_again])
     services, _, _ = _services(planner, verifier=verifier)
@@ -1178,12 +1295,7 @@ def test_completed_task_is_not_reexecuted_when_worker_node_replays() -> None:
         1,
         [
             inject_task_budget(
-                PlannerDecision.model_validate(
-                    {
-                        "decision": "dispatch",
-                        "dispatch": {"tasks": [_task("恢复")], "reason": "恢复测试"},
-                    }
-                ).dispatch.tasks[0],  # type: ignore[union-attr]
+                _dispatch(_task("恢复"), reason="恢复测试").tasks[0],  # type: ignore[index]
                 "quick",
             )
         ],
@@ -1194,11 +1306,9 @@ def test_completed_task_is_not_reexecuted_when_worker_node_replays() -> None:
         first = asyncio.run(_run_one_worker(services, job_id, task_id, 1))
         second = asyncio.run(_run_one_worker(services, job_id, task_id, 1))
         assert first["status"] == "done", first
-        assert first["research_stage"] == "scout"
         assert first["question"]
         assert second["status"] == "done"
-        assert second["research_stage"] == "scout"
-        assert model.research_runs[str(task_id)] == 1
+        assert model.research_runs[_task("恢复")["question"]] == 1
         assert model.coverage_checks[str(task_id)] == 1
         feedback = repository.get_task_feedback(task_id)
         assert feedback["status"] == "done"
@@ -1217,12 +1327,7 @@ def test_completed_task_is_not_reexecuted_when_worker_node_replays() -> None:
 
 
 def test_planner_replay_reuses_logged_decision_and_versioned_plan() -> None:
-    dispatch = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {"tasks": [_task("幂等重放")], "reason": "测试提交后被杀"},
-        }
-    )
+    dispatch = _dispatch(_task("幂等重放"), reason="测试提交后被杀")
     planner = ScriptedPlanner([dispatch])
     services, _, _ = _services(planner)
     job_id, brief_id, repository = _create_research_job("quick")
@@ -1269,13 +1374,8 @@ def test_planner_replay_reuses_logged_decision_and_versioned_plan() -> None:
 
 def test_tool_call_count_is_distinct_when_partial_success_is_followed_by_error() -> None:
     job_id, _, repository = _create_research_job("quick")
-    draft = PlannerDecision.model_validate(
-        {
-            "decision": "dispatch",
-            "dispatch": {"tasks": [_task("部分成功")], "reason": "工具事件关联测试"},
-        }
-    ).dispatch
-    assert draft is not None
+    draft = _dispatch(_task("部分成功"), reason="工具事件关联测试")
+    assert draft.tasks is not None
     plan = repository.create_plan(
         job_id,
         1,

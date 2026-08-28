@@ -25,7 +25,7 @@ from prospector.agents.prompts.report_writer import (
 )
 from prospector.agents.streaming import stream_text
 from prospector.deterministic.statement_patches import (
-    apply_statement_patches,
+    apply_report_patches,
     preceding_statement_ids,
 )
 from prospector.schemas.claims import ReportVerifierFindings
@@ -80,7 +80,19 @@ class OpenAIReportWriter:
         )
 
     def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:
-        messages = report_writer_messages(snapshot)
+        return self._write_complete(
+            snapshot,
+            report_writer_messages(snapshot),
+            empty_error="Report Writer returned empty content",
+        )
+
+    def _write_complete(
+        self,
+        snapshot: WriterSnapshot,
+        messages: list[dict[str, str]],
+        *,
+        empty_error: str,
+    ) -> ReportWriterResult:
         assembler = ReportStreamAssembler(snapshot)
         turns: list[str] = []
         error_feedbacks = 0
@@ -88,7 +100,7 @@ class OpenAIReportWriter:
             content = self._stream_content(messages)
             turns.append(content)
             if not content.strip():
-                raise ReportWriterOutputError("Report Writer returned empty content", turns)
+                raise ReportWriterOutputError(empty_error, turns)
             messages.append({"role": "assistant", "content": content})
             outcome = assembler.consume(content)
             if assembler.done:
@@ -125,7 +137,23 @@ class OpenAIReportWriter:
         if findings.all_passed:
             raise ReportWriterOutputError("revision requested with empty findings", findings)
         messages = report_writer_revision_messages(snapshot, draft, findings)
-        allowed = {item.statement_id for item in findings.failures}
+        if findings.report_rewrite_required:
+            return self._write_complete(
+                snapshot,
+                messages,
+                empty_error="Report Writer full revision returned empty content",
+            )
+        allowed_paragraphs = findings.paragraph_repair_ids
+        paragraph_by_statement = {
+            statement.statement_id: paragraph.paragraph_id
+            for paragraph in draft.paragraphs()
+            for statement in paragraph.statements
+        }
+        allowed = {
+            item.statement_id
+            for item in findings.failures
+            if paragraph_by_statement.get(item.statement_id) not in allowed_paragraphs
+        }
         legal_premise_ids = preceding_statement_ids(draft)
 
         def new_assembler() -> ReportPatchAssembler:
@@ -133,6 +161,7 @@ class OpenAIReportWriter:
                 snapshot=snapshot,
                 allowed_statement_ids=allowed,
                 legal_premise_ids=legal_premise_ids,
+                allowed_paragraph_ids=allowed_paragraphs,
             )
 
         assembler = new_assembler()
@@ -149,8 +178,12 @@ class OpenAIReportWriter:
             restart = False
             if error is None and assembler.done:
                 try:
-                    patched = apply_statement_patches(
-                        draft, assembler.patches, allowed_statement_ids=allowed
+                    patched = apply_report_patches(
+                        draft,
+                        statement_patches=assembler.patches,
+                        paragraph_patches=assembler.paragraph_patches,
+                        allowed_statement_ids=allowed,
+                        allowed_paragraph_ids=allowed_paragraphs,
                     )
                     validate_writer_draft(snapshot, patched)
                 except (ValidationError, ReportStreamError, ValueError) as exc:

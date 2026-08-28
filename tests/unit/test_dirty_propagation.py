@@ -8,8 +8,14 @@ from prospector.deterministic.dirty_propagation import (
     can_revise_again,
     changed_statement_ids,
     dirty_statement_ids,
+    skip_stage_one_after_requirement_rewrite,
 )
-from prospector.schemas.claims import MAX_REPORT_REVISION_ROUNDS
+from prospector.schemas.claims import (
+    MAX_REPORT_REVISION_ROUNDS,
+    ReportRequirementFailure,
+    ReportVerifierFindings,
+    StatementFailure,
+)
 from prospector.schemas.report import ReportDraft
 
 EXCERPT = UUID("10000000-0000-0000-0000-000000000001")
@@ -125,3 +131,35 @@ def test_can_revise_again_respects_cap() -> None:
     assert can_revise_again(1) is True
     assert can_revise_again(MAX_REPORT_REVISION_ROUNDS) is True
     assert can_revise_again(MAX_REPORT_REVISION_ROUNDS + 1) is False
+
+
+def test_requirement_only_rewrite_skips_stage_one() -> None:
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        requirement_failures=[
+            ReportRequirementFailure(kind="core_answer", reason="结论没有直接回答问题。")
+        ],
+        passed_statement_ids=["s_intro"],
+    )
+    assert skip_stage_one_after_requirement_rewrite(findings) is True
+    assert skip_stage_one_after_requirement_rewrite(None) is False
+
+
+def test_sentence_failures_still_rerun_stage_one() -> None:
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        failures=[
+            StatementFailure(
+                statement_id="s_fact",
+                kind="evidence",
+                status="unsupported",
+                reason="候选片段不能支撑该句。",
+            )
+        ],
+        requirement_failures=[
+            ReportRequirementFailure(kind="core_answer", reason="结论没有直接回答问题。")
+        ],
+    )
+    assert skip_stage_one_after_requirement_rewrite(findings) is False

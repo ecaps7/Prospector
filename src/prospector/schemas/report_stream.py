@@ -50,6 +50,8 @@ class SectionRecord(BaseModel):
 
 
 class ParagraphRecord(BaseModel):
+    """Open a new paragraph; following statement records belong to it."""
+
     model_config = ConfigDict(extra="forbid")
 
     record: Literal["paragraph"]
@@ -222,7 +224,10 @@ class ReportStreamAssembler:
         )
 
     def _open_paragraph(self) -> None:
-        self._current_paragraphs().append([])
+        paragraphs = self._current_paragraphs()
+        if paragraphs and not paragraphs[-1]:
+            raise ReportStreamError("paragraph 之后尚未输出 statement，不能连续开始新段落")
+        paragraphs.append([])
 
     def _apply_statement(self, record: StatementRecord) -> None:
         if record.statement_id in self._statement_kinds:
@@ -249,7 +254,7 @@ class ReportStreamAssembler:
             raise ReportStreamError(str(exc)) from exc
         paragraphs = self._current_paragraphs()
         if not paragraphs:
-            paragraphs.append([])
+            raise ReportStreamError("statement 之前必须先输出 paragraph 开始新段落")
         paragraphs[-1].append(record.to_statement(self._alias_to_id))
         self._statement_kinds[record.statement_id] = record.kind
         self._statement_depths[record.statement_id] = depth

@@ -16,13 +16,30 @@ from prospector.agents import streaming
 from prospector.agents.prompts.report_writer import (
     continuation_message,
     report_writer_messages,
+    report_writer_revision_messages,
     retry_message,
 )
 from prospector.agents.report_writer import OpenAIReportWriter, ReportWriterOutputError
+from prospector.deterministic.citation_render import (
+    UNVERIFIED_MARKER,
+    render_verified_report,
+)
 from prospector.deterministic.excerpt_text import CLIP_MARKER, writer_excerpt_limit
+from prospector.deterministic.statement_patches import (
+    StatementPatchError,
+    apply_report_patches,
+)
 from prospector.reporting.render import render_report_draft
+from prospector.schemas.claims import (
+    ReportQualityReminder,
+    ReportRequirementFailure,
+    ReportVerifierFindings,
+    StatementFailure,
+)
 from prospector.schemas.report import (
     ReportDraft,
+    ReportParagraph,
+    ReportStatement,
     WriterSnapshot,
     validate_writer_draft,
 )
@@ -52,8 +69,6 @@ def _snapshot(effort: str = "quick") -> WriterSnapshot:
                         {
                             "id": str(TASK_ID),
                             "question": "这条线索要回答的研究问题。",
-                            "research_stage": "deep_dive",
-                            "research_mode": "factual",
                             "expected_evidence": "一条带口径的直接证据。",
                             "stop_reason": "expected_evidence_satisfied",
                         }
@@ -260,16 +275,15 @@ def test_writer_prompt_is_stream_contract_and_carries_excerpt_text() -> None:
     messages = report_writer_messages(_snapshot())
     prompt = "\n".join(message["content"] for message in messages)
 
-    assert "每行输出 1 个 JSON 对象" in prompt
+    assert "每行只输出 1 个完整、合法的 JSON 对象" in prompt
     assert '"record":"conclusion"' in prompt
-    assert "不得引入研究材料之外的内容" in prompt
-    assert "只能引用此前已输出的" in prompt
+    assert "不得编造材料中没有的内容" in prompt
+    assert "此前已输出的 statement_id" in prompt
     assert "推理链最多两层" not in prompt
-    assert "后续 Report Verifier 逐句核对" in prompt
-    assert "含有具体数字、年份、机构、人物、地点或事件" in prompt
-    assert "必须写成 evidence" in prompt
     assert "可以很长、很具体" not in prompt
-    assert "未完成禁止输出 end" in prompt
+    assert "报告完成后才输出 `end`" in prompt
+    assert "必须直接回答 `brief.question`" in prompt
+    assert "遵守 `brief.user_constraints`" in prompt
     assert "narrative_plan" not in prompt
     assert '"excerpt_id"' in prompt
     assert EXCERPT_BODY in messages[1]["content"]
@@ -278,15 +292,30 @@ def test_writer_prompt_is_stream_contract_and_carries_excerpt_text() -> None:
     assert str(EXCERPT_ID) not in messages[1]["content"]
 
 
+def test_writer_prompt_examples_are_single_line_json_without_empty_reference_fields() -> None:
+    system = report_writer_messages(_snapshot())[0]["content"]
+    example_lines = [line.strip() for line in system.splitlines() if line.strip().startswith("{")]
+
+    assert example_lines
+    assert all("#" not in line for line in example_lines)
+    assert all(isinstance(json.loads(line), dict) for line in example_lines)
+    assert '"candidate_excerpt_ids":[]' not in system
+    assert '"premise_statement_ids":[]' not in system
+    assert "`paragraph` 表示开始一个新段落" in system
+    assert "kind 只说明这句话应该如何核验" in system
+    assert "不要为了区分事实与判断" in system
+    assert "分析、概括、比较、解释或判断" in system
+
+
 def test_writer_material_groups_findings_by_research_question() -> None:
     """Structure to build on, instead of one flat pile ordered by the calendar."""
     material = _material(_snapshot())
 
     groups = material["research_groups"]
     assert [group["research_question"] for group in groups] == ["这条线索要回答的研究问题。"]
-    assert groups[0]["research_stage"] == "deep_dive"
     assert groups[0]["findings"] == [
         {
+            "assertion_id": "30000000-0000-0000-0000-000000000001",
             "statement": "公开材料记录了一个带时间口径的事实。",
             "excerpt_ids": ["e_01"],
         }
@@ -295,6 +324,22 @@ def test_writer_material_groups_findings_by_research_question() -> None:
     assert [item["excerpt_id"] for item in material["excerpt_library"]] == ["e_01"]
     assert material["excerpt_library"][0]["text"] == EXCERPT_BODY
     assert "text" not in groups[0]["findings"][0]
+
+
+def test_writer_receives_user_constraints_as_binding_brief_fields() -> None:
+    payload = _snapshot().model_dump(mode="json")
+    payload["brief"]["user_constraints"] = {
+        "time_range": "2024 至 2026 年",
+        "regions": ["中国"],
+        "comparison_targets": [],
+        "source_rules": ["只使用公开来源"],
+        "exclusions": ["不讨论投资建议"],
+        "deliverable_rules": ["结论先行"],
+    }
+
+    material = _material(WriterSnapshot.model_validate(payload))
+
+    assert material["brief"]["user_constraints"] == payload["brief"]["user_constraints"]
 
 
 def test_writer_material_renders_a_shared_excerpt_once() -> None:
@@ -326,7 +371,7 @@ def test_writer_material_clips_a_long_excerpt_without_rewriting_it() -> None:
     assert CLIP_MARKER in text
 
 
-def test_writer_prompt_mandates_no_length_targets_and_no_worked_domain() -> None:
+def test_writer_prompt_has_no_writing_method_or_worked_domain() -> None:
     """Length quotas made the model pad, and padding is where unsourced content enters.
 
     The old prompt also carried a fully worked example from one subject area, which
@@ -338,7 +383,15 @@ def test_writer_prompt_mandates_no_length_targets_and_no_worked_domain() -> None
         assert length_mandate not in prompt
     for leaked_domain in ("短视频", "青少年", "留守儿童", "海马体", "多巴胺"):
         assert leaked_domain not in prompt
-    assert "长度应当是研究深度的结果" in prompt
+    for writing_method in (
+        "每段先立论点",
+        "一条 finding 不等于一句正文",
+        "章节标题必须",
+        "归纳是本职工作",
+        "引言同样先写 evidence",
+        "长度应当是研究深度的结果",
+    ):
+        assert writing_method not in prompt
 
 
 def test_writer_prompt_aliases_conflict_excerpt_ids() -> None:
@@ -488,6 +541,36 @@ def test_writer_accepts_a_derived_statement_with_an_ungrounded_premise() -> None
         )
         == "在没有出处的句子上继续推理。"
     )
+
+
+def test_writer_accepts_derived_with_excerpt_or_hybrid_grounding() -> None:
+    excerpt_only = ReportStatement(
+        statement_id="s_excerpt_only",
+        text="直接综合原文得出判断。",
+        kind="derived",
+        candidate_excerpt_ids=[EXCERPT_ID],
+    )
+    hybrid = ReportStatement(
+        statement_id="s_hybrid",
+        text="结合原文和前提得出判断。",
+        kind="derived",
+        candidate_excerpt_ids=[EXCERPT_ID],
+        premise_statement_ids=["s_fact"],
+    )
+
+    assert excerpt_only.candidate_excerpt_ids == [EXCERPT_ID]
+    assert excerpt_only.premise_statement_ids == []
+    assert hybrid.candidate_excerpt_ids == [EXCERPT_ID]
+    assert hybrid.premise_statement_ids == ["s_fact"]
+
+
+def test_writer_rejects_derived_without_any_grounding() -> None:
+    with pytest.raises(ValidationError, match="candidate_excerpt_ids or premise_statement_ids"):
+        ReportStatement(
+            statement_id="s_ungrounded",
+            text="没有任何依据的判断。",
+            kind="derived",
+        )
 
 
 def test_writer_accepts_a_reasoning_chain_deeper_than_two_steps() -> None:
@@ -703,6 +786,24 @@ def test_assembler_rejects_bad_record_but_keeps_earlier_records() -> None:
     assert assembler.done
 
 
+def test_assembler_requires_paragraph_before_its_first_statement() -> None:
+    assembler = ReportStreamAssembler(_snapshot())
+    assembler.consume(_line(record="title", text="深度研究报告"))
+    assembler.consume(_line(record="introduction"))
+
+    outcome = assembler.consume(
+        _line(
+            record="statement",
+            statement_id="s_intro",
+            text="没有先开始段落。",
+            kind="elaboration",
+        )
+    )
+
+    assert outcome.error is not None
+    assert "必须先输出 paragraph" in outcome.error
+
+
 def test_assembler_rejects_unknown_excerpt_and_forward_premise() -> None:
     assembler = ReportStreamAssembler(_snapshot())
     assembler.consume("\n".join(_first_turn_lines()))
@@ -761,6 +862,182 @@ def test_writer_loop_continues_across_turns_and_disables_json_mode() -> None:
         "\n".join(_first_turn_lines()),
         "\n".join(_second_turn_lines()),
     ]
+
+
+def test_requirement_failure_rewrites_the_complete_report() -> None:
+    client = _FakeStreamClient(["\n".join([*_first_turn_lines(), *_second_turn_lines()])])
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        requirement_failures=[
+            ReportRequirementFailure(
+                kind="user_constraint",
+                statement_ids=[],
+                reason="报告没有遵守用户要求的结论先行结构。",
+            )
+        ],
+    )
+
+    result = writer.revise(_snapshot(), _draft(), findings)
+
+    prompt = result.full_prompt[1]["content"]
+    assert "重写完整报告" in prompt
+    assert '"requirement_failures"' in prompt
+    assert "结论先行结构" in prompt
+    sent_messages = cast(list[dict[str, str]], client.calls[0]["messages"])
+    assert "patch_statement" not in sent_messages[1]["content"]
+    assert result.draft.title == "深度研究报告"
+
+
+def test_local_requirement_failure_rewrites_only_the_named_paragraph() -> None:
+    paragraph_patch = "\n".join(
+        [
+            _line(
+                record="patch_paragraph",
+                paragraph_id="p_answer",
+                statements=[
+                    {
+                        "statement_id": "s_fact",
+                        "text": "公开材料记录了一个带明确口径的事实。",
+                        "kind": "evidence",
+                        "candidate_excerpt_ids": ["e_01"],
+                    },
+                    {
+                        "statement_id": "s_analysis",
+                        "text": "这一事实只适用于材料明确给出的范围。",
+                        "kind": "derived",
+                        "premise_statement_ids": ["s_fact"],
+                    },
+                ],
+            ),
+            _line(record="end"),
+        ]
+    )
+    client = _FakeStreamClient([paragraph_patch])
+    writer = OpenAIReportWriter(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        requirement_failures=[
+            ReportRequirementFailure(
+                kind="overall_calibration",
+                repair_scope="paragraph",
+                paragraph_ids=["p_answer"],
+                statement_ids=["s_analysis"],
+                reason="局部判断没有保留材料范围。",
+            )
+        ],
+    )
+
+    original = _draft()
+    result = writer.revise(_snapshot(), original, findings)
+
+    assert result.draft.introduction == original.introduction
+    assert result.draft.conclusion == original.conclusion
+    assert result.draft.sections[0].paragraphs[0].statements[0].text.endswith("带明确口径的事实。")
+    prompt = result.full_prompt[1]["content"]
+    assert '"p_answer"' in prompt
+    assert "patch_paragraph" in result.full_prompt[0]["content"]
+
+
+def test_paragraph_patch_that_breaks_an_external_premise_is_rejected_atomically() -> None:
+    draft = _draft()
+    replacement = ReportParagraph(
+        paragraph_id="p_answer",
+        statements=[
+            ReportStatement(
+                statement_id="s_fact",
+                text="只保留事实，删除被结论引用的分析句。",
+                kind="evidence",
+                candidate_excerpt_ids=[EXCERPT_ID],
+            )
+        ],
+    )
+
+    with pytest.raises(ValidationError, match="derived premises must reference earlier"):
+        apply_report_patches(
+            draft,
+            statement_patches=[],
+            paragraph_patches=[replacement],
+            allowed_paragraph_ids={"p_answer"},
+        )
+
+
+def test_multiple_paragraph_patches_apply_in_one_atomic_revision() -> None:
+    draft = _draft()
+    intro = ReportParagraph(
+        paragraph_id="p_intro",
+        statements=[
+            ReportStatement(
+                statement_id="s_intro",
+                text="修订后的核心答案。",
+                kind="elaboration",
+            )
+        ],
+    )
+    answer = ReportParagraph(
+        paragraph_id="p_answer",
+        statements=[
+            ReportStatement(
+                statement_id="s_fact",
+                text="修订后的事实。",
+                kind="evidence",
+                candidate_excerpt_ids=[EXCERPT_ID],
+            ),
+            ReportStatement(
+                statement_id="s_analysis",
+                text="修订后的局部判断。",
+                kind="derived",
+                premise_statement_ids=["s_fact"],
+            ),
+        ],
+    )
+
+    patched = apply_report_patches(
+        draft,
+        statement_patches=[],
+        paragraph_patches=[intro, answer],
+        allowed_paragraph_ids={"p_intro", "p_answer"},
+    )
+
+    assert patched.introduction[0].statements[0].text == "修订后的核心答案。"
+    assert patched.sections[0].paragraphs[0].statements[1].text == "修订后的局部判断。"
+    assert patched.conclusion == draft.conclusion
+
+
+def test_unknown_and_overlapping_paragraph_patches_are_rejected() -> None:
+    draft = _draft()
+    unknown = ReportParagraph(
+        paragraph_id="p_unknown",
+        statements=[
+            ReportStatement(
+                statement_id="s_new",
+                text="未知段落。",
+                kind="elaboration",
+            )
+        ],
+    )
+    with pytest.raises(StatementPatchError, match="unknown paragraph_id"):
+        apply_report_patches(
+            draft,
+            statement_patches=[],
+            paragraph_patches=[unknown],
+            allowed_paragraph_ids={"p_unknown"},
+        )
+
+    original_answer = draft.sections[0].paragraphs[0]
+    sentence_patch = original_answer.statements[0].model_copy(
+        update={"text": "与段落补丁冲突的句子补丁。"}
+    )
+    with pytest.raises(StatementPatchError, match="overlap"):
+        apply_report_patches(
+            draft,
+            statement_patches=[sentence_patch],
+            paragraph_patches=[original_answer],
+            allowed_statement_ids={"s_fact"},
+            allowed_paragraph_ids={"p_answer"},
+        )
 
 
 def test_writer_replays_a_turn_whose_stream_was_cut_mid_answer(
@@ -849,3 +1126,151 @@ def test_writer_loop_fails_after_repeated_errors() -> None:
 def test_writer_excerpt_limit_splits_a_total_budget(excerpt_count: int, expected: int) -> None:
     """Evidence volume varies by an order of magnitude; a fixed cap fits only one size."""
     assert writer_excerpt_limit(excerpt_count) == expected
+
+
+def test_weak_source_caveat_rides_on_the_finding_it_applies_to() -> None:
+    """Attribution belongs in the sentence citing the number, not in a closing disclaimer.
+
+    Research Verifier already names which Assertions rest on a weak carrier. Left in the
+    gap list keyed by id, that warning reaches the report as a footnote about the report;
+    attached to the finding, it reaches the sentence that uses the number.
+    """
+    payload = _snapshot().model_dump(mode="json")
+    payload["minor_gaps"] = [
+        {
+            "kind": "source_credibility",
+            "severity": "minor",
+            "description": "该数字仅见于聚合站转述，无一手来源佐证。",
+            "related_assertion_ids": ["30000000-0000-0000-0000-000000000001"],
+        },
+        {
+            "kind": "plan_coverage",
+            "severity": "minor",
+            "description": "某个方向未能取得公开数据。",
+            "related_assertion_ids": ["30000000-0000-0000-0000-000000000001"],
+        },
+    ]
+
+    material = _material(WriterSnapshot.model_validate(payload))
+    finding = material["research_groups"][0]["findings"][0]
+
+    assert finding["source_caveat"] == "该数字仅见于聚合站转述，无一手来源佐证。"
+    # A coverage gap describes what the research missed, not how hard one number is.
+    assert "某个方向未能取得公开数据。" not in finding["source_caveat"]
+    assert "写明转述关系" in report_writer_messages(_snapshot())[0]["content"]
+
+
+def test_findings_without_a_credibility_gap_carry_no_caveat() -> None:
+    finding = _material(_snapshot())["research_groups"][0]["findings"][0]
+
+    assert "source_caveat" not in finding
+
+
+def test_partial_report_marks_which_sentences_did_not_pass() -> None:
+    """A reader has to be able to see which claims were checked.
+
+    Withholding the footnote is invisible: premise-only derived statements carry none,
+    so an unverified judgement looks exactly like a sound one and the banner only says
+    that some sentence somewhere failed.
+    """
+    rendered = render_verified_report(
+        _snapshot(),
+        _draft(),
+        citation_map={"s_fact": [EXCERPT_ID]},
+        verification_status="partial",
+        failed_statement_ids=["s_analysis"],
+    )
+
+    assert f"这一事实需要结合适用边界理解。{UNVERIFIED_MARKER}" in rendered.markdown
+    # The sentences that did pass are left clean, footnote and all.
+    assert f"公开材料记录了一个事实。[^1]{UNVERIFIED_MARKER}" not in rendered.markdown
+    assert "公开材料记录了一个事实。[^1]" in rendered.markdown
+    assert f"总结{UNVERIFIED_MARKER}" not in rendered.markdown
+    # The banner explains the marker instead of only announcing that something failed.
+    assert UNVERIFIED_MARKER in rendered.markdown.splitlines()[0]
+    # The failed statement still gets no verified citation.
+    assert json.loads(rendered.json_text)["failed_statement_ids"] == ["s_analysis"]
+
+
+def test_fully_verified_report_carries_no_marker() -> None:
+    rendered = render_verified_report(
+        _snapshot(),
+        _draft(),
+        citation_map={"s_fact": [EXCERPT_ID]},
+        verification_status="verified",
+    )
+
+    assert UNVERIFIED_MARKER not in rendered.markdown
+
+
+def test_quality_reminders_are_exported_without_making_the_report_partial() -> None:
+    reminder = {
+        "kind": "repetition",
+        "location": "综合结论",
+        "statement_ids": ["s_conclusion"],
+        "reason": "结论重复前文，没有增加新的综合。",
+    }
+    rendered = render_verified_report(
+        _snapshot(),
+        _draft(),
+        citation_map={"s_fact": [EXCERPT_ID]},
+        verification_status="verified",
+        quality_reminders=[reminder],
+    )
+
+    payload = json.loads(rendered.json_text)
+    assert payload["verification_status"] == "verified"
+    assert payload["failed_statement_ids"] == []
+    assert payload["quality_reminders"] == [reminder]
+
+
+def test_unresolved_report_requirement_is_partial_without_mislabeling_sentences() -> None:
+    requirement = {
+        "kind": "core_answer",
+        "statement_ids": ["s_conclusion"],
+        "reason": "结论没有回答核心问题。",
+    }
+    rendered = render_verified_report(
+        _snapshot(),
+        _draft(),
+        citation_map={"s_fact": [EXCERPT_ID]},
+        verification_status="partial",
+        requirement_failures=[requirement],
+    )
+
+    payload = json.loads(rendered.json_text)
+    assert payload["verification_status"] == "partial"
+    assert payload["failed_statement_ids"] == []
+    assert payload["requirement_failures"] == [requirement]
+    assert "不能标记为已验证" in rendered.markdown.splitlines()[0]
+    assert UNVERIFIED_MARKER not in rendered.markdown
+
+
+def test_quality_reminders_never_enter_sentence_revision_instructions() -> None:
+    findings = ReportVerifierFindings(
+        round=1,
+        revision=1,
+        failures=[
+            StatementFailure(
+                statement_id="s_fact",
+                kind="evidence",
+                status="unsupported",
+                reason="数字与原文不符。",
+                allowed_excerpt_ids=[EXCERPT_ID],
+            )
+        ],
+        quality_reminders=[
+            ReportQualityReminder(
+                kind="repetition",
+                location="综合结论",
+                statement_ids=["s_conclusion"],
+                reason="结论重复前文。",
+            )
+        ],
+    )
+
+    prompt = report_writer_revision_messages(_snapshot(), _draft(), findings)[1]["content"]
+
+    assert '"statement_id": "s_fact"' in prompt
+    assert "结论重复前文" not in prompt
+    assert '"quality_reminders"' not in prompt

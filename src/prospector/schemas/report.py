@@ -8,15 +8,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-StatementKind = Literal["evidence", "derived", "elaboration", "limitation"]
+from prospector.schemas.brief import ResearchBrief
 
-# Longest inference chain that Report Verifier may pass. Four levels is what a report
-# that argues rather than lists actually needs: evidence → a judgement about one strand
-# → a section's claim → the report's overall claim. Capping at two forbade that shape
-# outright and pushed every cross-section conclusion into a deterministic rejection.
-# Writer records the complete premise graph, including deeper chains, so the Verifier can
-# make the quality decision and preserve a failed statement in a partial report.
-MAX_PREMISE_DEPTH = 4
+StatementKind = Literal["evidence", "derived", "elaboration", "limitation"]
 
 
 class WriterSource(BaseModel):
@@ -68,7 +62,7 @@ class WriterSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_id: UUID
-    brief: dict[str, Any]
+    brief: ResearchBrief
     final_plan_summary: list[dict[str, Any]]
     evidence_cards: list[WriterEvidenceCard] = Field(..., min_length=1)
     conflicts: list[WriterConflict] = Field(default_factory=list)
@@ -111,10 +105,10 @@ class ReportStatement(BaseModel):
             if self.premise_statement_ids:
                 raise ValueError("evidence statement cannot cite premise statements")
         elif self.kind == "derived":
-            if not self.premise_statement_ids:
-                raise ValueError("derived statement requires premise_statement_ids")
-            if self.candidate_excerpt_ids:
-                raise ValueError("derived statement cannot cite excerpts directly")
+            if not self.candidate_excerpt_ids and not self.premise_statement_ids:
+                raise ValueError(
+                    "derived statement requires candidate_excerpt_ids or premise_statement_ids"
+                )
         elif self.candidate_excerpt_ids or self.premise_statement_ids:
             raise ValueError(f"{self.kind} statement cannot carry evidence or premises")
         return self
@@ -126,12 +120,12 @@ def premise_depth(
 ) -> int:
     """Return the structural distance from a derived statement to its premises.
 
-    The Writer uses this only to retain an exact, acyclic premise graph. Whether a
-    chain is grounded in evidence or exceeds ``MAX_PREMISE_DEPTH`` is a Report
-    Verifier judgement: rejecting it here would prevent the report from entering
-    the statement-level repair and partial-rendering path.
+    The Writer uses this only to retain an exact, acyclic premise graph. Depth is an
+    observation for report-quality review, never a sentence-level pass/fail rule.
     """
     if statement.kind != "derived":
+        return 0
+    if not statement.premise_statement_ids:
         return 0
     return 1 + max(depths[premise_id] for premise_id in statement.premise_statement_ids)
 

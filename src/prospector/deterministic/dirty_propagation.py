@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from prospector.schemas.claims import MAX_REPORT_REVISION_ROUNDS
+from prospector.schemas.claims import MAX_REPORT_REVISION_ROUNDS, ReportVerifierFindings
 from prospector.schemas.report import ReportDraft, ReportStatement
 
 __all__ = [
@@ -10,6 +10,7 @@ __all__ = [
     "changed_statement_ids",
     "dirty_statement_ids",
     "can_revise_again",
+    "skip_stage_one_after_requirement_rewrite",
 ]
 
 
@@ -77,6 +78,21 @@ def can_revise_again(current_revision: int) -> bool:
     # revision 1 = initial draft; after verify, Writer may revise while
     # current_revision <= MAX_REPORT_REVISION_ROUNDS (two revises → rev 3).
     return current_revision <= MAX_REPORT_REVISION_ROUNDS
+
+
+def skip_stage_one_after_requirement_rewrite(
+    previous_findings: ReportVerifierFindings | None,
+) -> bool:
+    """True when the last pass cleared every sentence and failed only the whole-report review.
+
+    The next revision still rewrites the draft, but it does not reopen faithfulness
+    judgements that already passed.
+    """
+    return (
+        previous_findings is not None
+        and not previous_findings.failures
+        and bool(previous_findings.requirement_failures)
+    )
 
 
 def _statement_signature(statement: ReportStatement) -> tuple[object, ...]:

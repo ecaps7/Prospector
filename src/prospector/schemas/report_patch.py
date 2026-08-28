@@ -1,4 +1,4 @@
-"""Wire format for sentence-level Report Writer revision patches."""
+"""Wire format for sentence- and paragraph-level Report Writer revision patches."""
 
 from __future__ import annotations
 
@@ -9,7 +9,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from prospector.schemas.report import ReportStatement, WriterSnapshot, excerpt_alias_map
+from prospector.schemas.report import (
+    ReportParagraph,
+    ReportStatement,
+    WriterSnapshot,
+    excerpt_alias_map,
+)
 from prospector.schemas.report_stream import ReportStreamError
 
 
@@ -31,13 +36,47 @@ class PatchStatementRecord(ReportStatement):
         return ReportStatement.model_validate(payload)
 
 
+class PatchParagraphStatement(ReportStatement):
+    """One statement nested in a paragraph replacement, with aliased Excerpt ids."""
+
+    candidate_excerpt_ids: list[str] = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
+        default_factory=list
+    )
+
+    def to_statement(self, alias_to_id: dict[str, UUID]) -> ReportStatement:
+        payload = self.model_dump()
+        payload["candidate_excerpt_ids"] = [
+            alias_to_id[alias] for alias in self.candidate_excerpt_ids
+        ]
+        return ReportStatement.model_validate(payload)
+
+
+class PatchParagraphRecord(BaseModel):
+    """Replace one stable paragraph with a complete new statement list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record: Literal["patch_paragraph"] = "patch_paragraph"
+    paragraph_id: str = Field(..., pattern=r"^p_[A-Za-z0-9_-]+$")
+    statements: list[PatchParagraphStatement] = Field(..., min_length=1)
+
+    def to_paragraph(self, alias_to_id: dict[str, UUID]) -> ReportParagraph:
+        return ReportParagraph(
+            paragraph_id=self.paragraph_id,
+            statements=[item.to_statement(alias_to_id) for item in self.statements],
+        )
+
+
 class PatchEndRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record: Literal["end"]
 
 
-PatchRecord = Annotated[PatchStatementRecord | PatchEndRecord, Field(discriminator="record")]
+PatchRecord = Annotated[
+    PatchStatementRecord | PatchParagraphRecord | PatchEndRecord,
+    Field(discriminator="record"),
+]
 _PATCH_ADAPTER: TypeAdapter[PatchRecord] = TypeAdapter(PatchRecord)
 
 
@@ -49,7 +88,7 @@ class PatchTurnOutcome:
 
 @dataclass
 class ReportPatchAssembler:
-    """Fold patch_statement records into a list of ReportStatement replacements."""
+    """Fold sentence and paragraph records into one atomic patch set."""
 
     snapshot: WriterSnapshot
     allowed_statement_ids: set[str]
@@ -58,7 +97,9 @@ class ReportPatchAssembler:
     # Checked here rather than only on the assembled draft so that a backwards reference is
     # answered by the turn-level feedback loop instead of failing the whole revision.
     legal_premise_ids: dict[str, set[str]]
+    allowed_paragraph_ids: set[str] = field(default_factory=set)
     patches: list[ReportStatement] = field(default_factory=list)
+    paragraph_patches: list[ReportParagraph] = field(default_factory=list)
     done: bool = False
     last_accepted: str = "（尚未接受任何补丁）"
 
@@ -87,11 +128,12 @@ class ReportPatchAssembler:
                 rejected = json.dumps(payload, ensure_ascii=False, default=str)[:300]
                 return PatchTurnOutcome(accepted, f"记录 {rejected} 被拒绝：{exc}")
             accepted += 1
-            self.last_accepted = (
-                f"patch {record.statement_id}"
-                if isinstance(record, PatchStatementRecord)
-                else "end"
-            )
+            if isinstance(record, PatchStatementRecord):
+                self.last_accepted = f"patch {record.statement_id}"
+            elif isinstance(record, PatchParagraphRecord):
+                self.last_accepted = f"paragraph patch {record.paragraph_id}"
+            else:
+                self.last_accepted = "end"
         return PatchTurnOutcome(accepted, parse_error)
 
     def _parse_payloads(self, content: str) -> tuple[list[object], str | None]:
@@ -109,9 +151,30 @@ class ReportPatchAssembler:
 
     def _apply(self, record: PatchRecord) -> None:
         if isinstance(record, PatchEndRecord):
-            if not self.patches:
-                raise ReportStreamError("end 之前至少要有一条 patch_statement")
+            if not self.patches and not self.paragraph_patches:
+                raise ReportStreamError("end 之前至少要有一条补丁")
             self.done = True
+            return
+        if isinstance(record, PatchParagraphRecord):
+            if record.paragraph_id not in self.allowed_paragraph_ids:
+                raise ReportStreamError(
+                    f"paragraph_id {record.paragraph_id} 不在获准重写的段落列表中"
+                )
+            if record.paragraph_id in self._seen:
+                raise ReportStreamError(f"paragraph_id {record.paragraph_id} 已打过补丁")
+            unknown_excerpts = {
+                alias
+                for statement in record.statements
+                for alias in statement.candidate_excerpt_ids
+                if alias not in self._allowed_excerpt_aliases
+            }
+            if unknown_excerpts:
+                raise ReportStreamError(
+                    "candidate_excerpt_ids 引用了研究材料之外的 excerpt："
+                    + ", ".join(sorted(unknown_excerpts))
+                )
+            self.paragraph_patches.append(record.to_paragraph(self._alias_to_id))
+            self._seen.add(record.paragraph_id)
             return
         if record.statement_id not in self.allowed_statement_ids:
             raise ReportStreamError(

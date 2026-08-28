@@ -33,11 +33,32 @@ def apply_statement_patches(
     allowed_statement_ids: set[str] | None = None,
 ) -> ReportDraft:
     """Replace named statements in ``draft``; all other sentences stay byte-identical."""
-    if not patches:
+    return apply_report_patches(
+        draft,
+        statement_patches=patches,
+        paragraph_patches=[],
+        allowed_statement_ids=allowed_statement_ids,
+    )
+
+
+def apply_report_patches(
+    draft: ReportDraft,
+    *,
+    statement_patches: list[ReportStatement],
+    paragraph_patches: list[ReportParagraph],
+    allowed_statement_ids: set[str] | None = None,
+    allowed_paragraph_ids: set[str] | None = None,
+) -> ReportDraft:
+    """Atomically apply the smallest allowed sentence/paragraph replacements."""
+    if not statement_patches and not paragraph_patches:
         raise StatementPatchError("revision produced no patches")
-    patch_map = {patch.statement_id: patch for patch in patches}
-    if len(patch_map) != len(patches):
+    patch_map = {patch.statement_id: patch for patch in statement_patches}
+    if len(patch_map) != len(statement_patches):
         raise StatementPatchError("duplicate statement_id in patches")
+    paragraph_map = {patch.paragraph_id: patch for patch in paragraph_patches}
+    if len(paragraph_map) != len(paragraph_patches):
+        raise StatementPatchError("duplicate paragraph_id in patches")
+
     existing = {statement.statement_id for statement in draft.statements()}
     unknown = set(patch_map) - existing
     if unknown:
@@ -50,8 +71,40 @@ def apply_statement_patches(
             raise StatementPatchError(
                 "patches touch statements not listed in findings: " + ", ".join(sorted(disallowed))
             )
+    existing_paragraphs = {paragraph.paragraph_id for paragraph in draft.paragraphs()}
+    unknown_paragraphs = set(paragraph_map) - existing_paragraphs
+    if unknown_paragraphs:
+        raise StatementPatchError(
+            "patches reference unknown paragraph_id values: "
+            + ", ".join(sorted(unknown_paragraphs))
+        )
+    if allowed_paragraph_ids is not None:
+        disallowed_paragraphs = set(paragraph_map) - allowed_paragraph_ids
+        if disallowed_paragraphs:
+            raise StatementPatchError(
+                "patches touch paragraphs not listed in findings: "
+                + ", ".join(sorted(disallowed_paragraphs))
+            )
+
+    paragraph_by_statement = {
+        statement.statement_id: paragraph.paragraph_id
+        for paragraph in draft.paragraphs()
+        for statement in paragraph.statements
+    }
+    overlap = {
+        statement_id
+        for statement_id in patch_map
+        if paragraph_by_statement[statement_id] in paragraph_map
+    }
+    if overlap:
+        raise StatementPatchError(
+            "sentence and paragraph patches overlap: " + ", ".join(sorted(overlap))
+        )
 
     def map_paragraph(paragraph: ReportParagraph) -> ReportParagraph:
+        replacement = paragraph_map.get(paragraph.paragraph_id)
+        if replacement is not None:
+            return replacement
         return ReportParagraph(
             paragraph_id=paragraph.paragraph_id,
             statements=[

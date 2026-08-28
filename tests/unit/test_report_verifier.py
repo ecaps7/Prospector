@@ -9,10 +9,14 @@ from uuid import UUID
 
 import pytest
 
-from prospector.agents.prompts.report_verifier import report_verifier_messages
+from prospector.agents.prompts.report_verifier import (
+    report_quality_messages,
+    report_verifier_messages,
+)
 from prospector.agents.report_verifier import (
     OpenAIReportVerifier,
     ReportVerifierOutputError,
+    _encode_excerpt_ids,
 )
 from prospector.agents.report_writer import OpenAIReportWriter
 from prospector.deterministic.statement_patches import (
@@ -20,13 +24,15 @@ from prospector.deterministic.statement_patches import (
     preceding_statement_ids,
 )
 from prospector.schemas.claims import (
+    BridgeStatementDecision,
+    EvidenceStatementDecision,
+    ReportRequirementFailure,
     ReportVerifierFindings,
     ReportVerifierSnapshot,
     ReportVerifierStatementInput,
     StatementFailure,
 )
 from prospector.schemas.report import (
-    MAX_PREMISE_DEPTH,
     ReportDraft,
     ReportStatement,
     WriterSnapshot,
@@ -34,6 +40,7 @@ from prospector.schemas.report import (
 from prospector.schemas.report_patch import ReportPatchAssembler
 
 EXCERPT_ID = UUID("10000000-0000-0000-0000-000000000001")
+CONFLICT_EXCERPT_ID = UUID("10000000-0000-0000-0000-000000000099")
 
 
 def _snapshot() -> WriterSnapshot:
@@ -209,6 +216,64 @@ class _SequencedCompletions:
         return _completion(json.dumps(payload, ensure_ascii=False))
 
 
+class _StatementAndQualityCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.quality_user = ""
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls += 1
+        user = kwargs["messages"][1]["content"]
+        if "请检查下面完整报告的组织质量" in user:
+            self.quality_user = user
+            return _completion(
+                json.dumps(
+                    {
+                        "requirement_failures": [
+                            {
+                                "kind": "core_answer",
+                                "statement_ids": ["s_intro"],
+                                "reason": "结论只重复前文，没有回答研究问题。",
+                            }
+                        ],
+                        "reminders": [
+                            {
+                                "kind": "repetition",
+                                "location": "综合结论",
+                                "statement_ids": ["s_intro"],
+                                "reason": "结论重复前文。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return _completion(json.dumps(_BRIDGE_PASS, ensure_ascii=False))
+
+
+class _FailedStatementThenQualityCompletions:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.quality_seen = False
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls += 1
+        user = kwargs["messages"][1]["content"]
+        if "请检查下面完整报告的组织质量" in user:
+            self.quality_seen = True
+            return _completion(json.dumps({"requirement_failures": [], "reminders": []}))
+        return _completion(
+            json.dumps(
+                {
+                    **_BRIDGE_PASS,
+                    "contains_factual_claim": True,
+                    "reason": "衔接句夹带事实。",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 def _bridge_snapshot(statement_id: str = "s_intro") -> ReportVerifierSnapshot:
     return ReportVerifierSnapshot(
         job_id=UUID("20000000-0000-0000-0000-000000000001"),
@@ -235,6 +300,47 @@ _BRIDGE_PASS: dict[str, object] = {
 }
 
 
+def test_report_requirement_failure_requires_locations_matching_repair_scope() -> None:
+    local = ReportRequirementFailure(
+        kind="internal_consistency",
+        repair_scope="paragraph",
+        paragraph_ids=["p_c"],
+        reason="结论段内部矛盾。",
+    )
+
+    assert local.paragraph_ids == ["p_c"]
+    with pytest.raises(ValueError, match="paragraph repair requires paragraph_ids"):
+        ReportRequirementFailure(
+            kind="internal_consistency",
+            repair_scope="paragraph",
+            reason="缺少修订位置。",
+        )
+    with pytest.raises(ValueError, match="report repair must not name paragraph_ids"):
+        ReportRequirementFailure(
+            kind="core_answer",
+            repair_scope="report",
+            paragraph_ids=["p_c"],
+            reason="全文问题不能伪装成局部问题。",
+        )
+
+
+def test_whole_report_prompt_distinguishes_blockers_from_writing_reminders() -> None:
+    system = report_quality_messages({"scopes": [], "statement_checks": []})[0]["content"]
+
+    for kind in (
+        "core_answer",
+        "user_constraint",
+        "conclusion_support",
+        "internal_consistency",
+        "material_omission",
+        "overall_calibration",
+    ):
+        assert kind in system
+    assert "repair_scope=paragraph" in system
+    assert "普通重复" not in system
+    assert "只记录、不阻止通过" in system
+
+
 def test_a_truncated_answer_is_retried_rather_than_sent_to_the_syntax_repairer() -> None:
     """Repair cannot recover a length stop: the syntax is fine, the content is missing."""
     completions = _TruncatingCompletions(_BRIDGE_PASS, truncate_times=1)
@@ -254,8 +360,14 @@ def test_two_unusable_answers_fail_the_verifier_without_inventing_a_finding() ->
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
 
+    snapshot = _bridge_snapshot()
+    snapshot.report_context = {
+        "brief_question": "q",
+        "title": "t",
+        "scopes": [],
+    }
     with pytest.raises(ReportVerifierOutputError, match="cut off twice") as raised:
-        verifier.verify(_bridge_snapshot())
+        verifier.verify(snapshot)
 
     assert completions.calls == 2
     raw_output = cast(dict[str, dict[str, list[dict[str, str]]]], raised.value.raw_output)
@@ -380,6 +492,312 @@ def test_incomplete_evidence_pairs_are_retried_with_the_rule_that_was_broken() -
     assert "缺少 ['E2']" in retry_system
 
 
+def test_known_conflicts_do_not_leak_non_candidate_excerpt_ids() -> None:
+    """Conflict cards are context. Only candidate excerpts keep a pairs-writable code."""
+    payload = ReportVerifierStatementInput(
+        statement_id="s_fact",
+        text="该指标已经得到证实。",
+        kind="evidence",
+        candidate_excerpts=[
+            {"excerpt_id": str(EXCERPT_ID), "text": "来源甲称该指标为 42%。", "title": "甲"}
+        ],
+        known_conflicts=[
+            {
+                "conflict_key": "conflict:test",
+                "disputed_point": "该指标是否为 42%",
+                "decision": "adjudicated",
+                "winning_excerpt_ids": [str(CONFLICT_EXCERPT_ID)],
+                "excerpts": [
+                    {
+                        "excerpt_id": str(EXCERPT_ID),
+                        "text": "来源甲称该指标为 42%。",
+                        "title": "甲",
+                    },
+                    {
+                        "excerpt_id": str(CONFLICT_EXCERPT_ID),
+                        "text": "来源乙记录了不同口径。",
+                        "title": "乙",
+                    },
+                ],
+            }
+        ],
+    ).model_dump(mode="json")
+
+    _encode_excerpt_ids(payload)
+    user = report_verifier_messages(payload)[1]["content"]
+    conflict = payload["known_conflicts"][0]
+    by_title = {item["title"]: item for item in conflict["excerpts"]}
+
+    assert str(EXCERPT_ID) not in user
+    assert str(CONFLICT_EXCERPT_ID) not in user
+    assert "winning_excerpt_ids" not in conflict
+    assert by_title["甲"]["excerpt_id"] == "E1"
+    assert by_title["甲"]["winning"] is False
+    assert "excerpt_id" not in by_title["乙"]
+    assert by_title["乙"]["winning"] is True
+
+
+def test_non_candidate_pairs_are_dropped_without_retry() -> None:
+    """Extra conflict-card ids are bookkeeping, not a verifier crash."""
+    completions = _FakeCompletions(
+        {
+            "s_fact": {
+                "statement_id": "s_fact",
+                "kind": "evidence",
+                "claim_type": "fact",
+                "pairs": [
+                    {"excerpt_id": "E1", "relation": "support"},
+                    {"excerpt_id": str(CONFLICT_EXCERPT_ID), "relation": "irrelevant"},
+                ],
+                "status": "pass",
+                "reason": "候选原文支持该句。",
+            }
+        }
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="候选原文支持的事实。",
+                    kind="evidence",
+                    candidate_excerpts=[{"excerpt_id": str(EXCERPT_ID), "text": "候选证据原文。"}],
+                    known_conflicts=[
+                        {
+                            "conflict_key": "conflict:test",
+                            "decision": "present_both",
+                            "disputed_point": "口径是否一致",
+                            "excerpts": [
+                                {
+                                    "excerpt_id": str(CONFLICT_EXCERPT_ID),
+                                    "text": "另一口径。",
+                                    "title": "乙",
+                                }
+                            ],
+                        }
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert completions.calls == 1
+    decision = result.decisions[0]
+    assert isinstance(decision, EvidenceStatementDecision)
+    assert [pair.excerpt_id for pair in decision.pairs] == [EXCERPT_ID]
+
+
+def test_pairs_that_only_cite_known_conflicts_still_retry_for_the_missing_candidate() -> None:
+    completions = _SequencedCompletions(
+        [
+            {
+                "statement_id": "s_fact",
+                "kind": "evidence",
+                "claim_type": "fact",
+                "pairs": [{"excerpt_id": str(CONFLICT_EXCERPT_ID), "relation": "support"}],
+                "status": "pass",
+                "reason": "用了冲突卡里的另一条原文。",
+            },
+            {
+                "statement_id": "s_fact",
+                "kind": "evidence",
+                "claim_type": "fact",
+                "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+                "status": "pass",
+                "reason": "改回本句候选原文。",
+            },
+        ]
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="需要逐句核验的事实。",
+                    kind="evidence",
+                    candidate_excerpts=[{"excerpt_id": str(EXCERPT_ID), "text": "候选证据原文。"}],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert completions.calls == 2
+    assert "缺少 ['E1']" in completions.systems[1]
+    assert str(CONFLICT_EXCERPT_ID) not in completions.systems[1]
+
+
+def test_schema_valid_but_inconsistent_verdict_gets_targeted_retry() -> None:
+    invalid: dict[str, object] = {
+        "statement_id": "s_fact",
+        "kind": "evidence",
+        "claim_type": "fact",
+        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+        "conflict_keys": ["conflict:test"],
+        "status": "pass",
+        "reason": "正文已经呈现分歧，因此可以通过。",
+    }
+    corrected: dict[str, object] = {
+        "statement_id": "s_fact",
+        "kind": "evidence",
+        "claim_type": "fact",
+        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+        "conflict_keys": [],
+        "status": "pass",
+        "reason": "正文已经呈现分歧，pass 时不记录 conflict_keys。",
+    }
+    completions = _SequencedCompletions([invalid, corrected])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="需要逐句核验的事实。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "只覆盖部分背景。"}
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    assert completions.calls == 2
+    assert "conflict_keys are only valid for conflicted decisions" in completions.systems[1]
+    assert result.decisions[0].status == corrected["status"]
+
+
+def test_unsupported_compound_statement_retains_supporting_pairs() -> None:
+    second_excerpt = UUID("10000000-0000-0000-0000-000000000002")
+    completions = _SequencedCompletions(
+        [
+            {
+                "statement_id": "s_fact",
+                "kind": "evidence",
+                "claim_type": "fact",
+                "pairs": [
+                    {"excerpt_id": "E1", "relation": "support"},
+                    {"excerpt_id": "E2", "relation": "partial"},
+                ],
+                "conflict_keys": [],
+                "status": "unsupported",
+                "reason": "E1 支持部分数据，但关键日期没有原文支持，整句不能通过。",
+            }
+        ]
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="部分数据有依据，但关键日期没有依据。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "支持其中一项数据。"},
+                        {"excerpt_id": str(second_excerpt), "text": "只覆盖部分背景。"},
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID, second_excerpt],
+        )
+    )
+
+    assert completions.calls == 1
+    assert not result.findings.all_passed
+    assert result.findings.failures[0].status == "unsupported"
+    decision = result.decisions[0]
+    assert [pair.relation for pair in decision.pairs] == ["support", "partial"]  # type: ignore[union-attr]
+
+
+def test_irrelevant_candidate_is_a_valid_non_supporting_relation() -> None:
+    unrelated_excerpt = UUID("10000000-0000-0000-0000-000000000002")
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(
+                {
+                    "s_fact": {
+                        "statement_id": "s_fact",
+                        "kind": "evidence",
+                        "claim_type": "fact",
+                        "pairs": [
+                            {"excerpt_id": "E1", "relation": "support"},
+                            {"excerpt_id": "E2", "relation": "irrelevant"},
+                        ],
+                        "conflict_keys": [],
+                        "status": "pass",
+                        "reason": "E1 支持该句，E2 与该句无关。",
+                    }
+                }
+            )
+        )
+    )
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="原文支持的事实。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "原文支持的事实。"},
+                        {"excerpt_id": str(unrelated_excerpt), "text": "另一个无关主题。"},
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID, unrelated_excerpt],
+        )
+    )
+
+    assert result.findings.all_passed
+    assert [pair.relation for pair in result.decisions[0].pairs] == [  # type: ignore[union-attr]
+        "support",
+        "irrelevant",
+    ]
+
+
 def test_report_verifier_passes_evidence_and_derived() -> None:
     client = SimpleNamespace(
         chat=SimpleNamespace(
@@ -449,7 +867,105 @@ def test_report_verifier_passes_evidence_and_derived() -> None:
     assert client.chat.completions.calls == 2
 
 
-def test_derived_with_failed_premises_calls_llm_and_lets_it_decide() -> None:
+def test_report_verifier_checks_direct_excerpts_on_a_derived_statement() -> None:
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(
+                {
+                    "s_analysis": {
+                        "statement_id": "s_analysis",
+                        "kind": "derived",
+                        "claim_type": "fact",
+                        "inference_note": "直接综合原文",
+                        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+                        "status": "pass",
+                        "reason": "原文支持该判断",
+                    }
+                }
+            )
+        )
+    )
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_analysis",
+                    text="这些结果显示一个共同趋势。",
+                    kind="derived",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "多组结果呈现同一方向。"}
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    decision = result.decisions[0]
+    assert result.findings.all_passed
+    assert decision.kind == "derived"
+    assert decision.pairs[0].excerpt_id == EXCERPT_ID  # type: ignore[union-attr]
+
+
+def test_known_research_conflict_can_fail_a_one_sided_statement() -> None:
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(
+                {
+                    "s_fact": {
+                        "statement_id": "s_fact",
+                        "kind": "evidence",
+                        "claim_type": "fact",
+                        "pairs": [{"excerpt_id": "E1", "relation": "support"}],
+                        "conflict_keys": ["conflict:test"],
+                        "status": "conflicted",
+                        "reason": "正文把存在直接分歧的一方写成了无争议事实。",
+                    }
+                }
+            )
+        )
+    )
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    result = verifier.verify(
+        ReportVerifierSnapshot(
+            job_id=UUID("20000000-0000-0000-0000-000000000001"),
+            report_id=UUID("40000000-0000-0000-0000-000000000001"),
+            revision=1,
+            round=1,
+            brief_question="q",
+            statements=[
+                ReportVerifierStatementInput(
+                    statement_id="s_fact",
+                    text="该指标已经得到证实。",
+                    kind="evidence",
+                    candidate_excerpts=[
+                        {"excerpt_id": str(EXCERPT_ID), "text": "来源甲称该指标为 42%。"}
+                    ],
+                    known_conflicts=[
+                        {
+                            "conflict_key": "conflict:test",
+                            "decision": "present_both",
+                            "disputed_point": "该指标是否为 42%",
+                        }
+                    ],
+                )
+            ],
+            allowed_excerpt_ids=[EXCERPT_ID],
+        )
+    )
+
+    assert result.findings.failures[0].status == "conflicted"
+    assert result.decisions[0].conflict_keys == ["conflict:test"]  # type: ignore[union-attr]
+
+
+def test_derived_with_failed_premises_is_blocked_without_an_llm_call() -> None:
     client = SimpleNamespace(
         chat=SimpleNamespace(
             completions=_FakeCompletions(
@@ -495,12 +1011,30 @@ def test_derived_with_failed_premises_calls_llm_and_lets_it_decide() -> None:
             allowed_excerpt_ids=[],
         )
     )
-    assert result.findings.all_passed
-    assert client.chat.completions.calls == 1
+    assert not result.findings.all_passed
+    assert result.findings.failures[0].status == "unsupported"
+    assert "前提硬闸门" in result.findings.failures[0].reason
+    assert client.chat.completions.calls == 0
 
 
-def test_verifier_marks_an_overdeep_derived_statement_for_revision_without_an_llm_call() -> None:
-    verifier = OpenAIReportVerifier(client=SimpleNamespace(), model="qwen-fake-model")  # type: ignore[arg-type]
+def test_deep_but_grounded_reasoning_is_left_to_semantic_verification() -> None:
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(
+                {
+                    "s_deep": {
+                        "statement_id": "s_deep",
+                        "kind": "derived",
+                        "claim_type": "fact",
+                        "inference_note": "由多层已验证判断综合",
+                        "status": "pass",
+                        "reason": "证据链完整且归纳范围诚实",
+                    }
+                }
+            )
+        )
+    )
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
     snapshot = ReportVerifierSnapshot(
         job_id=UUID("20000000-0000-0000-0000-000000000001"),
         report_id=UUID("40000000-0000-0000-0000-000000000001"),
@@ -509,8 +1043,8 @@ def test_verifier_marks_an_overdeep_derived_statement_for_revision_without_an_ll
         brief_question="q",
         statements=[
             ReportVerifierStatementInput(
-                statement_id="s_too_deep",
-                text="超出可验证深度的推理。",
+                statement_id="s_deep",
+                text="多层判断共同支持这一总结论。",
                 kind="derived",
                 premises=[
                     {
@@ -520,20 +1054,16 @@ def test_verifier_marks_an_overdeep_derived_statement_for_revision_without_an_ll
                         "passed": True,
                     }
                 ],
-                premise_depth=MAX_PREMISE_DEPTH + 1,
+                premise_depth=12,
             )
         ],
     )
 
     result = verifier.verify(snapshot)
 
-    assert result.findings.passed_statement_ids == []
-    assert [(failure.statement_id, failure.status) for failure in result.findings.failures] == [
-        ("s_too_deep", "overreach")
-    ]
-    assert result.decisions[0].status == "overreach"
-    raw_output = cast(dict[str, object], result.raw_outputs["s_too_deep"])
-    assert raw_output["deterministic_rule"] == ("derived_premise_grounding_or_depth")
+    assert result.findings.all_passed
+    assert result.decisions[0].status == "pass"
+    assert client.chat.completions.calls == 1
 
 
 def test_verifier_marks_an_ungrounded_derived_statement_for_revision_without_an_llm_call() -> None:
@@ -565,7 +1095,7 @@ def test_verifier_marks_an_ungrounded_derived_statement_for_revision_without_an_
     result = verifier.verify(snapshot)
 
     assert [(failure.statement_id, failure.status) for failure in result.findings.failures] == [
-        ("s_ungrounded", "overreach")
+        ("s_ungrounded", "unsupported")
     ]
     assert "s_bridge" in result.findings.failures[0].reason
 
@@ -700,7 +1230,7 @@ def test_writer_revise_retries_when_the_assembled_draft_is_rejected(
     assert len(prompts) == 2
     # A malformed stream record is corrected before the revision is rejected.
     restart = prompts[1][-1]["content"]
-    assert "derived statement requires premise_statement_ids" in restart
+    assert "derived statement requires candidate_excerpt_ids or premise_statement_ids" in restart
     assert "已接受的最后一条记录" in restart
 
 
@@ -738,12 +1268,7 @@ def test_writer_revise_applies_patches(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _text_of(result.draft, "s_fact") == "补丁事实"
 
 
-def test_derived_at_the_depth_cap_is_left_to_the_llm() -> None:
-    """The cap is the last passable depth, not the first rejected one.
-
-    A report that argues rather than lists needs evidence → strand → section → report,
-    so the boundary case has to reach the model instead of being refused structurally.
-    """
+def test_reasoning_depth_is_observational_not_a_sentence_failure() -> None:
     client = SimpleNamespace(
         chat=SimpleNamespace(
             completions=_FakeCompletions(
@@ -752,7 +1277,6 @@ def test_derived_at_the_depth_cap_is_left_to_the_llm() -> None:
                         "statement_id": "s_at_cap",
                         "kind": "derived",
                         "claim_type": "fact",
-                        "inference_type": "generalization",
                         "inference_note": "由分论点收束为全文论点",
                         "status": "pass",
                         "reason": "归纳范围已写明",
@@ -783,7 +1307,7 @@ def test_derived_at_the_depth_cap_is_left_to_the_llm() -> None:
                             "passed": True,
                         }
                     ],
-                    premise_depth=MAX_PREMISE_DEPTH,
+                    premise_depth=8,
                 )
             ],
         )
@@ -793,8 +1317,8 @@ def test_derived_at_the_depth_cap_is_left_to_the_llm() -> None:
     assert client.chat.completions.calls == 1
 
 
-def test_derived_prompt_carries_paragraph_and_premise_excerpts() -> None:
-    """Whatever a generalization is judged against has to be in front of the judge."""
+def test_derived_prompt_uses_only_declared_premises_and_their_excerpts() -> None:
+    """Every fact allowed to support a judgement must be an auditable premise."""
     statement = ReportVerifierStatementInput(
         statement_id="s_pattern",
         text="这些案例显示落地集中在流程标准化的场景。",
@@ -812,35 +1336,32 @@ def test_derived_prompt_carries_paragraph_and_premise_excerpts() -> None:
                         "url": "https://example.test/a",
                     }
                 ],
-            }
+            },
+            {
+                "statement_id": "s_case_b",
+                "text": "乙公司部署了客服 Agent。",
+                "kind": "evidence",
+                "passed": True,
+                "excerpts": [
+                    {
+                        "text": "乙公司把客服 Agent 用于标准化工单分流。",
+                        "title": "乙公司案例",
+                        "url": "https://example.test/b",
+                    }
+                ],
+            },
         ],
         premise_depth=1,
-        section_title="落地图谱",
-        paragraph_statements=[
-            {
-                "statement_id": "s_case_a",
-                "text": "甲公司部署了订单处理 Agent。",
-                "kind": "evidence",
-            },
-            {"statement_id": "s_case_b", "text": "乙公司部署了客服 Agent。", "kind": "evidence"},
-            {
-                "statement_id": "s_pattern",
-                "text": "这些案例显示落地集中在流程标准化的场景。",
-                "kind": "derived",
-            },
-        ],
     ).model_dump(mode="json")
 
     messages = report_verifier_messages(statement)
     system, user = messages[0]["content"], messages[1]["content"]
 
-    # The rubric must grade by inference type, not by one blanket overreach standard.
-    assert "inference_type" in system
-    assert "generalization" in system and "causal" in system
-    # The paragraph the generalization covers, and the premise's own source text.
+    assert "没有被列为 premise 的其他句子不能补足依据" in system
+    assert "不得写入 pairs" in system
     assert "乙公司部署了客服 Agent。" in user
     assert "甲公司订单处理时间从 3 小时缩短到 15 分钟。" in user
-    assert "落地图谱" in user
+    assert "paragraph_statements" not in user
 
 
 def test_evidence_prompt_stays_narrow() -> None:
@@ -856,7 +1377,181 @@ def test_evidence_prompt_stays_narrow() -> None:
         candidate_excerpts=[{"excerpt_id": "E1", "text": "甲公司上线了订单处理 Agent。"}],
     )
 
-    assert statement.section_title is None
-    assert statement.paragraph_statements == []
     user = report_verifier_messages(statement.model_dump(mode="json"))[1]["content"]
     assert "甲公司上线了订单处理 Agent。" in user
+    assert "paragraph_statements" not in user
+
+
+def test_evidence_prompt_checks_source_attribution_and_known_conflicts() -> None:
+    statement = ReportVerifierStatementInput(
+        statement_id="s_fact",
+        text="该指标已经得到证实。",
+        kind="evidence",
+        candidate_excerpts=[
+            {
+                "excerpt_id": "E1",
+                "text": "某媒体援引匿名人士称该指标为 42%。",
+                "url": "https://example.test/report",
+                "title": "媒体报道",
+                "author": "记者甲",
+            }
+        ],
+        known_conflicts=[
+            {
+                "conflict_key": "conflict:test",
+                "decision": "present_both",
+                "disputed_point": "该指标是否为 42%",
+            }
+        ],
+    )
+
+    system = report_verifier_messages(statement.model_dump(mode="json"))[0]["content"]
+
+    assert "报道、机构表态或分析观点" in system
+    assert "present_both" in system
+    assert "conflict_keys" in system
+    assert "known_conflicts 只用于判断分寸，不得写入 pairs" in system
+    assert "winning_excerpt_ids" not in system
+
+
+def test_missing_core_answer_blocks_verification_while_quality_reminders_do_not() -> None:
+    completions = _StatementAndQualityCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    snapshot = _bridge_snapshot()
+    snapshot.report_context = {
+        "brief_question": "研究问题是什么？",
+        "title": "报告",
+        "scopes": [
+            {
+                "kind": "conclusion",
+                "title": None,
+                "paragraphs": [
+                    {
+                        "paragraph_id": "p_c",
+                        "statements": [
+                            {
+                                "statement_id": "s_intro",
+                                "text": "接下来讨论这一变化的影响。",
+                                "kind": "elaboration",
+                                "premise_statement_ids": [],
+                                "premise_depth": 0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = verifier.verify(snapshot)
+
+    assert not result.findings.all_passed
+    assert len(result.findings.requirement_failures) == 1
+    assert result.findings.requirement_failures[0].kind == "core_answer"
+    assert result.findings.requirement_failures[0].repair_scope == "report"
+    assert len(result.findings.quality_reminders) == 1
+    assert result.findings.quality_reminders[0].kind == "repetition"
+    assert '"statement_checks"' in completions.quality_user
+    assert '"status": "pass"' in completions.quality_user
+    assert completions.calls == 2
+
+
+def test_valid_statement_failure_still_runs_whole_report_stage() -> None:
+    completions = _FailedStatementThenQualityCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    snapshot = _bridge_snapshot()
+    snapshot.report_context = {
+        "brief_question": "研究问题是什么？",
+        "title": "报告",
+        "scopes": [
+            {
+                "kind": "introduction",
+                "title": None,
+                "paragraphs": [
+                    {
+                        "paragraph_id": "p_intro",
+                        "statements": [
+                            {
+                                "statement_id": "s_intro",
+                                "text": "接下来讨论这一变化的影响。",
+                                "kind": "elaboration",
+                                "premise_statement_ids": [],
+                                "premise_depth": 0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = verifier.verify(snapshot)
+
+    assert len(result.findings.failures) == 1
+    assert completions.quality_seen
+    assert completions.calls == 2
+
+
+def test_stage_two_only_revision_skips_sentence_checks() -> None:
+    class _QualityOnlyCompletions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs: Any) -> SimpleNamespace:
+            self.calls += 1
+            user = kwargs["messages"][1]["content"]
+            if "请检查下面完整报告的组织质量" not in user:
+                raise AssertionError("stage-two-only verification must not re-check sentences")
+            return _completion(json.dumps({"requirement_failures": [], "reminders": []}))
+
+    completions = _QualityOnlyCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    verifier = OpenAIReportVerifier(client=client, model="qwen-fake-model")  # type: ignore[arg-type]
+    reused = BridgeStatementDecision(
+        statement_id="s_intro",
+        kind="elaboration",
+        contains_factual_claim=False,
+        reason="上一轮已通过。",
+    )
+    snapshot = ReportVerifierSnapshot(
+        job_id=UUID("20000000-0000-0000-0000-000000000001"),
+        report_id=UUID("40000000-0000-0000-0000-000000000001"),
+        revision=2,
+        round=1,
+        brief_question="q",
+        skip_statement_verification=True,
+        reused_statement_decisions=[reused],
+        report_context={
+            "brief_question": "q",
+            "title": "t",
+            "scopes": [
+                {
+                    "kind": "introduction",
+                    "title": None,
+                    "paragraphs": [
+                        {
+                            "paragraph_id": "p_intro",
+                            "statements": [
+                                {
+                                    "statement_id": "s_intro",
+                                    "text": "接下来讨论这一变化的影响。",
+                                    "kind": "elaboration",
+                                    "premise_statement_ids": [],
+                                    "premise_depth": 0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = verifier.verify(snapshot)
+
+    assert result.findings.all_passed
+    assert result.findings.passed_statement_ids == ["s_intro"]
+    assert result.raw_outputs["s_intro"] == {"reused_from_prior_revision": True}
+    assert completions.calls == 1

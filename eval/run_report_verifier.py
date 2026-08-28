@@ -35,6 +35,27 @@ def _accepted_statuses(expectation: dict[str, Any]) -> set[str]:
     return set(statuses)
 
 
+def _decision_matches_optional_details(
+    expectation: dict[str, Any],
+    decision: Any,
+) -> bool:
+    required_pairs = expectation.get("required_pair_relations", {})
+    if not isinstance(required_pairs, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in required_pairs.items()
+    ):
+        raise ValueError("required_pair_relations 必须是 excerpt_id 到 relation 的对象")
+    actual_pairs = {str(pair.excerpt_id): pair.relation for pair in getattr(decision, "pairs", [])}
+    if any(actual_pairs.get(key) != value for key, value in required_pairs.items()):
+        return False
+
+    required_conflicts = expectation.get("required_conflict_keys", [])
+    if not isinstance(required_conflicts, list) or not all(
+        isinstance(key, str) for key in required_conflicts
+    ):
+        raise ValueError("required_conflict_keys 必须是字符串列表")
+    return set(required_conflicts).issubset(getattr(decision, "conflict_keys", []))
+
+
 def main() -> int:
     case_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CASE
     try:
@@ -43,9 +64,12 @@ def main() -> int:
         expectations = case["expectations"]
         if not isinstance(expectations, list) or not expectations:
             raise ValueError("评测案例必须包含非空的 expectations 列表")
+        expectations_by_id = {
+            str(expectation["statement_id"]): expectation for expectation in expectations
+        }
         expected_by_id = {
-            str(expectation["statement_id"]): _accepted_statuses(expectation)
-            for expectation in expectations
+            statement_id: _accepted_statuses(expectation)
+            for statement_id, expectation in expectations_by_id.items()
         }
         statement_ids = {statement.statement_id for statement in snapshot.statements}
         if set(expected_by_id) != statement_ids:
@@ -66,17 +90,22 @@ def main() -> int:
         return 2
     elapsed = perf_counter() - started
 
-    actual_by_id = {decision.statement_id: decision.status for decision in result.decisions}
+    decisions_by_id = {decision.statement_id: decision for decision in result.decisions}
     rows: list[tuple[str, str, str, bool]] = []
     for statement in snapshot.statements:
         accepted = expected_by_id[statement.statement_id]
-        actual = actual_by_id.get(statement.statement_id, "missing")
+        decision = decisions_by_id.get(statement.statement_id)
+        actual = decision.status if decision is not None else "missing"
+        details_match = decision is not None and _decision_matches_optional_details(
+            expectations_by_id[statement.statement_id],
+            decision,
+        )
         rows.append(
             (
                 statement.statement_id,
                 " / ".join(sorted(accepted)),
                 actual,
-                actual in accepted,
+                actual in accepted and details_match,
             )
         )
 

@@ -20,6 +20,7 @@ from prospector.deterministic.dirty_propagation import (
     can_revise_again,
     changed_statement_ids,
     dirty_statement_ids,
+    skip_stage_one_after_requirement_rewrite,
 )
 from prospector.reporting.render import render_findings, render_report_draft
 from prospector.schemas.report import ReportDraft
@@ -150,12 +151,19 @@ def test_report_verifier_writer_loop() -> None:
     revised_revision = revision + 1
 
     # ── 4. Second verification pass on the revised draft ──────────────
-    changed = changed_statement_ids(draft, revised_draft)
-    dirty = dirty_statement_ids(
-        revised_draft,
-        changed_ids=changed,
-        previous_clean_ids=set(findings.passed_statement_ids),
-    )
+    skip_stage_one = skip_stage_one_after_requirement_rewrite(findings)
+    if skip_stage_one:
+        current_ids = {item.statement_id for item in revised_draft.statements()}
+        reused = [item for item in verifier_result.decisions if item.statement_id in current_ids]
+        dirty = set()
+    else:
+        changed = changed_statement_ids(draft, revised_draft)
+        dirty = dirty_statement_ids(
+            revised_draft,
+            changed_ids=changed,
+            previous_clean_ids=set(findings.passed_statement_ids),
+        )
+        reused = []
 
     rv_snapshot_2 = repository.build_report_verifier_snapshot(
         JOB_ID,
@@ -164,12 +172,16 @@ def test_report_verifier_writer_loop() -> None:
         round_number=1,
         dirty_statement_ids=dirty,
         draft=revised_draft,
+        skip_statement_verification=skip_stage_one,
+        reused_statement_decisions=reused,
     )
 
     print(
         f"\n{'=' * 60}\n"
         f" Round 2 verification · revision={revised_revision}"
-        f" · {len(dirty)} dirty / {len(rv_snapshot_2.statements)} total statements\n"
+        f" · skip_stage_one={skip_stage_one}"
+        f" · {len(dirty)} dirty / {len(rv_snapshot_2.statements)} statements"
+        f" · {len(reused)} reused\n"
         f"{'=' * 60}"
     )
 

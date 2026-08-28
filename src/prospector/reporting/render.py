@@ -102,6 +102,9 @@ def render_report_draft(
 
     payload: dict[str, Any] = {
         "verification_status": "pending",
+        "failed_statement_ids": [],
+        "requirement_failures": [],
+        "quality_reminders": [],
         "job_id": str(snapshot.job_id),
         "draft": draft.model_dump(mode="json"),
         "statement_citations": statement_citations,
@@ -130,7 +133,7 @@ def _short_uuid(value: str | UUID) -> str:
     return f"{s[:4]}…{s[-4:]}"
 
 
-_RELATION_ICON = {"support": "↗", "contradict": "↘", "partial": "~"}
+_RELATION_ICON = {"support": "↗", "contradict": "↘", "partial": "~", "irrelevant": "–"}
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -200,6 +203,8 @@ def render_findings(
     n_passed = len(findings.passed_statement_ids)
     n_llm = len(llm_failures)
     n_cascade = len(cascade_failures)
+    n_requirements = len(findings.requirement_failures)
+    n_quality = len(findings.quality_reminders)
 
     sep = "═" * w
 
@@ -207,9 +212,28 @@ def render_findings(
         sep,
         f" Report Verifier Findings · round={findings.round} · revision={findings.revision}",
         sep,
-        f" ✓ {n_passed} passed   ✗ {n_llm} failed (LLM)   ⛓ {n_cascade} blocked (cascade)",
+        f" ✓ {n_passed} passed   ✗ {n_llm} failed (LLM)   "
+        f"⛓ {n_cascade} blocked (cascade)   ! {n_requirements} requirement failures   "
+        f"◇ {n_quality} quality reminders",
         "",
     ]
+
+    if findings.requirement_failures:
+        lines.append(f"─── 报告任务未履行 ({n_requirements} 条) {'─' * max(1, w - 22)}")
+        lines.append("")
+        for failure in findings.requirement_failures:
+            locations = failure.paragraph_ids or failure.statement_ids
+            location = ", ".join(locations) or "整份报告"
+            lines.append(f" ! [{failure.kind}/{failure.repair_scope}] ← {location}")
+            lines.append(
+                textwrap.fill(
+                    failure.reason,
+                    width=w,
+                    initial_indent="   │ ",
+                    subsequent_indent="   │ ",
+                )
+            )
+            lines.append("")
 
     # ── LLM judged failures ──
     if llm_failures:
@@ -259,6 +283,22 @@ def render_findings(
     if findings.passed_statement_ids:
         lines.append(f"─── 通过 ({n_passed} 条) {'─' * (w - 12 - len(str(n_passed)))}")
         lines.append("")
+
+    if findings.quality_reminders:
+        lines.append(f"─── 报告质量提醒 ({n_quality} 条) {'─' * max(1, w - 22)}")
+        lines.append("")
+        for reminder in findings.quality_reminders:
+            statement_ids = ", ".join(reminder.statement_ids) or "整段/整章"
+            lines.append(f" ◇ {reminder.location} [{reminder.kind}] ← {statement_ids}")
+            lines.append(
+                textwrap.fill(
+                    reminder.reason,
+                    width=w,
+                    initial_indent="   │ ",
+                    subsequent_indent="   │ ",
+                )
+            )
+            lines.append("")
         row: list[str] = []
         for sid in findings.passed_statement_ids:
             row.append(f"{sid:<8}")
