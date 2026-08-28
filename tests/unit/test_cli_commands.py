@@ -64,9 +64,6 @@ class FakeClient:
                 JobTaskView(
                     task_id=uuid4(),
                     question="核验收入",
-                    subjects=["竞品"],
-                    research_stage="scout",
-                    research_mode="factual",
                     status="done",
                     stop_reason="expected_evidence_satisfied",
                     budget={"max_worker_rounds": 24},

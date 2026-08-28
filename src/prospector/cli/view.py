@@ -17,9 +17,6 @@ from prospector.runtime.timeline import ResearchTimelineRenderer
 class ViewTask:
     task_id: UUID
     question: str
-    subjects: list[str]
-    research_stage: str
-    research_mode: str
     status: str
     stop_reason: str | None
     rounds_used: int = 0
@@ -32,9 +29,6 @@ class ViewTask:
         return cls(
             task_id=task.task_id,
             question=task.question,
-            subjects=list(task.subjects),
-            research_stage=task.research_stage,
-            research_mode=task.research_mode,
             status=task.status,
             stop_reason=task.stop_reason,
             rounds_limit=int(task.budget.get("max_worker_rounds", 0)),
@@ -123,9 +117,6 @@ class JobView:
                 self.tasks[snapshot_task.task_id] = ViewTask.from_snapshot(snapshot_task)
                 continue
             current.question = snapshot_task.question
-            current.subjects = list(snapshot_task.subjects)
-            current.research_stage = snapshot_task.research_stage
-            current.research_mode = snapshot_task.research_mode
             current.stop_reason = snapshot_task.stop_reason
             current.rounds_limit = int(
                 snapshot_task.budget.get("max_worker_rounds", current.rounds_limit)

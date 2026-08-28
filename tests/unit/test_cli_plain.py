@@ -40,9 +40,6 @@ def test_attach_plain_refreshes_tasks_and_downloads_report(
     task = JobTaskView(
         task_id=task_id,
         question="核验竞品亚太收入",
-        subjects=["竞品"],
-        research_stage="scout",
-        research_mode="factual",
         status="pending",
         stop_reason=None,
         budget={"max_worker_rounds": 24},

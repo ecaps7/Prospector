@@ -28,6 +28,7 @@ from prospector.agents.report_verifier import (
     OpenAIReportVerifier,
     ReportVerifierModel,
     ReportVerifierOutputError,
+    decisions_from_statement_checks,
 )
 from prospector.agents.report_writer import (
     OpenAIReportWriter,
@@ -39,21 +40,29 @@ from prospector.agents.research_verifier import (
     VerifierModel,
     VerifierOutputError,
 )
-from prospector.agents.research_worker import ResearchWorker
+from prospector.agents.research_worker import (
+    AUTO_FETCH_TOP_N,
+    MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
+    ResearchWorker,
+)
 from prospector.agents.usage import collect_usage
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.citation_render import render_verified_report
-from prospector.deterministic.dirty_propagation import can_revise_again, dirty_statement_ids
+from prospector.deterministic.dirty_propagation import (
+    can_revise_again,
+    dirty_statement_ids,
+    skip_stage_one_after_requirement_rewrite,
+)
 from prospector.deterministic.gates import (
     dispatch_rejection,
     finish_rejection,
-    mixed_stage_rejection,
-    stage_order_rejection,
 )
+from prospector.deterministic.report_structure import measure_report_structure
 from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
-from prospector.schemas.claims import ReportVerifierFindings
+from prospector.schemas.brief import EffortLevel
+from prospector.schemas.claims import ReportVerifierFindings, StatementDecision
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.report import ReportDraft
 from prospector.schemas.verifier import VerifierDecision
@@ -112,30 +121,28 @@ def default_research_services() -> ResearchGraphServices:
     )
 
 
-def _stage_budget_payload(limits: Any) -> dict[str, dict[str, int]]:
-    return {
-        stage: {
-            "max_concurrency": budget.max_concurrency,
-            "max_worker_rounds": budget.max_worker_rounds,
-        }
-        for stage, budget in limits.stages.items()
-    }
-
-
-def _stage_concurrency(state: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        stage: int(budget["max_concurrency"])
-        for stage, budget in dict(state["stage_budgets"]).items()
-    }
-
-
-def _research_state_message(state: Mapping[str, Any]) -> dict[str, Any]:
+def _research_state_message(
+    state: Mapping[str, Any],
+    *,
+    excerpt_count: int,
+    effort: EffortLevel,
+) -> dict[str, Any]:
     used = int(state.get("research_decisions_used", 0))
     limit = int(state["decision_round_limit"])
+    limits = limits_for_effort(effort)
+    available_decisions = ["dispatch"]
+    if excerpt_count > 0:
+        available_decisions.append("finish")
     return {
-        "current_research_stage": str(state["current_research_stage"]),
+        "available_decisions": available_decisions,
         "decision_rounds_remaining": max(0, limit - used),
-        "stage_concurrency": _stage_concurrency(state),
+        "max_tasks_per_dispatch": limits.max_concurrency,
+        "max_worker_rounds": limits.max_worker_rounds,
+        "worker_actions": ["search", "save", "finish"],
+        "worker_tools": ["web_search", "web_fetch", "save_findings"],
+        "max_parallel_tool_calls": MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
+        "search_auto_fetch_top_n": AUTO_FETCH_TOP_N,
+        "finish_allowed": excerpt_count > 0,
     }
 
 
@@ -146,29 +153,23 @@ def _initialize_node(services: ResearchGraphServices):
         brief = services.repository.get_brief(UUID(state["brief_id"]))
         services.repository.record_phase_changed(UUID(state["job_id"]), "research")
         limits = limits_for_effort(brief.effort)
-        stage_budgets = _stage_budget_payload(limits)
-        messages = initial_planner_messages(brief, limits)
+        runtime_state = {
+            "decision_round_limit": limits.decision_round_limit,
+            "research_decisions_used": 0,
+        }
+        messages = initial_planner_messages(brief)
         messages = append_runtime_feedback(
             messages,
             feedback_type="research_state",
-            payload={
-                "current_research_stage": "scout",
-                "decision_rounds_remaining": limits.decision_round_limit,
-                "stage_concurrency": {
-                    stage: budget["max_concurrency"] for stage, budget in stage_budgets.items()
-                },
-            },
+            payload=_research_state_message(runtime_state, excerpt_count=0, effort=brief.effort),
         )
         return {
             "phase": "research",
-            "current_research_stage": "scout",
             "plan_version": 0,
             "decision_round": 0,
             "research_decisions_used": 0,
             "consecutive_schema_errors": 0,
             "decision_round_limit": limits.decision_round_limit,
-            "scout_dispatched": False,
-            "stage_budgets": stage_budgets,
             "active_task_ids": [],
             "outcome": None,
             "error_code": None,
@@ -206,10 +207,12 @@ def _end_for_budget(state: ResearchState, services: ResearchGraphServices) -> di
 
 def _planner_node(services: ResearchGraphServices):
     def planner(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        effort = services.repository.get_job_effort(job_id)
+        limits = limits_for_effort(effort)
         if int(state["research_decisions_used"]) >= int(state["decision_round_limit"]):
             return _end_for_budget(state, services)
 
-        job_id = UUID(state["job_id"])
         decision_round = int(state["decision_round"]) + 1
         prompt = list(state["planner_messages"])
         stored = services.repository.get_completed_decision(job_id, decision_round, prompt)
@@ -304,7 +307,11 @@ def _planner_node(services: ResearchGraphServices):
             messages = append_runtime_feedback(
                 messages,
                 feedback_type="research_state",
-                payload=_research_state_message({**state, **next_state}),
+                payload=_research_state_message(
+                    {**state, **next_state},
+                    excerpt_count=services.repository.count_excerpts(job_id),
+                    effort=effort,
+                ),
             )
             next_state["planner_messages"] = messages
             return next_state
@@ -322,36 +329,14 @@ def _planner_node(services: ResearchGraphServices):
         messages = append_decision(prompt, decision)
 
         if decision.decision == "dispatch":
-            assert decision.dispatch is not None
-            batch_stages = [task.research_stage for task in decision.dispatch.tasks]
-            batch_stage = batch_stages[0]
-            stage_concurrency = int(state["stage_budgets"][batch_stage]["max_concurrency"])
-            # Order matters: a mixed batch has no single stage, so its concurrency ceiling
-            # is undefined until that is ruled out.
-            rejection = mixed_stage_rejection(batch_stages)
+            assert decision.tasks is not None
             feedback = ""
+            rejection = dispatch_rejection(len(decision.tasks), limits.max_concurrency)
             if rejection is not None:
                 feedback = (
-                    f"整批派发被拒绝：本轮提交的任务分属 {'、'.join(sorted(set(batch_stages)))} "
-                    "多个阶段。每批只能使用一个 research_stage。"
-                    "请先派发其中一个阶段的任务，其余留到后续轮次。"
+                    f"整批派发被拒绝：本轮提交 {len(decision.tasks)} 个任务，"
+                    f"当前每批并发上限为 {limits.max_concurrency}。请缩小本轮任务批次。"
                 )
-            if rejection is None:
-                rejection = stage_order_rejection(
-                    batch_stage, scout_dispatched=bool(state["scout_dispatched"])
-                )
-                if rejection is not None:
-                    feedback = (
-                        f"整批派发被拒绝：本任务尚未派发过任何 scout 任务，不能直接进入 "
-                        f"{batch_stage}。请先用 scout 确认研究对象、可用指标和资料来源。"
-                    )
-            if rejection is None:
-                rejection = dispatch_rejection(len(decision.dispatch.tasks), stage_concurrency)
-                if rejection is not None:
-                    feedback = (
-                        f"整批派发被拒绝：本轮提交 {len(decision.dispatch.tasks)} 个任务，"
-                        f"{batch_stage} 阶段的并发上限为 {stage_concurrency}。请缩小本轮任务批次。"
-                    )
             if rejection is not None:
                 services.repository.complete_decision(
                     job_id,
@@ -376,14 +361,12 @@ def _planner_node(services: ResearchGraphServices):
                 result: dict[str, Any] = {"route": route}
             else:
                 brief = services.repository.get_brief(UUID(state["brief_id"]))
-                tasks = [
-                    inject_task_budget(draft, brief.effort) for draft in decision.dispatch.tasks
-                ]
+                tasks = [inject_task_budget(draft, brief.effort) for draft in decision.tasks]
                 plan = services.repository.create_plan(
                     job_id,
                     decision_round,
                     tasks,
-                    reason=decision.dispatch.reason,
+                    reason=decision.reason,
                     trigger_verifier_run=(
                         UUID(state["last_verifier_run_id"])
                         if state.get("last_verifier_run_id")
@@ -392,8 +375,6 @@ def _planner_node(services: ResearchGraphServices):
                     research_decisions_used=research_decisions_used,
                 )
                 result = {
-                    "current_research_stage": batch_stage,
-                    "scout_dispatched": bool(state["scout_dispatched"]) or batch_stage == "scout",
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
                     "last_verifier_run_id": None,
@@ -403,24 +384,7 @@ def _planner_node(services: ResearchGraphServices):
                     "route": "workers",
                 }
 
-        elif decision.decision == "reflect":
-            assert decision.reflect is not None
-            services.repository.record_planner_event(
-                job_id,
-                decision_round,
-                decision,
-                {"note": decision.reflect.note.splitlines()[0]},
-                research_decisions_used=research_decisions_used,
-            )
-            messages = append_runtime_feedback(
-                messages,
-                feedback_type="reflection_recorded",
-                payload={"note_recorded": True},
-            )
-            result = {"route": "planner"}
-
         else:
-            assert decision.finish is not None
             rejection = finish_rejection(services.repository.count_excerpts(job_id))
             if rejection is not None:
                 feedback = "finish 被拒绝：当前 Job 尚无任何 Excerpt，不能空手宣布完成。"
@@ -449,7 +413,7 @@ def _planner_node(services: ResearchGraphServices):
                     job_id,
                     decision_round,
                     decision,
-                    {"reason": decision.finish.reason.splitlines()[0]},
+                    {"reason": decision.reason.splitlines()[0]},
                     research_decisions_used=research_decisions_used,
                 )
                 return {
@@ -473,7 +437,11 @@ def _planner_node(services: ResearchGraphServices):
         messages = append_runtime_feedback(
             messages,
             feedback_type="research_state",
-            payload=_research_state_message(updated_state),
+            payload=_research_state_message(
+                updated_state,
+                excerpt_count=services.repository.count_excerpts(job_id),
+                effort=effort,
+            ),
         )
         return {**counters, "planner_messages": messages, **result}
 
@@ -493,7 +461,6 @@ async def _run_one_worker_body(
         return {
             "task_id": str(task_id),
             "question": task.question,
-            "research_stage": task.research_stage,
             "status": task.status,
             "assertions": [
                 {"assertion_id": str(item.assertion_id), "text": item.statement}
@@ -531,7 +498,6 @@ async def _run_one_worker_body(
         return {
             "task_id": str(task_id),
             "question": task.question,
-            "research_stage": task.research_stage,
             "status": "done",
             "assertions": [item.model_dump(mode="json") for item in feedback.summary.items],
             "stop_reason": feedback.stop_reason,
@@ -560,7 +526,6 @@ async def _run_one_worker_body(
         return {
             "task_id": str(task_id),
             "question": task.question,
-            "research_stage": task.research_stage,
             "status": "failed",
             "assertions": [
                 {"assertion_id": str(item.assertion_id), "text": item.statement}
@@ -617,7 +582,11 @@ def _workers_node(services: ResearchGraphServices):
         messages = append_runtime_feedback(
             messages,
             feedback_type="research_state",
-            payload=_research_state_message(state),
+            payload=_research_state_message(
+                state,
+                excerpt_count=services.repository.count_excerpts(job_id),
+                effort=services.repository.get_job_effort(job_id),
+            ),
         )
         return {
             "active_task_ids": [],
@@ -764,7 +733,11 @@ def _verifier_node(services: ResearchGraphServices):
         messages = append_runtime_feedback(
             messages,
             feedback_type="research_state",
-            payload=_research_state_message(state),
+            payload=_research_state_message(
+                state,
+                excerpt_count=services.repository.count_excerpts(job_id),
+                effort=services.repository.get_job_effort(job_id),
+            ),
         )
         return {
             "phase": "research",
@@ -821,15 +794,44 @@ def _writer_node(services: ResearchGraphServices):
                     "route": "report_verifier",
                 }
 
-            # Sentence-level revision after Report Verifier findings.
-            if stored is not None and stored["report_status"] == "revising":
+            # Revision after Report Verifier findings.
+            # `revising` still points at the generated draft that must be rewritten, so
+            # the next call bumps a new revision. Once that revision exists, status is
+            # `writing` and the current row is `prompted`; an interrupt in that window
+            # must replay the same revision prompt against the previous draft. Treating
+            # it as a first write rebuilds a different prompt and the idempotent gate
+            # refuses to resume.
+            rewrite_in_progress = (
+                stored is not None
+                and stored["report_status"] == "writing"
+                and stored["revision_status"] == "prompted"
+                and int(stored["revision"]) > 1
+            )
+            if stored is not None and (
+                stored["report_status"] == "revising" or rewrite_in_progress
+            ):
                 from prospector.agents.prompts.report_writer import (
                     report_writer_revision_messages,
                 )
 
                 report_id = UUID(str(stored["report_id"]))
-                draft = stored["draft"]
-                assert isinstance(draft, ReportDraft)
+                if rewrite_in_progress:
+                    previous = services.repository.get_report_revision(
+                        job_id, revision=int(stored["revision"]) - 1
+                    )
+                    if (
+                        previous is None
+                        or previous["revision_status"] != "generated"
+                        or not isinstance(previous["draft"], ReportDraft)
+                    ):
+                        raise RuntimeError("Rewrite replay is missing the previous generated draft")
+                    draft = previous["draft"]
+                    bump = False
+                else:
+                    draft = stored["draft"]
+                    if not isinstance(draft, ReportDraft):
+                        raise RuntimeError("Revision requested without a generated draft")
+                    bump = True
                 latest = services.repository.get_latest_report_verifier_run(report_id)
                 if latest is None or latest["status"] != "completed" or latest["findings"] is None:
                     raise RuntimeError("Revision requested without completed findings")
@@ -839,7 +841,7 @@ def _writer_node(services: ResearchGraphServices):
                     job_id,
                     verifier_run_id,
                     full_prompt,
-                    bump=True,
+                    bump=bump,
                 )
                 pending_revision = (report_id, revision)
                 with (
@@ -964,6 +966,31 @@ def _post_verify_status(findings: ReportVerifierFindings, revision: int) -> str:
     return "revising"
 
 
+def _stage_two_only_revision(
+    services: ResearchGraphServices,
+    report_id: UUID,
+    *,
+    revision: int,
+    draft: ReportDraft,
+) -> tuple[bool, list[StatementDecision]]:
+    """Reuse prior sentence decisions when this revision exists only to fix stage two."""
+    prior = services.repository.get_prior_completed_report_verifier_run(
+        report_id,
+        before_revision=revision,
+    )
+    if prior is None or prior["findings"] is None:
+        return False, []
+    if not skip_stage_one_after_requirement_rewrite(prior["findings"]):
+        return False, []
+    current_ids = {item.statement_id for item in draft.statements()}
+    reused = [
+        decision
+        for decision in decisions_from_statement_checks(prior.get("statement_checks"))
+        if decision.statement_id in current_ids
+    ]
+    return True, reused
+
+
 def _report_verifier_node(services: ResearchGraphServices):
     def report_verifier(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
@@ -1024,9 +1051,15 @@ def _report_verifier_node(services: ResearchGraphServices):
             }
 
         round_number = 1
-        # Each revision is verified in full. Incremental dirty propagation is used
-        # inside unit tests and can be wired for same-revision multi-round later.
-        dirty = dirty_statement_ids(draft)
+        skip_stage_one, reused_decisions = _stage_two_only_revision(
+            services,
+            report_id,
+            revision=revision,
+            draft=draft,
+        )
+        # Sentence-level revisions still verify every statement. A rewrite that only
+        # answers stage-two findings reuses the previous sentence decisions.
+        dirty = set() if skip_stage_one else dirty_statement_ids(draft)
 
         run = services.repository.get_report_verifier_run(
             report_id, revision=revision, round_number=round_number
@@ -1054,6 +1087,17 @@ def _report_verifier_node(services: ResearchGraphServices):
                         round_number=round_number,
                         dirty_statement_ids=dirty,
                         draft=draft,
+                        skip_statement_verification=skip_stage_one,
+                        reused_statement_decisions=reused_decisions,
+                    )
+                    log.info(
+                        "report_verifier.started",
+                        job_id=str(job_id),
+                        revision=revision,
+                        round=round_number,
+                        statements=len(rv_snapshot.statements),
+                        skip_stage_one=skip_stage_one,
+                        reused=len(reused_decisions),
                     )
                     with (
                         tracer.start_as_current_span(
@@ -1102,7 +1146,17 @@ def _report_verifier_node(services: ResearchGraphServices):
                     run_id,
                     findings=findings,
                     statement_checks=[
-                        decision.model_dump(mode="json") for decision in result.decisions
+                        *(decision.model_dump(mode="json") for decision in result.decisions),
+                        {
+                            "kind": "report_quality",
+                            "requirement_failures": [
+                                item.model_dump(mode="json")
+                                for item in findings.requirement_failures
+                            ],
+                            "reminders": [
+                                item.model_dump(mode="json") for item in findings.quality_reminders
+                            ],
+                        },
                     ],
                     decisions=result.decisions,
                     draft=draft,
@@ -1162,10 +1216,18 @@ def _render_node(services: ResearchGraphServices):
         citation_map = services.repository.get_verified_citation_map(report_id, revision=revision)
         latest = services.repository.get_latest_report_verifier_run(report_id)
         failed_ids: list[str] = []
+        requirement_failures: list[dict[str, Any]] = []
+        quality_reminders: list[dict[str, Any]] = []
         verification_status: str = "verified"
         if latest is not None and latest["findings"] is not None:
             failed_ids = [item.statement_id for item in latest["findings"].failures]
-            verification_status = "partial" if failed_ids else "verified"
+            requirement_failures = [
+                item.model_dump(mode="json") for item in latest["findings"].requirement_failures
+            ]
+            quality_reminders = [
+                item.model_dump(mode="json") for item in latest["findings"].quality_reminders
+            ]
+            verification_status = "partial" if failed_ids or requirement_failures else "verified"
 
         try:
             rendered = render_verified_report(
@@ -1174,6 +1236,8 @@ def _render_node(services: ResearchGraphServices):
                 citation_map=citation_map,
                 verification_status=verification_status,  # type: ignore[arg-type]
                 failed_statement_ids=failed_ids,
+                requirement_failures=requirement_failures,
+                quality_reminders=quality_reminders,
             )
             base_key = workspace_key(
                 services.repository.settings.workspace_id,
@@ -1193,6 +1257,9 @@ def _render_node(services: ResearchGraphServices):
                 json_bytes,
                 content_type="application/json; charset=utf-8",
             )
+            structure = measure_report_structure(draft).as_payload()
+            structure["requirement_failures"] = requirement_failures
+            structure["quality_reminders"] = quality_reminders
             services.repository.complete_report_render(
                 job_id,
                 report_id,
@@ -1201,6 +1268,7 @@ def _render_node(services: ResearchGraphServices):
                 json_ref=json_ref.as_uri(),
                 json_hash="sha256:" + hashlib.sha256(json_bytes).hexdigest(),
                 verification_status=verification_status,
+                structure=structure,
             )
         except Exception as exc:
             services.repository.set_research_outcome(

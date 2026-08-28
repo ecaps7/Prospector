@@ -364,14 +364,12 @@ def job_status(
         console.print(Panel(summary, title="Job 状态"))
 
         tasks = Table(title="任务", box=None)
-        for column in ("task_id", "问题", "阶段", "模式", "状态", "工具调用"):
+        for column in ("task_id", "问题", "状态", "工具调用"):
             tasks.add_column(column)
         for task in detail.tasks:
             tasks.add_row(
                 str(task.task_id),
                 task.question,
-                task.research_stage,
-                task.research_mode,
                 task.status,
                 str(task.tool_calls_used),
             )

@@ -108,9 +108,6 @@ class JobListItem(BaseModel):
 class JobTaskView(BaseModel):
     task_id: UUID
     question: str
-    subjects: list[str]
-    research_stage: str
-    research_mode: str
     status: TaskStatus
     stop_reason: str | None
     budget: dict[str, Any]

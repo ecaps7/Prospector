@@ -109,20 +109,6 @@ class TimelineRepository(TimelineRenderRepository, Protocol):
     def list_events_after(self, job_id: UUID, after_id: int) -> list[dict[str, Any]]: ...
 
 
-_STAGE_LABELS = {
-    "scout": "探索",
-    "deep_dive": "深挖",
-    "verify": "核验",
-}
-
-_MODE_LABELS = {
-    "factual": "事实核验",
-    "comparison": "对比",
-    "counterargument": "反证",
-    "risk_scan": "风险扫描",
-    "timeline": "时间线",
-}
-
 _STOP_REASON_LABELS = {
     "expected_evidence_satisfied": "证据目标满足",
     "budget_exhausted": "工具预算耗尽",  # legacy rows only; new runs use rounds
@@ -135,9 +121,6 @@ _STOP_REASON_LABELS = {
 
 _REJECTION_LABELS = {
     "over_concurrency": "派发任务超过并发上限",
-    "over_scope": "单任务申报对象超出工具预算可覆盖范围",
-    "mixed_stage": "同一批任务混用了多个 research_stage",
-    "stage_order": "尚未做过 scout 就直接进入深入阶段",
     "schema_error": "输出格式不合法",
     "empty_finish": "尚无证据，不能结束研究",
 }
@@ -248,7 +231,20 @@ class ResearchTimelineRenderer:
             ]
 
         if event_type == "report.draft_rendered":
-            return ["[成文] 报告已渲染：" + str(payload.get("markdown_ref") or "")]
+            lines = ["[成文] 报告已渲染：" + str(payload.get("markdown_ref") or "")]
+            structure = payload.get("structure") or {}
+            if structure:
+                lines.append(
+                    "[成文] 正文结构：事实句 {evidence} / 推理句 {derived}"
+                    "，最长连续事实句 {run}，无判断段落 {bare}/{paragraphs}".format(
+                        evidence=structure.get("evidence_count", 0),
+                        derived=structure.get("derived_count", 0),
+                        run=structure.get("longest_evidence_run", 0),
+                        bare=structure.get("paragraphs_without_derived", 0),
+                        paragraphs=structure.get("paragraph_count", 0),
+                    )
+                )
+            return lines
 
         task_id = payload.get("task_id") or event.get("task_id")
         if task_id is None:
@@ -256,18 +252,9 @@ class ResearchTimelineRenderer:
         task_label = self._task_label(task_id)
 
         if event_type == "task.started":
-            stage = _STAGE_LABELS.get(str(payload.get("research_stage")), "未知")
-            mode = _MODE_LABELS.get(
-                str(payload.get("research_mode")), str(payload.get("research_mode") or "未知")
-            )
             budget = dict(payload.get("budget") or {})
             round_limit = int(budget.get("max_worker_rounds", 0))
-            subjects = list(payload.get("subjects") or [])
-            subjects_hint = f" · 对象：{'、'.join(subjects)}" if subjects else ""
-            return [
-                f"[{task_label}] 开始：{stage}阶段 / {mode}"
-                f"（Worker 决策轮预算 {round_limit} 轮）{subjects_hint}"
-            ]
+            return [f"[{task_label}] 开始调查（Worker 决策轮预算 {round_limit} 轮）"]
 
         if event_type == "task.tool_used":
             return self._render_tool_event(task_label, payload)
@@ -361,12 +348,12 @@ class ResearchTimelineRenderer:
             kind = _GAP_KIND_LABELS.get(str(item.get("kind") or ""), str(item.get("kind") or ""))
             description = _first_line(item.get("description"))
             lines.append(f"  {branch} {severity}·{kind}：{description}")
-            recommendation = _first_line(item.get("recommended_research"))
-            if recommendation:
+            evidence_needed = _first_line(item.get("evidence_needed"))
+            if evidence_needed:
                 if index == len(gap_summaries) - 1:
-                    lines.append(f"        建议：{recommendation}")
+                    lines.append(f"        待补证据：{evidence_needed}")
                 else:
-                    lines.append(f"  │     建议：{recommendation}")
+                    lines.append(f"  │     待补证据：{evidence_needed}")
         return lines
 
     @staticmethod
@@ -397,7 +384,7 @@ class ResearchTimelineRenderer:
         if phase == "writing":
             return ["[成文] Writer 正在组织深度研究报告"]
         if phase == "verifying":
-            return ["[成文] Report Verifier 正在逐句验证"]
+            return ["[核验] Report Verifier 正在逐句验证"]
         if phase == "revising":
             return ["[成文] 存在未通过语句，Writer 正在修订"]
         if phase == "verified":
@@ -438,8 +425,6 @@ class ResearchTimelineRenderer:
                 branch = "└─" if index == len(task_ids) - 1 else "├─"
                 lines.append(f"  {branch} {label} {_first_line(task.question)}")
             return lines
-        if decision == "reflect":
-            return [f"[轮 {decision_round}] Planner reflect：{_first_line(payload.get('note'))}"]
         if decision == "finish":
             return [f"[轮 {decision_round}] Planner finish：{_first_line(payload.get('reason'))}"]
         return []

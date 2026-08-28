@@ -17,12 +17,11 @@ from prospector.deterministic.gates import (
     PlannerRejection,
     dispatch_rejection,
     finish_rejection,
-    mixed_stage_rejection,
-    stage_order_rejection,
 )
+from prospector.flow.research_graph import _research_state_message
 from prospector.schemas.brief import ResearchBrief, UserConstraints
 from prospector.schemas.decisions import PlannerDecision
-from prospector.schemas.plan import ResearchTaskDraft, SourcePolicy
+from prospector.schemas.plan import ResearchTaskDraft
 from prospector.tools.save_findings import SaveFindingsArguments
 from prospector.tools.web_search import ExaClient
 
@@ -40,54 +39,42 @@ class RecordingExaClient(ExaClient):
 def _draft() -> ResearchTaskDraft:
     return ResearchTaskDraft(
         question="检验目标公司在不同年份的公开扩张信号，并寻找相反证据与口径差异。",
-        subjects=["目标公司"],
-        research_stage="verify",
-        research_mode="counterargument",
-        source_policy=SourcePolicy(preferred_tiers=["official", "industry"]),
         expected_evidence="有时间与口径的直接证据及至少一条相反信号",
     )
 
 
-def test_planner_decision_is_exactly_one_of_three() -> None:
+def test_planner_decision_is_exactly_one_of_two() -> None:
     valid = PlannerDecision.model_validate(
         {
             "decision": "dispatch",
-            "dispatch": {"tasks": [_draft().model_dump()], "reason": "先查直接信号"},
+            "tasks": [_draft().model_dump()],
+            "reason": "先查直接信号",
         }
     )
-    assert valid.dispatch is not None
+    assert valid.tasks is not None
 
     with pytest.raises(ValidationError):
         PlannerDecision.model_validate(
             {
                 "decision": "finish",
-                "finish": {"reason": "完成"},
-                "reflect": {"note": "同时反思"},
+                "reason": "完成",
+                "tasks": [_draft().model_dump()],
             }
         )
 
 
-def test_mixed_stage_batch_parses_and_is_rejected_by_the_runtime_gate() -> None:
-    """A mixed batch is a planning error, so it must survive parsing and be gated.
-
-    Rejecting it in the schema would classify it as a formatting failure, which the
-    runtime retries for free instead of charging to the research budget.
-    """
+def test_dispatch_tasks_contain_only_the_worker_contract() -> None:
     decision = PlannerDecision.model_validate(
         {
             "decision": "dispatch",
-            "dispatch": {
-                "tasks": [
-                    {**_draft().model_dump(), "research_stage": "scout"},
-                    {**_draft().model_dump(), "research_stage": "deep_dive"},
-                ],
-                "reason": "同时摸底和深挖",
-            },
+            "tasks": [_draft().model_dump(), _draft().model_dump()],
+            "reason": "并行确认两个证据问题",
         }
     )
-    assert decision.dispatch is not None
-    stages = [task.research_stage for task in decision.dispatch.tasks]
-    assert mixed_stage_rejection(stages) == PlannerRejection.MIXED_STAGE
+    assert decision.tasks is not None
+    assert all(
+        set(task.model_dump()) == {"question", "expected_evidence"} for task in decision.tasks
+    )
 
 
 def test_planner_cannot_author_runtime_budget() -> None:
@@ -96,27 +83,20 @@ def test_planner_cannot_author_runtime_budget() -> None:
     assert "task_id" not in schema["properties"]
 
     task = inject_task_budget(_draft(), "standard")
-    assert task.budget.max_worker_rounds == 18
+    assert task.budget.max_worker_rounds == 48
     assert task.allowed_tools == ["web_search", "web_fetch", "save_findings"]
 
 
-def test_task_budget_is_stage_differentiated() -> None:
-    scout = ResearchTaskDraft(
+def test_task_budget_depends_only_on_effort() -> None:
+    another = ResearchTaskDraft(
         question="确认候选城市中最后一公里接驳的官方指标口径是否公开可得。",
-        subjects=["东京", "新加坡", "深圳"],
-        research_stage="scout",
-        research_mode="factual",
         expected_evidence="每个候选城市的指标口径存在性与来源确认",
     )
-    scout_task = inject_task_budget(scout, "standard")
-    deep_task = inject_task_budget(
-        ResearchTaskDraft(**{**_draft().model_dump(), "research_stage": "deep_dive"}),
-        "standard",
-    )
+    first = inject_task_budget(another, "standard")
+    second = inject_task_budget(_draft(), "standard")
 
-    assert scout_task.budget.max_worker_rounds == 24
-    assert deep_task.budget.max_worker_rounds == 64
-    assert scout_task.budget.max_worker_rounds < deep_task.budget.max_worker_rounds
+    assert first.budget.max_worker_rounds == 48
+    assert second.budget.max_worker_rounds == 48
 
 
 def test_worker_rounds_are_the_only_task_budget() -> None:
@@ -127,52 +107,51 @@ def test_worker_rounds_are_the_only_task_budget() -> None:
     assert set(task.budget.model_dump()) == {"max_worker_rounds"}
 
 
-def test_subjects_granularity_is_schema_enforced() -> None:
-    base = _draft().model_dump()
-
-    with pytest.raises(ValidationError, match="exactly one subject"):
-        ResearchTaskDraft.model_validate({**base, "subjects": ["东京", "新加坡"]})
-
-    with pytest.raises(ValidationError):
-        ResearchTaskDraft.model_validate({**base, "subjects": []})
-
-    scout = ResearchTaskDraft.model_validate(
-        {
-            **base,
-            "research_stage": "scout",
-            "subjects": ["东京", "新加坡", "  东京  "],
-        }
-    )
-    assert scout.subjects == ["东京", "新加坡"]
+def test_planner_task_contains_only_worker_question_and_evidence_goal() -> None:
+    schema = ResearchTaskDraft.model_json_schema()
+    assert set(schema["properties"]) == {"question", "expected_evidence"}
+    assert set(schema["required"]) == {"question", "expected_evidence"}
 
     with pytest.raises(ValidationError):
-        ResearchTaskDraft.model_validate(
-            {**base, "research_stage": "scout", "subjects": [f"城市{i}" for i in range(7)]}
+        ResearchTaskDraft.model_validate({**_draft().model_dump(), "research_mode": "factual"})
+
+
+def test_dispatch_rejects_removed_research_stage_field() -> None:
+    base = {
+        "decision": "dispatch",
+        "tasks": [_draft().model_dump()],
+        "reason": "继续研究",
+    }
+    assert PlannerDecision.model_validate(base).decision == "dispatch"
+    with pytest.raises(ValidationError):
+        PlannerDecision.model_validate({**base, "research_stage": "scout"})
+
+
+def test_dispatch_requires_at_least_one_task_and_finish_omits_dispatch_fields() -> None:
+    with pytest.raises(ValidationError):
+        PlannerDecision.model_validate(
+            {
+                "decision": "dispatch",
+                "tasks": [],
+                "reason": "开始研究",
+            }
         )
 
-
-def test_research_stage_is_required_and_excludes_synthesis() -> None:
-    schema = ResearchTaskDraft.model_json_schema()
-    assert "completion_criteria" not in schema["properties"]
-    assert "research_stage" in schema["required"]
-    assert schema["properties"]["research_stage"]["enum"] == [
-        "scout",
-        "deep_dive",
-        "verify",
-    ]
-
-    with pytest.raises(ValidationError):
-        ResearchTaskDraft.model_validate({**_draft().model_dump(), "research_stage": "synthesize"})
+    finish = PlannerDecision.model_validate({"decision": "finish", "reason": "证据已充分"})
+    assert finish.model_dump(exclude_none=True) == {
+        "decision": "finish",
+        "reason": "证据已充分",
+    }
 
 
-def test_planner_prompt_requires_bounded_stages_without_rigid_evidence_counts() -> None:
+def test_planner_prompt_expresses_strategy_without_stage_labels() -> None:
     brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
-    messages = initial_planner_messages(brief, limits_for_effort("standard"))
+    messages = initial_planner_messages(brief)
     system_prompt = str(messages[0]["content"])
 
-    assert "scout" in system_prompt
-    assert "deep_dive" in system_prompt
-    assert "verify" in system_prompt
+    assert "研究策略" in system_prompt
+    assert "scout" not in system_prompt
+    assert "deep_dive" not in system_prompt
     assert "completion_criteria" not in system_prompt
 
 
@@ -191,7 +170,7 @@ def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> 
             exclusions=["不涉及监管政策"],
         ),
     )
-    message = str(initial_planner_messages(brief, limits_for_effort("standard"))[1]["content"])
+    message = str(initial_planner_messages(brief)[1]["content"])
 
     assert "不可协商" in message
     assert "近三年" in message
@@ -202,7 +181,7 @@ def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> 
     assert binding < suggestions < message.index("研究一个具体问题")
 
     bare = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
-    bare_message = str(initial_planner_messages(bare, limits_for_effort("standard"))[1]["content"])
+    bare_message = str(initial_planner_messages(bare)[1]["content"])
     assert "不可协商" not in bare_message
     assert "没有提出额外限制" in bare_message
 
@@ -222,32 +201,46 @@ def test_worker_receives_source_rules_and_exclusions_directly() -> None:
     assert worker_constraints_message(UserConstraints(deliverable_rules=["附带图表"])) is None
 
 
-def test_effort_maps_round_limit_and_stage_budgets() -> None:
-    assert limits_for_effort("quick").decision_round_limit == 8
-    assert limits_for_effort("standard").decision_round_limit == 12
-    assert limits_for_effort("deep").decision_round_limit == 24
+def test_effort_maps_to_flat_research_limits() -> None:
+    quick = limits_for_effort("quick")
+    standard = limits_for_effort("standard")
+    deep = limits_for_effort("deep")
 
-    for effort in ("quick", "standard", "deep"):
-        stages = limits_for_effort(effort).stages  # type: ignore[arg-type]
-        assert set(stages) == {"scout", "deep_dive", "verify"}
-        scout, deep_dive = stages["scout"], stages["deep_dive"]
-        # scout is cheap-and-wide, deep_dive is expensive-and-narrow.
-        assert scout.max_concurrency > deep_dive.max_concurrency
-        assert scout.max_worker_rounds < deep_dive.max_worker_rounds
+    assert (quick.decision_round_limit, quick.max_concurrency, quick.max_worker_rounds) == (
+        8,
+        6,
+        24,
+    )
+    assert (
+        standard.decision_round_limit,
+        standard.max_concurrency,
+        standard.max_worker_rounds,
+    ) == (12, 5, 48)
+    assert (deep.decision_round_limit, deep.max_concurrency, deep.max_worker_rounds) == (
+        24,
+        6,
+        72,
+    )
 
-    standard = limits_for_effort("standard").stages
-    assert (
-        standard["scout"].max_concurrency,
-        standard["scout"].max_worker_rounds,
-    ) == (6, 24)
-    assert (
-        standard["deep_dive"].max_concurrency,
-        standard["deep_dive"].max_worker_rounds,
-    ) == (3, 64)
-    assert (
-        standard["verify"].max_concurrency,
-        standard["verify"].max_worker_rounds,
-    ) == (3, 18)
+
+def test_planner_receives_concrete_runtime_capabilities() -> None:
+    payload = _research_state_message(
+        {"decision_round_limit": 12, "research_decisions_used": 1},
+        excerpt_count=2,
+        effort="standard",
+    )
+
+    assert payload == {
+        "available_decisions": ["dispatch", "finish"],
+        "decision_rounds_remaining": 11,
+        "max_tasks_per_dispatch": 5,
+        "max_worker_rounds": 48,
+        "worker_actions": ["search", "save", "finish"],
+        "worker_tools": ["web_search", "web_fetch", "save_findings"],
+        "max_parallel_tool_calls": 8,
+        "search_auto_fetch_top_n": 2,
+        "finish_allowed": True,
+    }
 
 
 def test_hard_gates_are_deterministic() -> None:
@@ -255,16 +248,6 @@ def test_hard_gates_are_deterministic() -> None:
     assert dispatch_rejection(3, 3) is None
     assert finish_rejection(0) == PlannerRejection.EMPTY_FINISH
     assert finish_rejection(1) is None
-
-    assert mixed_stage_rejection(["scout", "scout"]) is None
-    assert mixed_stage_rejection(["scout", "deep_dive"]) == PlannerRejection.MIXED_STAGE
-
-    assert stage_order_rejection("scout", scout_dispatched=False) is None
-    assert stage_order_rejection("deep_dive", scout_dispatched=True) is None
-    assert stage_order_rejection("deep_dive", scout_dispatched=False) == (
-        PlannerRejection.STAGE_ORDER
-    )
-    assert stage_order_rejection("verify", scout_dispatched=False) == PlannerRejection.STAGE_ORDER
 
     counter = InformationGainCounter()
     assert counter.record_save(0) is False
@@ -346,7 +329,7 @@ async def test_exa_contents_always_requests_task_highlights() -> None:
 
 def test_planner_thread_admission_rejects_worker_trace_and_document_content() -> None:
     brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
-    messages = initial_planner_messages(brief, limits_for_effort("standard"))
+    messages = initial_planner_messages(brief)
     accepted = append_runtime_feedback(
         messages,
         feedback_type="worker_projection",

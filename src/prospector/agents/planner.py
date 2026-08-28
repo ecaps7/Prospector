@@ -20,7 +20,6 @@ from prospector.agents.llm import (
 from prospector.agents.prompts.planner import planner_brief_message, planner_system_prompt
 from prospector.agents.streaming import stream_text
 from prospector.agents.usage import record_response_usage
-from prospector.deterministic.budget import ResearchLimits
 from prospector.schemas.brief import ResearchBrief
 from prospector.schemas.decisions import PlannerDecision
 
@@ -53,11 +52,10 @@ class PlannerOutputError(ValueError):
 
 def initial_planner_messages(
     brief: ResearchBrief,
-    limits: ResearchLimits,
 ) -> list[PlannerMessage]:
     return [
         {"role": "system", "content": planner_system_prompt()},
-        {"role": "user", "content": planner_brief_message(brief, limits)},
+        {"role": "user", "content": planner_brief_message(brief)},
     ]
 
 
@@ -83,12 +81,7 @@ def append_decision(
 ) -> list[PlannerMessage]:
     updated = copy.deepcopy(messages)
     if isinstance(decision_or_raw, PlannerDecision):
-        selected = getattr(decision_or_raw, decision_or_raw.decision)
-        assert selected is not None
-        payload: object = {
-            "decision": decision_or_raw.decision,
-            decision_or_raw.decision: selected.model_dump(mode="json"),
-        }
+        payload: object = decision_or_raw.model_dump(mode="json", exclude_none=True)
     else:
         payload = decision_or_raw
     updated.append(
@@ -109,7 +102,6 @@ def append_runtime_feedback(
         "schema_error",
         "verifier_gap",
         "research_state",
-        "reflection_recorded",
     }
     if feedback_type not in allowed:
         raise ValueError(f"planner thread rejects feedback type: {feedback_type}")

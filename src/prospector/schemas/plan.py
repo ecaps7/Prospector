@@ -6,24 +6,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ResearchMode = Literal["factual", "comparison", "counterargument", "risk_scan", "timeline"]
-ResearchStage = Literal["scout", "deep_dive", "verify"]
 TaskStatus = Literal["pending", "running", "done", "failed", "skipped", "cancelled"]
 AllowedTool = Literal["web_search", "web_fetch", "save_findings"]
-
-
-class SourcePolicy(BaseModel):
-    """Optional source preferences; source type and research posture stay orthogonal."""
-
-    preferred_tiers: list[str] = Field(default_factory=list, max_length=8)
-
-    @field_validator("preferred_tiers")
-    @classmethod
-    def _clean_tiers(cls, values: list[str]) -> list[str]:
-        cleaned = [value.strip() for value in values if value.strip()]
-        return list(dict.fromkeys(cleaned))
 
 
 class TaskBudget(BaseModel):
@@ -34,26 +20,20 @@ class TaskBudget(BaseModel):
 
 
 class ResearchTaskDraft(BaseModel):
-    """Planner-authored task fields. Runtime-owned fields are intentionally absent."""
+    """Planner-authored task content. Runtime owns execution shape and budget."""
+
+    model_config = ConfigDict(extra="forbid")
 
     question: str = Field(
         ...,
-        min_length=20,
-        description="A self-contained paragraph describing the research subproblem",
+        min_length=1,
+        description="Self-contained research question handed to one Worker",
     )
-    subjects: list[str] = Field(
+    expected_evidence: str = Field(
         ...,
         min_length=1,
-        max_length=6,
-        description=(
-            "Declared research subjects; scout may list one bounded candidate set, "
-            "deep_dive/verify must declare exactly one subject"
-        ),
+        description="Evidence state that means the task is complete",
     )
-    research_stage: ResearchStage
-    research_mode: ResearchMode
-    source_policy: SourcePolicy = Field(default_factory=SourcePolicy)
-    expected_evidence: str = Field(..., min_length=8)
 
     @field_validator("question", "expected_evidence")
     @classmethod
@@ -62,23 +42,6 @@ class ResearchTaskDraft(BaseModel):
         if not text:
             raise ValueError("must not be blank")
         return text
-
-    @field_validator("subjects")
-    @classmethod
-    def _clean_subjects(cls, values: list[str]) -> list[str]:
-        cleaned = [value.strip() for value in values if value.strip()]
-        if not cleaned:
-            raise ValueError("subjects must contain at least one non-blank subject")
-        return list(dict.fromkeys(cleaned))
-
-    @model_validator(mode="after")
-    def _stage_bounds_subjects(self) -> ResearchTaskDraft:
-        if self.research_stage != "scout" and len(self.subjects) != 1:
-            raise ValueError(
-                f"{self.research_stage} task must declare exactly one subject; "
-                f"got {len(self.subjects)} — split into one task per subject"
-            )
-        return self
 
 
 class ResearchTask(ResearchTaskDraft):

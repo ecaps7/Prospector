@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 from prospector.agents.llm import LlmNotConfiguredError, require_llm_settings
-from prospector.agents.planner import OpenAIPlannerModel, initial_planner_messages
+from prospector.agents.planner import (
+    OpenAIPlannerModel,
+    append_runtime_feedback,
+    initial_planner_messages,
+)
 from prospector.config import clear_settings_cache, get_settings
 from prospector.deterministic.budget import ResearchLimits, limits_for_effort
 from prospector.schemas.brief import ResearchBrief
@@ -91,7 +95,22 @@ def test_planner_dispatch_from_brief() -> None:
     limits: ResearchLimits = limits_for_effort(BRIEF.effort)
     model = OpenAIPlannerModel()
 
-    messages = initial_planner_messages(BRIEF, limits)
+    messages = initial_planner_messages(BRIEF)
+    messages = append_runtime_feedback(
+        messages,
+        feedback_type="research_state",
+        payload={
+            "available_decisions": ["dispatch"],
+            "decision_rounds_remaining": limits.decision_round_limit,
+            "max_tasks_per_dispatch": limits.max_concurrency,
+            "max_worker_rounds": limits.max_worker_rounds,
+            "worker_actions": ["search", "save", "finish"],
+            "worker_tools": ["web_search", "web_fetch", "save_findings"],
+            "max_parallel_tool_calls": 8,
+            "search_auto_fetch_top_n": 2,
+            "finish_allowed": False,
+        },
+    )
 
     _print_divider("Planner 输入")
     print(f"Brief question : {BRIEF.question}")
@@ -99,8 +118,7 @@ def test_planner_dispatch_from_brief() -> None:
     print(f"Brief language : {BRIEF.language}")
     print(f"Brief 正文     :\n{BRIEF.brief_text}")
     print(f"\n运行时预算: 决策轮上限={limits.decision_round_limit}")
-    for stage, budget in limits.stages.items():
-        print(f"  {stage}: 并发={budget.max_concurrency}, 决策轮={budget.max_worker_rounds}")
+    print(f"  并发={limits.max_concurrency}, Worker 决策轮={limits.max_worker_rounds}")
 
     result = model.decide(messages)
     decision = result.decision
@@ -109,28 +127,17 @@ def test_planner_dispatch_from_brief() -> None:
     print(f"decision 类型: {decision.decision}")
 
     if decision.decision == "dispatch":
-        dispatch = decision.dispatch
-        assert dispatch is not None
-        print(f"取舍理由 (reason):\n{dispatch.reason}")
-        print(f"\n共派发 {len(dispatch.tasks)} 个 worker 任务:\n")
-        for idx, task in enumerate(dispatch.tasks, start=1):
+        assert decision.tasks is not None
+        print(f"取舍理由 (reason):\n{decision.reason}")
+        print(f"\n共派发 {len(decision.tasks)} 个 worker 任务:\n")
+        for idx, task in enumerate(decision.tasks, start=1):
             print(f"--- Task {idx} ---")
-            print(f"  subjects            : {task.subjects}")
-            print(f"  research_stage      : {task.research_stage}")
-            print(f"  research_mode       : {task.research_mode}")
             print(f"  question            : {task.question}")
             print(f"  expected_evidence   : {task.expected_evidence}")
-            if task.source_policy.preferred_tiers:
-                print(f"  source_policy.tiers : {task.source_policy.preferred_tiers}")
             print()
 
-    elif decision.decision == "reflect":
-        assert decision.reflect is not None
-        print(f"Planner 选择反思，不派发任务:\n{decision.reflect.note}")
-
     elif decision.decision == "finish":
-        assert decision.finish is not None
-        print(f"Planner 选择结束研究:\n{decision.finish.reason}")
+        print(f"Planner 选择结束研究:\n{decision.reason}")
 
     # 打印完整 JSON 输出，方便调试
     _print_divider("完整 PlannerDecision JSON")

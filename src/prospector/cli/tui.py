@@ -305,12 +305,7 @@ def _footer(notice: str | None) -> Text:
 
 def _concurrency_limit(view: JobView) -> int:
     limits = limits_for_effort(view.effort)  # type: ignore[arg-type]
-    running_stages = {
-        task.research_stage for task in view.tasks.values() if task.status == "running"
-    }
-    if running_stages:
-        return max(limits.stages[stage].max_concurrency for stage in running_stages)  # type: ignore[index]
-    return max(stage.max_concurrency for stage in limits.stages.values())
+    return limits.max_concurrency
 
 
 def _bar(value: int, limit: int, width: int) -> str:

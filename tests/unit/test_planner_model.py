@@ -61,39 +61,31 @@ def _model(client: _FakeClient) -> OpenAIPlannerModel:
 def _dispatch_payload() -> dict[str, object]:
     return {
         "decision": "dispatch",
-        "dispatch": {
-            "tasks": [
-                {
-                    "question": "核验一个明确研究对象的单一证据问题，并说明不研究的范围。",
-                    "subjects": ["东京"],
-                    "research_stage": "scout",
-                    "research_mode": "factual",
-                    "expected_evidence": "获得直接证据并能判断目标是否满足。",
-                }
-            ],
-            "reason": "继续关闭关键证据缺口",
-        },
+        "tasks": [
+            {
+                "question": "核验一个明确研究对象的证据问题。",
+                "expected_evidence": "获得直接证据并能判断目标是否满足。",
+            }
+        ],
+        "reason": "继续关闭关键证据缺口",
     }
 
 
 @pytest.mark.parametrize(
-    ("payload", "decision_type", "payload_field"),
+    ("payload", "decision_type"),
     [
-        (_dispatch_payload(), "dispatch", "dispatch"),
-        ({"decision": "reflect", "reflect": {"note": "先统一比较口径"}}, "reflect", "reflect"),
-        ({"decision": "finish", "finish": {"reason": "现有证据已经充分"}}, "finish", "finish"),
+        (_dispatch_payload(), "dispatch"),
+        ({"decision": "finish", "reason": "现有证据已经充分"}, "finish"),
     ],
 )
 def test_planner_parses_streamed_json_decision(
     payload: dict[str, object],
     decision_type: str,
-    payload_field: str,
 ) -> None:
     client = _FakeClient(json.dumps(payload, ensure_ascii=False))
     result = _model(client).decide([])
 
     assert result.decision.decision == decision_type
-    assert getattr(result.decision, payload_field) is not None
 
     (request,) = client.completions.requests
     assert request["stream"] is True
@@ -157,11 +149,16 @@ def test_planner_rejects_empty_content() -> None:
         _model(client).decide([])
 
 
-def test_planner_rejects_multiple_payloads_even_after_repair() -> None:
+def test_planner_rejects_finish_with_dispatch_fields_even_after_repair() -> None:
     payload = {
         "decision": "finish",
-        "finish": {"reason": "结束"},
-        "reflect": {"note": "同时反思"},
+        "reason": "结束",
+        "tasks": [
+            {
+                "question": "核验公开数据",
+                "expected_evidence": "至少一条直接证据",
+            }
+        ],
     }
     text = json.dumps(payload, ensure_ascii=False)
     client = _FakeClient(text, repair_text=text)
@@ -175,9 +172,4 @@ def test_planner_thread_records_only_the_selected_payload() -> None:
 
     messages = append_decision([], decision)
     recorded = json.loads(str(messages[0]["content"]))
-    assert decision.dispatch is not None
-
-    assert recorded == {
-        "decision": "dispatch",
-        "dispatch": decision.dispatch.model_dump(mode="json"),
-    }
+    assert recorded == decision.model_dump(mode="json", exclude_none=True)

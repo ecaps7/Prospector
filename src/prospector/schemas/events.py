@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter
 
 from prospector.schemas.brief import EffortLevel
-from prospector.schemas.plan import SourcePolicy, TaskBudget
+from prospector.schemas.plan import TaskBudget
 
 
 class EventType(StrEnum):
@@ -73,12 +73,11 @@ class BriefConfirmedPayload(_EventPayload):
 
 class PlannerDecidedPayload(_EventPayload):
     decision_round: int
-    decision: Literal["dispatch", "reflect", "finish"]
+    decision: Literal["dispatch", "finish"]
     research_decisions_used: int | None = None
     plan_version: int | None = None
     task_ids: list[UUID] | None = None
     reason: str | None = None
-    note: str | None = None
 
 
 class PlannerStartedPayload(_EventPayload):
@@ -93,10 +92,6 @@ class PlannerRejectedPayload(_EventPayload):
 
 class TaskStartedPayload(_EventPayload):
     task_id: UUID
-    research_stage: str
-    research_mode: str
-    subjects: list[str]
-    source_policy: SourcePolicy
     question: str
     budget: TaskBudget
 
@@ -139,7 +134,7 @@ class VerifierGapSummary(_EventPayload):
     severity: str
     kind: str
     description: str
-    recommended_research: str = ""
+    evidence_needed: str = ""
 
 
 class VerifierConflictSummary(_EventPayload):
@@ -179,6 +174,9 @@ class ReportDraftRenderedPayload(_EventPayload):
     markdown_ref: str | None = None
     json_ref: str | None = None
     revision: int | None = None
+    # Deterministic structure metrics (see deterministic/report_structure.py). Recorded
+    # for observation only: nothing gates on them until their distribution is known.
+    structure: dict[str, Any] = Field(default_factory=dict)
 
 
 class SseEventBase(BaseModel):

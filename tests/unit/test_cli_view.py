@@ -38,9 +38,6 @@ def _detail(job_id: UUID, task_id: UUID) -> JobDetail:
             JobTaskView(
                 task_id=task_id,
                 question="核验区域收入与客户证据",
-                subjects=["竞品"],
-                research_stage="scout",
-                research_mode="factual",
                 status="pending",
                 stop_reason=None,
                 budget={"max_worker_rounds": 32},

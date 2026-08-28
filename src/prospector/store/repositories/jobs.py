@@ -530,8 +530,7 @@ class JobRepository:
                             WHERE p.job_id=:job_id
                             ORDER BY task_ref.task_id, p.version, task_ref.task_position
                         )
-                        SELECT id AS task_id, question, subjects, research_stage,
-                               research_mode, status, stop_reason, budget,
+                        SELECT id AS task_id, question, status, stop_reason, budget,
                                tool_calls_used, created_at, started_at, finished_at
                         FROM app.tasks t
                         LEFT JOIN first_plan_task p ON p.task_id=t.id
