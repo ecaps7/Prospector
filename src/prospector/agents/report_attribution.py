@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
@@ -276,7 +277,7 @@ def candidate_specs(
     names = entity_names(snapshot)
     candidates: list[dict[str, Any]] = []
     for block in blocks:
-        markers = scan_markers(block.text, names)
+        markers = scan_markers(block.text, names, block_kind=block.kind)
         for start, end in retrieval_candidate_spans(block, markers):
             relevant = [marker for marker in markers if start <= marker.start_offset < end]
             candidates.append(
@@ -468,7 +469,8 @@ def _block_payload(
             "block_id": block.block_id,
             "text": block.text,
             "markers": [
-                marker.model_dump(mode="json") for marker in scan_markers(block.text, names)
+                marker.model_dump(mode="json")
+                for marker in scan_markers(block.text, names, block_kind=block.kind)
             ],
         }
         for block in blocks
@@ -504,12 +506,29 @@ def selection_messages(
     ]
 
 
+def report_index(plan: AttributionPlan, spec: AttributionBatchSpec) -> list[dict[str, Any]]:
+    """Every candidate position in the report, so a premise can point outside this batch.
+
+    Batches are answered independently, so a batch cannot be handed the verdicts another
+    batch reached.  It can be handed the report's own positions: a conclusion may declare
+    that it rests on the passage at k12, and code resolves that position to whatever
+    claims covered it once every batch is in.  Without this, a third of the analysis in
+    the first real report -- the claims resting on facts established in earlier sections
+    -- would have lost its grounding the moment the batches stopped running in order.
+    """
+    inside = set(spec.candidate_refs)
+    return [
+        {"candidate_ref": item["candidate_ref"], "block_id": item["block_id"], "text": item["text"]}
+        for item in plan.candidates
+        if item["candidate_ref"] not in inside
+    ]
+
+
 def verification_messages(
     plan: AttributionPlan,
     spec: AttributionBatchSpec,
     snapshot: WriterSnapshot,
     sources: Sequence[dict[str, Any]],
-    prior_claims: Sequence[dict[str, Any]],
 ) -> list[dict[str, str]]:
     blocks = _batch_blocks(plan, spec)
     candidates = _batch_candidates(plan, spec)
@@ -523,7 +542,7 @@ def verification_messages(
 
 verified 必须绑定足以支持该陈述的给定 Assertion 和对应 Excerpt，并且**只绑定真正承载这句话的那几条**。把所有沾边的材料都列上不等于更严谨：它会让读者无法判断这句话到底出自哪里。一条陈述通常一到两条就够，超过三条说明这个 span 划得太宽，应该拆成更小的具体陈述。failed 必须说明正文写了什么、材料实际支持什么以及差异在哪里。每个 candidate_ref 都必须由至少一个覆盖相应标记的 Claim 引用。
 
-claim_ref 是本批 span 的短编号。premise_claim_refs 可以引用本批其他 claim_ref，也可以引用 prior_claims 里已经完成的全局编号。
+claim_ref 是本批 span 的短编号。premise_claim_refs 可以引用本批其他 claim_ref；如果这段分析依赖的是本批之外的正文，就引用 report_index 里那处的 candidate_ref（形如 k12），代码会在全部批次完成后把它解析成对应判定。
 
 不得改写正文、使用输入之外的知识补证据或提出文风建议。最终只输出符合 output_schema 的单个 JSON 对象。"""
     return [
@@ -536,7 +555,7 @@ claim_ref 是本批 span 的短编号。premise_claim_refs 可以引用本批其
                     "candidates": candidates,
                     "sources": list(sources),
                     "known_conflicts": snapshot.conflicts,
-                    "prior_claims": list(prior_claims),
+                    "report_index": report_index(plan, spec),
                     "output_schema": AttributionBatchVerification.model_json_schema(),
                 },
                 ensure_ascii=False,
@@ -635,7 +654,9 @@ def _accept_claims(
     by_id = {block.block_id: block for block in blocks}
     candidate_by_ref = {item["candidate_ref"]: item for item in candidates}
     names = entity_names(snapshot)
-    marker_cache = {block.block_id: scan_markers(block.text, names) for block in blocks}
+    marker_cache = {
+        block.block_id: scan_markers(block.text, names, block_kind=block.kind) for block in blocks
+    }
     refs = EvidenceRefs(snapshot)
     excerpt_ids_by_assertion = {
         card.assertion_id: {excerpt.excerpt_id for excerpt in card.excerpts}
@@ -789,6 +810,7 @@ def uncovered_candidates(
 def _resolve_premises(
     accepted: Sequence[tuple[AcceptedClaim, ClaimSpan]],
     prior_claim_refs: set[str],
+    candidate_refs: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Drop premise references that point nowhere, and say which ones were dropped.
 
@@ -797,7 +819,7 @@ def _resolve_premises(
     still stands on whatever premises did resolve; if none of them do, the grounding
     check downstream is what decides the claim is unsupported.
     """
-    known = {item.claim_ref for item, _claim in accepted} | prior_claim_refs
+    known = {item.claim_ref for item, _claim in accepted} | prior_claim_refs | set(candidate_refs)
     notes: list[dict[str, Any]] = []
     for item, _claim in accepted:
         unresolved = [
@@ -823,7 +845,7 @@ def _advisory_notes(
     names = entity_names(snapshot)
     notes: list[dict[str, Any]] = []
     for block in blocks:
-        markers = scan_markers(block.text, names)
+        markers = scan_markers(block.text, names, block_kind=block.kind)
         if any(marker.kind == "number" for marker in markers):
             continue
         notes.extend(
@@ -970,6 +992,10 @@ def assemble_attribution_run(
     carried: CarriedAttribution | None = None,
 ) -> AttributionRun:
     claim_id_by_ref = {item.claim_ref: claim.claim_id for item, claim in accepted}
+    claim_ids_by_candidate: dict[str, list[UUID]] = {}
+    for item, claim in accepted:
+        for ref in item.candidate_refs:
+            claim_ids_by_candidate.setdefault(ref, []).append(claim.claim_id)
     premises: list[ClaimPremise] = []
     evidence: list[ClaimEvidence] = []
     findings: list[AttributionFinding] = []
@@ -978,9 +1004,14 @@ def assemble_attribution_run(
         premise_ids: list[UUID] = []
         for ref in item.premise_claim_refs:
             target = claim_id_by_ref.get(ref)
-            if target is None or target == claim.claim_id:
+            if target is not None:
+                if target != claim.claim_id:
+                    premise_ids.append(target)
                 continue
-            premise_ids.append(target)
+            # A whole-report position: everything that ended up covering it.
+            premise_ids.extend(
+                other for other in claim_ids_by_candidate.get(ref, []) if other != claim.claim_id
+            )
         evidence.extend(
             ClaimEvidence(claim_id=claim.claim_id, excerpt_id=value)
             for value in item.excerpt_ids
@@ -1143,7 +1174,6 @@ def _run_one_batch(
     plan: AttributionPlan,
     spec: AttributionBatchSpec,
     snapshot: WriterSnapshot,
-    prior_claims: Sequence[dict[str, Any]],
     store: AttributionPersistence | None,
     run_id: UUID,
 ) -> tuple[list[tuple[AcceptedClaim, ClaimSpan]], list[dict[str, Any]], object]:
@@ -1164,7 +1194,6 @@ def _run_one_batch(
                 _batch_candidates(plan, spec),
                 stored.get("verify_raw"),
             )
-            notes.extend(_resolve_premises(accepted, {item["claim_ref"] for item in prior_claims}))
             return accepted, notes, stored.get("verify_raw")
     if not spec.candidate_refs:
         verification = AttributionBatchVerification()
@@ -1207,7 +1236,6 @@ def _run_one_batch(
                 expand_selected_sources(
                     snapshot, EvidenceRefs(snapshot).assertions(selection.assertion_refs)
                 ),
-                prior_claims,
             )
     else:
         if store is not None:
@@ -1230,7 +1258,7 @@ def _run_one_batch(
         sources = expand_selected_sources(
             snapshot, EvidenceRefs(snapshot).assertions(selection.assertion_refs)
         )
-        verify_prompt = verification_messages(plan, spec, snapshot, sources, prior_claims)
+        verify_prompt = verification_messages(plan, spec, snapshot, sources)
         if store is not None:
             store.save_attribution_batch_selection(
                 run_id,
@@ -1252,7 +1280,6 @@ def _run_one_batch(
             raw,
         )
         notes = [*selection_notes, *notes]
-        notes.extend(_resolve_premises(accepted, {item["claim_ref"] for item in prior_claims}))
     except ClaimAttributionOutputError as exc:
         if store is not None:
             store.fail_attribution_batch(
@@ -1295,15 +1322,29 @@ def run_attribution(
     accepted: list[tuple[AcceptedClaim, ClaimSpan]] = []
     notes: list[dict[str, Any]] = []
     raw_parts: list[object] = []
+    all_candidate_refs = {item["candidate_ref"] for item in plan.candidates}
     try:
-        for spec in plan.batches:
-            batch_accepted, batch_notes, raw = _run_one_batch(
-                model, plan, spec, snapshot, _prior_claim_index(accepted), store, run_id
-            )
+        # Batches are independent now that a premise can name a position instead of
+        # another batch's verdict, and running them in order was the single largest cost
+        # in the pipeline: five batches took 2589s in sequence and 627s at their slowest.
+        # Each batch still makes its two calls in order; only the batches overlap.
+        results: list[tuple[list[tuple[AcceptedClaim, ClaimSpan]], list[dict[str, Any]], object]]
+        if len(plan.batches) == 1:
+            results = [_run_one_batch(model, plan, plan.batches[0], snapshot, store, run_id)]
+        else:
+            with ThreadPoolExecutor(max_workers=len(plan.batches)) as pool:
+                futures = [
+                    pool.submit(_run_one_batch, model, plan, spec, snapshot, store, run_id)
+                    for spec in plan.batches
+                ]
+                # Collected in submission order so the merged run does not depend on which
+                # batch happened to finish first.
+                results = [future.result() for future in futures]
+        for batch_accepted, batch_notes, raw in results:
             raw_parts.append(raw)
             accepted.extend(batch_accepted)
             notes.extend(batch_notes)
-        notes.extend(_resolve_premises(accepted, set()))
+        notes.extend(_resolve_premises(accepted, set(), all_candidate_refs))
         uncovered = uncovered_candidates(accepted, plan.candidates)
         summary = AttributionSummary()
         prior_specs = _prior_failure_specs(previous, previous_review)

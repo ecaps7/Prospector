@@ -14,7 +14,7 @@ from markdown_it import MarkdownIt
 from prospector.schemas.claims import ClaimMarker, ClaimSpan
 from prospector.schemas.report import BlockReplacement, MarkdownBlock
 
-MARKER_LEXICON_VERSION = "v5"
+MARKER_LEXICON_VERSION = "v6"
 # Serialized size of one batch's blocks + candidates.  A later excerpt expansion is
 # bounded by the model's selection, so this budget is what actually splits the job.
 ATTRIBUTION_BATCH_CHAR_BUDGET = 24_000
@@ -29,6 +29,18 @@ _DATE_RE = re.compile(
     r"(?:19|20)\d{2}\s*(?:年\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?|年|[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?"
 )
 _QUOTE_RE = re.compile(r"[“\"「][^”\"」]+[”\"」]")
+# A quotation is a retrieval anchor only when something in the same clause says it is a
+# quotation.  Chinese uses the same marks for emphasis, and in the first real report 39
+# of 52 quoted spans were the writer's own framing -- "从“会回答”走向“会做事”" -- each of
+# which demanded a source for a phrase no source contains.
+_ATTRIBUTION_CUE_RE = re.compile(
+    r"称|表示|写道|指出|援引|引述|引用|所谓|定义为|据|报道|声明|回应|承认|命名为|叫做|原文|白皮书"
+)
+# A bare year is the period a sentence is about; a year with a month or a day is a fact
+# anchor someone can look up.  Every date in the first report was a bare year under the
+# old pattern, so the distinction only became usable once dates parsed correctly.
+_FULL_DATE_RE = re.compile(r"^(?:19|20)\d{2}\s*(?:年\s*\d{1,2}|[-/.]\d{1,2})")
+_LIST_ORDINAL_RE = re.compile(r"^\s*\d{1,2}\s*[.、)）]")
 _HTML_RE = re.compile(r"<[/!]?[A-Za-z][^>]*>")
 _FOOTNOTE_RE = re.compile(r"\[\^[^\]]+\]|^\[\^[^\]]+\]:", re.MULTILINE)
 
@@ -317,8 +329,28 @@ class MarkerHit:
     marker: ClaimMarker
 
 
-def scan_markers(text: str, entity_names: Iterable[str] = ()) -> list[ClaimMarker]:
-    """Classify surface markers only; this function never judges a claim's content."""
+def _clause_around(text: str, at: int) -> str:
+    left = max(text.rfind(stop, 0, at) for stop in "。！？；;\n") + 1
+    right = [text.find(stop, at) for stop in "。！？；;\n"]
+    return text[left : min((value for value in right if value >= 0), default=len(text))]
+
+
+def scan_markers(
+    text: str,
+    entity_names: Iterable[str] = (),
+    *,
+    block_kind: str | None = None,
+) -> list[ClaimMarker]:
+    """Classify surface markers only; this function never judges a claim's content.
+
+    A marker in the retrieval family obliges the model to produce an evidence verdict for
+    the span it sits in, so the family assignment decides how much of a report has to be
+    defended fact by fact.  Three surface forms were demoted after they were measured on
+    a real report: a heading is a label the section restates, a bare year is the period
+    under discussion, and a Chinese quotation mark is usually emphasis.  Demoted markers
+    still produce a candidate span -- the model may still bind evidence to them -- they
+    simply no longer forbid the answer "this is analysis".
+    """
     hits: list[ClaimMarker] = []
 
     def add(
@@ -336,20 +368,31 @@ def scan_markers(text: str, entity_names: Iterable[str] = ()) -> list[ClaimMarke
             )
         )
 
+    # A heading carries no statement of its own: the section below restates its content,
+    # where it is checked in prose that can actually be sourced.
+    anchors: Literal["retrieval", "candidate"] = (
+        "candidate" if block_kind == "heading" else "retrieval"
+    )
     date_spans: list[tuple[int, int]] = []
     for match in _DATE_RE.finditer(text):
-        add("retrieval", "date", match)
+        family = anchors if _FULL_DATE_RE.match(match.group()) else "candidate"
+        add(family, "date", match)
         date_spans.append((match.start(), match.end()))
     for match in _NUMBER_RE.finditer(text):
         # A year already captured as a date is not a separate quantity.
         if any(start < match.end() and match.start() < end for start, end in date_spans):
             continue
-        add("retrieval", "number", match)
+        # A leading "1." is Markdown's list numbering, not a quantity in the prose.
+        family = anchors
+        if match.start() <= 2 and _LIST_ORDINAL_RE.match(text[: match.end() + 2]):
+            family = "candidate"
+        add(family, "number", match)
     for match in _QUOTE_RE.finditer(text):
-        add("retrieval", "quote", match)
+        cued = _ATTRIBUTION_CUE_RE.search(_clause_around(text, match.start()))
+        add(anchors if cued else "candidate", "quote", match)
     for word in SCOPE_WORDS:
         for match in re.finditer(re.escape(word), text):
-            add("retrieval", "scope", match)
+            add(anchors, "scope", match)
     for word in ADVISORY_WORDS:
         for match in re.finditer(re.escape(word), text):
             add("advisory", "advisory", match)

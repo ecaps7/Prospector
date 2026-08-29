@@ -19,6 +19,8 @@ from prospector.agents.report_attribution import (
     build_attribution_run,
     expand_selected_sources,
     plan_incremental_attribution,
+    prepare_attribution_plan,
+    run_attribution,
 )
 from prospector.agents.report_review import OpenAIReportReview, attribution_summary
 from prospector.agents.research_synthesis import (
@@ -53,6 +55,7 @@ from prospector.schemas.claims import (
     ClaimSpan,
     ReportReviewRun,
     ReviewFinding,
+    core_attribution_finding_ids,
     final_report_status,
     has_core_problem,
 )
@@ -273,6 +276,92 @@ def test_year_marker_is_not_also_a_number() -> None:
     assert any(marker.kind == "date" and marker.text == "2025 年" for marker in markers)
     assert not any(marker.kind == "number" and "2025" in marker.text for marker in markers)
     assert any(marker.kind == "number" and "12" in marker.text for marker in markers)
+
+
+def test_batches_run_concurrently_and_a_premise_may_cross_them() -> None:
+    """Running batches in order was the pipeline's largest cost; a premise still crosses."""
+    import threading
+
+    snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
+    filler = "该季度的渠道调整与采购节奏变化在报告中被反复讨论并作为背景说明。" * 80
+    markdown = (
+        "\n\n".join(f"第 {index} 段出货量下降 {index}%。{filler}" for index in range(1, 12)) + "\n"
+    )
+    plan = prepare_attribution_plan(markdown, snapshot)
+    assert len(plan.batches) > 1
+
+    overlapped = threading.Event()
+    inside = threading.Semaphore(0)
+    started = threading.Lock()
+    running = {"count": 0}
+
+    class Concurrent:
+        def select_materials(self, prompt):
+            with started:
+                running["count"] += 1
+                if running["count"] > 1:
+                    overlapped.set()
+            inside.release()
+            if not overlapped.wait(timeout=5):
+                raise AssertionError("batches did not overlap")
+            return AttributionBatchSelection(assertion_refs=["a1"]), "{}"
+
+        def verify_batch(self, prompt):
+            payload = json.loads(prompt[1]["content"])
+            claims = [
+                _model_claim(
+                    claim_ref=f"c{index}",
+                    block_id=item["block_id"],
+                    start_offset=item["start_offset"],
+                    end_offset=item["end_offset"],
+                    status="analysis",
+                    candidate_refs=[item["candidate_ref"]],
+                    # Rest on a position from another batch, which only resolves globally.
+                    premise_claim_refs=[payload["report_index"][0]["candidate_ref"]]
+                    if payload["report_index"]
+                    else [],
+                    assertion_refs=["a1"],
+                )
+                for index, item in enumerate(payload["candidates"], start=1)
+            ]
+            return AttributionBatchVerification.model_validate({"claims": claims}), "{}"
+
+        def summarize(self, prompt):
+            return AttributionSummary(), "{}"
+
+    result = run_attribution(Concurrent(), uuid4(), 1, markdown, snapshot, None, None)
+    assert overlapped.is_set()
+    crossing = [item for item in result.run.claim_premises if item.premise_claim_ids]
+    assert crossing, "a premise naming a position outside its batch must resolve"
+
+
+def test_a_heading_demands_no_evidence_of_its_own() -> None:
+    """A heading is a label the section restates; it carries no statement to source."""
+    markers = scan_markers("二、起源：2024 年 10 月的能力铺垫", block_kind="heading")
+    assert markers
+    assert not [marker for marker in markers if marker.family == "retrieval"]
+
+
+def test_a_bare_year_is_the_topic_and_a_full_date_is_an_anchor() -> None:
+    bare = scan_markers("2026 年初开始的热潮并非单次发布点燃。")
+    assert [marker.family for marker in bare if marker.kind == "date"] == ["candidate"]
+    full = scan_markers("Anthropic 在 2024 年 10 月推出 computer use。")
+    assert [marker.family for marker in full if marker.kind == "date"] == ["retrieval"]
+
+
+def test_a_quotation_needs_an_attribution_cue_to_demand_a_source() -> None:
+    """Chinese uses the same marks for emphasis; 39 of 52 quoted spans were the writer's."""
+    emphasis = scan_markers("模型开始从“会回答”走向“会做事”。")
+    assert {marker.family for marker in emphasis if marker.kind == "quote"} == {"candidate"}
+    quoted = scan_markers("Gartner 报告称“agent washing”现象普遍。")
+    assert {marker.family for marker in quoted if marker.kind == "quote"} == {"retrieval"}
+
+
+def test_a_list_ordinal_is_not_a_quantity() -> None:
+    ordinal = scan_markers("1. 计算机使用：模型获得通用操作界面")
+    assert [marker.family for marker in ordinal if marker.kind == "number"] == ["candidate"]
+    quantity = scan_markers("出货量下降 12%。")
+    assert [marker.family for marker in quantity if marker.kind == "number"] == ["retrieval"]
 
 
 def test_a_spaced_chinese_date_is_one_date_not_a_year_plus_two_numbers() -> None:
@@ -732,7 +821,7 @@ def test_a_revision_reuses_the_verdicts_of_blocks_it_did_not_rewrite() -> None:
 def test_carrying_a_revision_keeps_the_notes_and_unanswered_spans_of_kept_text() -> None:
     """Inheriting verdicts without their records made a revision look healthier than it was."""
     snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
-    markdown = "2026 年的回落更像是渠道调整；出货量下降 12%。\n\n采购在推迟。\n"
+    markdown = "2026 年 3 月的回落更像是渠道调整；出货量下降 12%。\n\n采购在推迟。\n"
     blocks = parse_markdown(markdown)
     first = blocks[0].text.index("；")
     output = AttributionBatchVerification.model_validate(
@@ -756,7 +845,7 @@ def test_carrying_a_revision_keeps_the_notes_and_unanswered_spans_of_kept_text()
     assert any(item.claim_id is None for item in previous.blocking_findings)
 
     revised = parse_markdown(
-        "2026 年的回落更像是渠道调整；出货量下降 12%。\n\n采购节奏没有变化。\n"
+        "2026 年 3 月的回落更像是渠道调整；出货量下降 12%。\n\n采购节奏没有变化。\n"
     )
     carried = plan_incremental_attribution(previous, blocks, revised)
     assert carried.dirty_block_ids == {"b_0002"}
@@ -1068,7 +1157,7 @@ def test_an_unknown_catalog_ref_is_dropped_rather_than_ending_the_job() -> None:
 def test_analysis_over_a_retrieval_marker_is_recorded_not_discarded() -> None:
     """The marker lexicon cannot tell a topic year from a fact anchor; it may only observe."""
     snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
-    markdown = "2026 年的这轮回落更像是渠道调整的结果。"
+    markdown = "2026 年 3 月的这轮回落更像是渠道调整的结果。"
     blocks = parse_markdown(markdown)
     output = AttributionBatchVerification.model_validate(
         {
@@ -1088,7 +1177,7 @@ def test_analysis_over_a_retrieval_marker_is_recorded_not_discarded() -> None:
     assert len(run.claims) == 1
     assert not run.blocking_findings
     unchecked = [note for note in run.audit_notes if note["kind"] == "unchecked_marker_in_analysis"]
-    assert [marker["text"] for marker in unchecked[0]["markers"]] == ["2026 年"]
+    assert [marker["text"] for marker in unchecked[0]["markers"]] == ["2026 年 3 月"]
 
 
 def test_analysis_that_reaches_no_checked_fact_becomes_a_finding() -> None:
@@ -1397,6 +1486,36 @@ def test_last_repair_round_is_reserved_for_core_problems() -> None:
     core, core_review, _ = _runs(kind="attribution", key_blocks=["b_0001"])
     assert final_report_status(core, core_review, repairs_used=1) == "revising"
     assert final_report_status(core, core_review, repairs_used=2) == "failed"
+
+
+def test_a_review_that_marks_most_of_the_report_key_is_ignored() -> None:
+    """59 of 72 blocks marked key made six failures core when only one was depended upon."""
+    blocks = [f"b_{index:04d}" for index in range(1, 21)]
+    peripheral, review, _ = _runs(kind="attribution", key_blocks=blocks[:15])
+    peripheral.block_assessments = [
+        BlockAssessment(block_id=block_id, status="assessed") for block_id in blocks
+    ]
+    # b_0001 is in the list, but the list covers three quarters of the report.
+    assert not core_attribution_finding_ids(peripheral, review)
+    assert final_report_status(peripheral, review, repairs_used=0) == "partial"
+
+    selective, selective_review, _ = _runs(kind="attribution", key_blocks=blocks[:4])
+    selective.block_assessments = [
+        BlockAssessment(block_id=block_id, status="assessed") for block_id in blocks
+    ]
+    assert core_attribution_finding_ids(selective, selective_review)
+    assert final_report_status(selective, selective_review, repairs_used=0) == "revising"
+
+
+def test_a_failure_something_rests_on_is_core_however_the_review_marks_blocks() -> None:
+    blocks = [f"b_{index:04d}" for index in range(1, 21)]
+    run, review, claim = _runs(kind="attribution", key_blocks=blocks[:15])
+    run.block_assessments = [
+        BlockAssessment(block_id=block_id, status="assessed") for block_id in blocks
+    ]
+    # Another claim reasons from the failed one, which is structural, not a judgement.
+    run.claim_premises = [ClaimPremise(claim_id=uuid4(), premise_claim_ids=[claim.claim_id])]
+    assert core_attribution_finding_ids(run, review)
 
 
 def test_in_place_downgrade_counts_as_a_core_problem() -> None:

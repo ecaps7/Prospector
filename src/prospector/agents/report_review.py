@@ -157,7 +157,7 @@ unused_assertions 列出报告没有用到的研究材料。取舍是作者的�
 
 只有会使报告无法实质回应 Brief，或会让读者对核心结论产生实质误解的问题，才进入 blocking_findings。kind 只使用 brief_response、user_constraint、material_omission、conclusion_integrity。每条必须引用相关 block_ids，并具体说明问题及其对核心回答的影响。
 
-key_block_ids 只标识实际承载主要认识和推理的位置，不评价观点是否正确。不要重新匹配 Excerpt。最终只输出符合 output_schema 的单个 JSON 对象。"""
+key_block_ids 只标识实际承载主要认识和推理的位置，不评价观点是否正确。**这是一份少数派清单**：只列出删掉它读者就拿不到核心回答的段落，通常是全文的少数。把大部分段落都标进来等于没有标，代码会因此忽略这份清单。不要重新匹配 Excerpt。最终只输出符合 output_schema 的单个 JSON 对象。"""
         payload = {
             "markdown": markdown,
             "blocks": [

@@ -221,15 +221,34 @@ class ReportReviewRun(BaseModel):
     contract_error: str | None = None
 
 
+# A review that calls most of the report load-bearing has not selected anything.  The
+# first full run marked 59 of 72 blocks as key, which turned six failures into core
+# problems where only one was actually depended upon, and spent two repair rounds on
+# them.  Past this share the signal is discarded and only the premise graph decides.
+MAX_KEY_BLOCK_SHARE = 0.5
+# A short report has little to select between, so the share alone would discard an
+# entirely reasonable list of two or three blocks.
+MIN_KEY_BLOCKS = 3
+
+
 def core_attribution_finding_ids(attribution: AttributionRun, review: ReportReviewRun) -> set[UUID]:
-    """Return the attribution failures that carry the report's main reasoning."""
+    """Return the attribution failures that carry the report's main reasoning.
+
+    A failure is core when another claim rests on it -- a fact the report reasons from --
+    or when it sits in a block the review singled out as carrying the main reading.  The
+    first test is structural and always applies; the second is a judgement and applies
+    only while the review is being selective enough for it to mean something.
+    """
     claim_by_id = {claim.claim_id: claim for claim in attribution.claims}
     premise_claim_ids = {
         premise_id
         for premise in attribution.claim_premises
         for premise_id in premise.premise_claim_ids
     }
+    total_blocks = len(attribution.block_assessments)
     core_blocks = set(review.key_block_ids)
+    if len(core_blocks) > max(MIN_KEY_BLOCKS, total_blocks * MAX_KEY_BLOCK_SHARE):
+        core_blocks = set()
     return {
         item.finding_id
         for item in attribution.blocking_findings
