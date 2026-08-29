@@ -178,38 +178,40 @@ def render_final_report(
     # Citations are spliced at absolute document offsets.  Block texts repeat freely --
     # table cells like "是" occur many times -- so locating a block by searching its text
     # would attach a footnote to the first match anywhere in the document instead.
-    inserts: list[tuple[int, str]] = []
     # A heading is a label whose content the section restates; citing it duplicates the
     # body's marks on text that carries no checkable statement of its own.
     heading_blocks = {block.block_id for block in blocks if block.kind == "heading"}
-    overflowing = 0
+    # Marks are gathered by the position they land on rather than by the claim that
+    # produced them.  Claim spans nest and often end together, so a per-claim cap still
+    # let three claims stack nine marks against one full stop.
+    marks_at: dict[int, list[str]] = {}
+    unverified_at: set[int] = set()
     for claim in attribution.claims:
         block_start = block_starts.get(claim.block_id)
-        if block_start is None:
+        if block_start is None or claim.block_id in heading_blocks:
             continue
-        marks: list[str] = []
+        at = block_start + claim.end_offset
         for excerpt_id in evidence_by_claim.get(claim.claim_id, []):
             excerpt = excerpts[excerpt_id]
             key = (excerpt.source.source_uri, excerpt.source.document_version)
             number = source_numbers.setdefault(key, len(source_numbers) + 1)
             source_refs.setdefault(key, excerpt)
-            marks.append(f"[^{number}]")
-        marks = list(dict.fromkeys(marks))
-        if claim.block_id in heading_blocks:
-            marks = []
-        elif len(marks) > MAX_INLINE_CITATIONS:
-            overflowing += 1
-            marks = marks[:MAX_INLINE_CITATIONS]
-        if claim.claim_id in failed_claims and claim.block_id not in heading_blocks:
-            marks.append(UNVERIFIED_MARKER)
-        if marks:
-            inserts.append((block_start + claim.end_offset, "".join(marks)))
+            marks_at.setdefault(at, []).append(f"[^{number}]")
+        if claim.claim_id in failed_claims:
+            unverified_at.add(at)
     for finding in attribution.blocking_findings:
         if finding.claim_id is not None or finding.end_offset is None:
             continue
         block_start = block_starts.get(finding.block_id)
-        if block_start is not None:
-            inserts.append((block_start + finding.end_offset, UNVERIFIED_MARKER))
+        if block_start is not None and finding.block_id not in heading_blocks:
+            unverified_at.add(block_start + finding.end_offset)
+    inserts: list[tuple[int, str]] = []
+    for at in sorted(marks_at.keys() | unverified_at):
+        marks = list(dict.fromkeys(marks_at.get(at, [])))[:MAX_INLINE_CITATIONS]
+        if at in unverified_at:
+            marks.append(UNVERIFIED_MARKER)
+        if marks:
+            inserts.append((at, "".join(marks)))
     health = report_health(attribution, snapshot, blocks)
     result = markdown
     for offset, insert in sorted(inserts, key=lambda item: item[0], reverse=True):

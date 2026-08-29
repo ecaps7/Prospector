@@ -879,8 +879,64 @@ def test_a_heading_carries_no_footnotes_and_a_span_shows_at_most_three() -> None
     )
     assert body_line.count("[^") == 3
     # Nothing is lost: every binding is still in the audit output.
-    assert json.loads(rendered.json_text)["claim_evidence"].__len__() == 12
+    assert len(json.loads(rendered.json_text)["claim_evidence"]) == 12
     assert report_health(run, snapshot, blocks).spans_over_citation_cap == 2
+
+
+def test_claims_ending_together_share_one_capped_run_of_citations() -> None:
+    """Nesting spans stacked nine marks on one full stop when the cap was per claim."""
+    snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
+    card = snapshot.evidence_cards[0]
+    card.excerpts = [
+        *card.excerpts,
+        *[
+            WriterExcerptRef(
+                excerpt_id=uuid4(),
+                text=f"另一来源 {index}。",
+                source=WriterSource(source_uri=f"https://example.com/{index}", document_version=1),
+            )
+            for index in range(8)
+        ],
+    ]
+    markdown = "出货量下降 12%。\n"
+    blocks = parse_markdown(markdown)
+    body = blocks[0]
+    end = len(body.text) - 1
+    # Three claims over the same passage, all ending at the same offset.
+    claims = [
+        ClaimSpan(
+            claim_id=uuid4(),
+            block_id=body.block_id,
+            start_offset=start,
+            end_offset=end,
+            text=body.text[start:end],
+            text_hash=text_hash(body.text[start:end]),
+        )
+        for start in (0, 1, 2)
+    ]
+    run = AttributionRun(
+        attribution_run_id=uuid4(),
+        report_id=uuid4(),
+        revision=1,
+        block_assessments=[BlockAssessment(block_id=body.block_id, status="assessed")],
+        claims=claims,
+        claim_evidence=[
+            ClaimEvidence(claim_id=claim.claim_id, excerpt_id=excerpt.excerpt_id)
+            for claim, excerpt in zip(claims, card.excerpts, strict=False)
+        ],
+        marker_lexicon_version="v5",
+    )
+    review = ReportReviewRun(
+        review_run_id=uuid4(),
+        report_id=run.report_id,
+        revision=1,
+        synthesis_run_id=uuid4(),
+    )
+    rendered = render_final_report(markdown, blocks, run, review, snapshot, status="verified")
+    body_line = next(
+        line for line in rendered.markdown.splitlines() if line.startswith("出货量下降")
+    )
+    assert body_line == "出货量下降 12%[^1][^2][^3]。"
 
 
 def test_material_reaches_the_model_only_as_short_refs() -> None:
