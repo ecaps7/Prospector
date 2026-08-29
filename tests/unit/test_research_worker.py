@@ -31,6 +31,7 @@ from prospector.agents.research_worker import (
     WorkerModelAction,
     WorkerToolCall,
 )
+from prospector.deterministic.gates import RepeatedRoundCounter, round_fingerprint
 from prospector.flow.cancellation import JobCancelledError
 from prospector.schemas.brief import UserConstraints
 from prospector.schemas.evidence import Assertion
@@ -1479,3 +1480,37 @@ async def test_search_auto_fetch_uses_the_explicit_runtime_limit() -> None:
     await worker.run(uuid4(), _task(), worker_id="rw_01")
 
     assert len(fetch_tool.fetched_urls) == AUTO_FETCH_TOP_N
+
+
+def test_a_worker_repeating_itself_stops_before_the_round_cap() -> None:
+    """One Worker repeated the same calls for 27 minutes; the cap was its only stop."""
+    counter = RepeatedRoundCounter()
+    same = round_fingerprint(
+        [
+            ("web_search", {"query": "Decagon Series D"}),
+            ("web_search", {"query": "OpenClaw launch"}),
+        ]
+    )
+    assert counter.record_round(same, inserted_rows=0) is False
+    assert counter.record_round(same, inserted_rows=0) is False
+    assert counter.record_round(same, inserted_rows=0) is True
+
+
+def test_progress_or_a_different_action_clears_the_repeat_count() -> None:
+    counter = RepeatedRoundCounter()
+    same = round_fingerprint([("web_search", {"query": "Decagon Series D"})])
+    other = round_fingerprint([("web_search", {"query": "Decagon valuation"})])
+    assert counter.record_round(same, inserted_rows=0) is False
+    assert counter.record_round(same, inserted_rows=0) is False
+    # Something was stored, so the Worker is getting somewhere after all.
+    assert counter.record_round(same, inserted_rows=3) is False
+    assert counter.record_round(same, inserted_rows=0) is False
+    assert counter.record_round(other, inserted_rows=0) is False
+    assert counter.record_round(other, inserted_rows=0) is False
+    assert counter.record_round(other, inserted_rows=0) is True
+
+
+def test_a_round_is_identified_by_its_actions_not_their_order() -> None:
+    first = round_fingerprint([("web_search", {"query": "a"}), ("web_search", {"query": "b"})])
+    second = round_fingerprint([("web_search", {"query": "b"}), ("web_search", {"query": "a"})])
+    assert first == second

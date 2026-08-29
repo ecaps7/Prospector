@@ -115,6 +115,7 @@ _STOP_REASON_LABELS = {
     "worker_rounds_exhausted": "Worker 决策轮耗尽",
     "no_public_evidence": "未发现公开证据",
     "low_information_gain": "连续两批未产生新证据",
+    "repeating_without_progress": "连续重复同一组检索且未落库",
     "blocked_by_scope": "受任务范围限制",
     "tool_error": "运行时错误",
 }

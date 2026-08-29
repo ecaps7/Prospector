@@ -35,7 +35,12 @@ from prospector.agents.prompts.research_worker import (
     worker_task_message,
 )
 from prospector.agents.usage import record_response_usage
-from prospector.deterministic.gates import InformationGainCounter
+from prospector.deterministic.gates import (
+    REPEATED_ROUND_LIMIT,
+    InformationGainCounter,
+    RepeatedRoundCounter,
+    round_fingerprint,
+)
 from prospector.flow.cancellation import JobCancelledError
 from prospector.obs.logging import get_logger
 from prospector.schemas.evidence import Assertion, FindingInput
@@ -52,6 +57,7 @@ WorkerDeclaredStopReason = Literal[
 StopReason = Literal[
     "expected_evidence_satisfied",
     "worker_rounds_exhausted",
+    "repeating_without_progress",
     "no_public_evidence",
     "low_information_gain",
     "blocked_by_scope",
@@ -632,6 +638,7 @@ class ResearchWorker:
         if constraints_message is not None:
             messages.append({"role": "user", "content": constraints_message})
         information_gain = InformationGainCounter()
+        repeated_rounds = RepeatedRoundCounter()
         source_registry = EvidenceSourceRegistry()
         # (message index, replacement text) for each round's results message, oldest first.
         prunable_results: list[tuple[int, str]] = []
@@ -840,6 +847,16 @@ class ResearchWorker:
             if saved_in_batch and information_gain.record_save(save_inserted):
                 stop_reason = "low_information_gain"
                 finish_reason = "连续两批 save_findings 未产生新的断言行。"
+                break
+            if repeated_rounds.record_round(
+                round_fingerprint((call.tool_name, call.arguments) for call in calls),
+                inserted_rows=save_inserted,
+            ):
+                stop_reason = "repeating_without_progress"
+                finish_reason = (
+                    f"连续 {REPEATED_ROUND_LIMIT} 轮重复同一组工具调用且未落库任何断言，"
+                    "该方向在当前可及来源下取不到证据。"
+                )
                 break
 
         assertions = await asyncio.to_thread(self.repository.list_assertions, task.task_id)
