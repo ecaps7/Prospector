@@ -385,15 +385,15 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
     assert '"publisher"' not in prompt
     assert '"tier"' not in prompt
     assert "来源元数据" not in prompt or "来源" in prompt
-    assert "reason 直接说明为何放行或返回 Planner" in prompt
+    assert "reason 直接说明" in prompt
     assert "document_text" not in prompt
     assert "worker_trace" not in prompt
     assert "conflicts" in prompt
-    assert "conflicts 只引用 Assertion ID" in prompt
+    assert "冲突" in prompt
     assert "assertion_dispositions" in prompt
     assert "effective_unusable_assertion_ids" in prompt
     assert "status=restored" in prompt
-    assert "minor 是可以在报告中披露" in prompt
+    assert "minor gap" in prompt
     assert '"conflict_resolutions"' not in schema
     conflict_def = (
         VerifierLlmDecision.model_json_schema().get("$defs", {}).get("ConflictJudgement", {})
@@ -604,19 +604,27 @@ class _FakeRepository:
     def __init__(self, stored: VerifierDecision | None = None) -> None:
         self.run_id = uuid4()
         self.stored = stored
+        self.synthesis_run: object = SimpleNamespace(
+            synthesis_run_id=uuid4(),
+            decision="needs_research",
+            reason="来源分歧阻断核心比较。",
+            evidence_needed="同口径的一手统计。",
+        )
         self.completed: VerifierDecision | None = None
         self.failed: dict[str, object] | None = None
         self.outcomes: list[dict[str, object]] = []
         self.begin_count = 0
+        self.snapshot_kwargs: dict[str, object] = {}
 
-    def get_completed_verifier_run(self, job_id: UUID, plan_version: int) -> object:
-        del job_id, plan_version
+    def get_completed_verifier_run(self, job_id: UUID, plan_version: int, trigger: str) -> object:
+        del job_id, plan_version, trigger
         if self.stored is None:
             return None
         return {"run_id": self.run_id, "decision": self.stored}
 
     def build_verifier_snapshot(self, job_id: UUID, **kwargs: object) -> dict[str, object]:
-        del job_id, kwargs
+        del job_id
+        self.snapshot_kwargs = kwargs
         return {"brief": {}, "plans": [{"version": 1}], "tasks": [], "excerpts": []}
 
     def begin_verifier_run(self, job_id: UUID, **kwargs: object) -> UUID:
@@ -662,6 +670,10 @@ class _FakeRepository:
             if getattr(item, "status", None) == "unusable"
         ]
 
+    def get_latest_synthesis_run(self, job_id: UUID) -> object:
+        del job_id
+        return self.synthesis_run
+
 
 class _FakeVerifier:
     def __init__(self, decision: VerifierDecision) -> None:
@@ -677,14 +689,16 @@ class _FakeVerifier:
         )
 
 
-def _state(*, decision_round: int = 3, limit: int = 8) -> dict[str, Any]:
+def _state(
+    *, decision_round: int = 3, limit: int = 8, trigger: str = "planner_finish"
+) -> dict[str, Any]:
     state = cast(dict[str, Any], initial_research_state(job_id=str(uuid4()), brief_id=str(uuid4())))
     state.update(
         {
             "plan_version": 1,
             "decision_round": decision_round,
             "decision_round_limit": limit,
-            "verifier_trigger": "planner_finish",
+            "verifier_trigger": trigger,
             "planner_messages": [],
         }
     )
@@ -708,7 +722,7 @@ def test_verifier_node_passes_to_composition_pending() -> None:
 
     assert result["phase"] == "composition_pending"
     assert result["outcome"] == "ready_for_writer"
-    assert result["route"] == "writer"
+    assert result["route"] == "synthesis"
     assert repository.completed is not None
     assert repository.outcomes[-1]["phase"] == "composition_pending"
 
@@ -902,13 +916,43 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
                 "error_code": None,
             },
         }
-    ) == ["[成文] Research Verifier 已放行，等待 Writer"]
+    ) == ["[综合] Research Verifier 已放行，等待 Research Synthesis"]
     assert renderer.render(
         {
             "event_type": "job.phase_changed",
             "payload": {"phase": "verifying"},
         }
     ) == ["[核验] Report Verifier 正在逐句验证"]
+
+
+def test_timeline_distinguishes_total_unusable_assertions_from_displayed_summaries() -> None:
+    renderer = ResearchTimelineRenderer(cast(Any, object()), limits_for_effort("quick"))
+    summaries = [
+        {
+            "assertion_id": f"{index:08d}-0000-0000-0000-000000000000",
+            "reason": f"废证原因 {index}",
+        }
+        for index in range(8)
+    ]
+
+    lines = renderer.render(
+        {
+            "event_type": "verifier.completed",
+            "payload": {
+                "plan_version": 1,
+                "release_decision": "pass",
+                "major_gap_count": 0,
+                "minor_gap_count": 1,
+                "conflict_resolution_count": 3,
+                "unusable_assertion_count": 28,
+                "unusable_summaries": summaries,
+            },
+        }
+    )
+
+    assert lines[0] == "[核验] Plan v1 通过（重大缺口 0，冲突裁决 3，废证 28）"
+    assert lines[1] == "[核验] 废证 28 条（以下展示 8 条）："
+    assert len(lines[2:]) == 8
 
 
 def test_verifier_checks_core_question_and_constraints_not_every_brief_direction() -> None:
@@ -925,10 +969,23 @@ def test_verifier_checks_core_question_and_constraints_not_every_brief_direction
         )
     )
 
-    assert "不是必须逐项覆盖的清单" in prompt
+    assert "brief_text 中的候选方向不是强制覆盖清单" in prompt
     assert "brief_alignment" in prompt
     assert "user_constraints" in prompt
+    assert "不会自动成为 major gap" in prompt
     assert "完全没有进入任何研究计划的方向" not in prompt
+
+
+def test_verifier_rejects_compound_assertions_without_turning_task_completion_into_a_gate() -> None:
+    prompt = "\n".join(
+        message["content"]
+        for message in research_verifier_messages({"brief": {"question": "q", "brief_text": "b"}})
+    )
+
+    assert "单一、可独立核对" in prompt
+    assert "多个可分别成立的事实合并成一条" in prompt
+    assert "task 未完全达到 expected_evidence" in prompt
+    assert "无法实质回应 Brief" in prompt
 
 
 def test_planner_prompt_defines_execution_roles_without_prescribing_research_strategy() -> None:
@@ -938,5 +995,47 @@ def test_planner_prompt_defines_execution_roles_without_prescribing_research_str
     assert "finish" in prompt
     assert "question" in prompt
     assert "expected_evidence" in prompt
-    assert "任务内容、拆分方式和研究取舍由你判断" in prompt
+    assert "研究任务的内容、拆分方式、先后顺序和研究方法由你决定" in prompt
     assert "唯一的机制" not in prompt
+
+
+def test_declined_synthesis_gap_goes_straight_to_the_writer() -> None:
+    """A gap the Verifier will not confirm must not restart research.
+
+    The report is written from the limited analysis, and the Verifier's reason travels
+    with it as a minor gap of this same run.
+    """
+    repository = _FakeRepository()
+
+    result = _verifier_node(_services(repository, _FakeVerifier(_decision())))(
+        cast(Any, _state(trigger="synthesis_gap"))
+    )
+
+    assert result["route"] == "writer"
+    assert result["last_verifier_run_id"] == str(repository.run_id)
+
+
+def test_confirmed_synthesis_gap_returns_to_the_planner_marked_as_such() -> None:
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_decision("needs_research", severity="major"))
+
+    result = _verifier_node(_services(repository, verifier))(
+        cast(Any, _state(trigger="synthesis_gap"))
+    )
+
+    assert result["route"] == "planner"
+    content = result["planner_messages"][0]["content"]
+    assert '"gap_origin": "research_synthesis"' in content
+    request = cast(Any, repository.snapshot_kwargs["synthesis_request"])
+    assert request["evidence_needed"] == "同口径的一手统计。"
+    assert repository.snapshot_kwargs["trigger"] == "synthesis_gap"
+
+
+def test_synthesis_gap_verification_refuses_a_missing_evidence_request() -> None:
+    repository = _FakeRepository()
+    repository.synthesis_run = None
+
+    with pytest.raises(RuntimeError, match="evidence request"):
+        _verifier_node(_services(repository, _FakeVerifier(_decision())))(
+            cast(Any, _state(trigger="synthesis_gap"))
+        )

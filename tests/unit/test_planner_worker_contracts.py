@@ -144,15 +144,38 @@ def test_dispatch_requires_at_least_one_task_and_finish_omits_dispatch_fields() 
     }
 
 
-def test_planner_prompt_expresses_strategy_without_stage_labels() -> None:
+def test_planner_prompt_preserves_research_strategy_freedom() -> None:
     brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
     messages = initial_planner_messages(brief)
     system_prompt = str(messages[0]["content"])
 
-    assert "研究策略" in system_prompt
+    assert "研究任务的内容、拆分方式、先后顺序和研究方法由你决定" in system_prompt
+    assert "expected_evidence 只描述" in system_prompt
+    assert "改变、区分或限制" not in system_prompt
+    assert "检验因果方向" not in system_prompt
+    assert "寻找反例" not in system_prompt
+    assert "描述性探索" not in system_prompt
     assert "scout" not in system_prompt
     assert "deep_dive" not in system_prompt
     assert "completion_criteria" not in system_prompt
+
+
+def test_planner_continues_for_unresolved_questions_not_more_material() -> None:
+    brief = ResearchBrief(question="研究问题", brief_text="可探索多个相关方向。")
+    system_prompt = str(initial_planner_messages(brief)[0]["content"])
+
+    assert "没有已落库研究结果时，可以根据 Brief 自由展开" in system_prompt
+    assert "仅仅还能找到更多资料" in system_prompt
+    assert "某个候选方向尚未研究" in system_prompt
+    assert "重复已有" in system_prompt
+
+
+def test_planner_prompt_ties_finish_to_synthesis_and_marks_synthesis_gaps() -> None:
+    brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
+    system_prompt = str(initial_planner_messages(brief)[0]["content"])
+
+    assert "实质回答 Brief" in system_prompt
+    assert "research_synthesis" in system_prompt
 
 
 def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> None:
@@ -172,17 +195,17 @@ def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> 
     )
     message = str(initial_planner_messages(brief)[1]["content"])
 
-    assert "不可协商" in message
+    assert "最终结果必须遵守" in message
     assert "近三年" in message
     assert "只要一手数据" in message
     assert "不涉及监管政策" in message
-    binding = message.index("不可协商")
+    binding = message.index("最终结果必须遵守")
     suggestions = message.index("供你取舍")
     assert binding < suggestions < message.index("研究一个具体问题")
 
     bare = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
     bare_message = str(initial_planner_messages(bare)[1]["content"])
-    assert "不可协商" not in bare_message
+    assert "最终结果必须遵守" not in bare_message
     assert "没有提出额外限制" in bare_message
 
 

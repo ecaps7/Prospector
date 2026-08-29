@@ -21,19 +21,22 @@ class ResearchState(TypedDict):
     decision_round_limit: int
     active_task_ids: list[str]
     last_verifier_run_id: str | None
+    synthesis_run_id: str | None
     report_id: str | None
     report_markdown_ref: str | None
     report_json_ref: str | None
     outcome: str | None
     error_code: str | None
     planner_messages: list[dict[str, Any]]
-    verifier_trigger: Literal["planner_finish", "budget_exhausted"] | None
+    verifier_trigger: Literal["planner_finish", "budget_exhausted", "synthesis_gap"] | None
     route: Literal[
         "planner",
         "workers",
         "verifier",
+        "synthesis",
         "writer",
-        "report_verifier",
+        "attribution",
+        "review",
         "render",
         "end",
     ]
@@ -56,6 +59,7 @@ def initial_research_state(*, job_id: str, brief_id: str) -> ResearchState:
         "decision_round_limit": 0,
         "active_task_ids": [],
         "last_verifier_run_id": None,
+        "synthesis_run_id": None,
         "report_id": None,
         "report_markdown_ref": None,
         "report_json_ref": None,

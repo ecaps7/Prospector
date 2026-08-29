@@ -1,3 +1,5 @@
+# pyright: basic
+# ruff: noqa: E501, F821
 """Transactional persistence for the Planner-Worker research loop."""
 
 from __future__ import annotations
@@ -18,15 +20,7 @@ from prospector.deterministic.excerpt_text import (
     clip_excerpt_text,
 )
 from prospector.schemas.brief import EffortLevel, ResearchBrief, UserConstraints
-from prospector.schemas.claims import (
-    BridgeStatementDecision,
-    DerivedStatementDecision,
-    EvidenceStatementDecision,
-    ReportVerifierFindings,
-    ReportVerifierSnapshot,
-    ReportVerifierStatementInput,
-    StatementDecision,
-)
+from prospector.schemas.claims import AttributionRun, ReportReviewRun
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.events import EventType
 from prospector.schemas.evidence import (
@@ -38,7 +32,7 @@ from prospector.schemas.evidence import (
     SourceViewItem,
 )
 from prospector.schemas.plan import Plan, ResearchTask
-from prospector.schemas.report import ReportDraft, ReportParagraph, WriterSnapshot
+from prospector.schemas.report import ResearchSynthesisRun, WriterSnapshot
 from prospector.schemas.verifier import (
     AssertionDisposition,
     ConflictResolution,
@@ -49,6 +43,18 @@ from prospector.schemas.verifier import (
     validate_verifier_references,
 )
 from prospector.store.database import get_engine
+
+# Legacy structured-report methods below are retained only to inspect immutable historical
+# rows. They are not reachable from the post-attribution graph.
+ReportDraft: Any = object
+ReportParagraph: Any = object
+ReportVerifierFindings: Any = object
+ReportVerifierSnapshot: Any = object
+ReportVerifierStatementInput: Any = object
+StatementDecision: Any = object
+BridgeStatementDecision: Any = object
+DerivedStatementDecision: Any = object
+EvidenceStatementDecision: Any = object
 
 
 def _json(value: object) -> str:
@@ -1277,6 +1283,7 @@ class ResearchRepository:
         trigger: VerifierTrigger,
         decision_round: int,
         decision_round_limit: int,
+        synthesis_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reconstruct the Verifier's authority view from persisted business facts."""
         with self.engine.connect() as conn:
@@ -1365,6 +1372,22 @@ class ResearchRepository:
             else:
                 planner_finish_reason = None
 
+            prior_conflicts: dict[str, dict[str, Any]] = {}
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT c.conflict_key, c.disputed_point, c.excerpt_ids, c.decision,
+                           c.winning_excerpt_ids, c.rationale
+                    FROM app.conflict_resolutions c
+                    JOIN app.verifier_runs v ON v.id=c.verifier_run_id
+                    WHERE v.job_id=:job_id AND v.status='completed'
+                    ORDER BY v.evaluated_plan_version, v.created_at, c.conflict_key
+                    """
+                ),
+                {"job_id": job_id},
+            ).mappings():
+                prior_conflicts[str(row["conflict_key"])] = dict(row)
+
             prior_by_version = self._load_dispositions_by_plan_version(conn, job_id)
             prior_assertion_dispositions = [
                 {
@@ -1382,7 +1405,7 @@ class ResearchRepository:
 
         if not plans:
             raise RuntimeError("Verifier requires at least one persisted Plan")
-        return {
+        snapshot: dict[str, Any] = {
             "brief": dict(brief),
             "plans": plans,
             "tasks": tasks,
@@ -1396,11 +1419,20 @@ class ResearchRepository:
             "assertions": assertions,
             "excerpts": excerpts,
             "prior_assertion_dispositions": prior_assertion_dispositions,
+            # Conflicts a previous round already decided.  Each verifier run carries the
+            # conflict set the Writer will see, so a round that judges the same material
+            # again has to be shown what it is re-deciding.
+            "prior_conflict_resolutions": list(prior_conflicts.values()),
             "effective_unusable_assertion_ids": effective_unusable,
         }
+        if synthesis_request is not None:
+            # The Research Synthesis asked for more evidence.  Only its request reaches the
+            # Verifier -- the analysis draft itself is not the thing being judged here.
+            snapshot["synthesis_evidence_request"] = synthesis_request
+        return snapshot
 
     def get_completed_verifier_run(
-        self, job_id: UUID, evaluated_plan_version: int
+        self, job_id: UUID, evaluated_plan_version: int, trigger: VerifierTrigger
     ) -> dict[str, Any] | None:
         with self.engine.connect() as conn:
             row = (
@@ -1409,9 +1441,14 @@ class ResearchRepository:
                         """
                         SELECT * FROM app.verifier_runs
                         WHERE job_id=:job_id AND evaluated_plan_version=:plan_version
+                          AND trigger=:trigger
                         """
                     ),
-                    {"job_id": job_id, "plan_version": evaluated_plan_version},
+                    {
+                        "job_id": job_id,
+                        "plan_version": evaluated_plan_version,
+                        "trigger": trigger,
+                    },
                 )
                 .mappings()
                 .first()
@@ -1475,7 +1512,7 @@ class ResearchRepository:
                     VALUES
                       (:id, :job_id, :plan_version, :decision_round, :trigger,
                        CAST(:full_prompt AS JSONB), 'prompted', :now)
-                    ON CONFLICT (job_id, evaluated_plan_version) DO NOTHING
+                    ON CONFLICT (job_id, evaluated_plan_version, trigger) DO NOTHING
                     """
                 ),
                 {
@@ -1494,9 +1531,14 @@ class ResearchRepository:
                         """
                         SELECT id, full_prompt FROM app.verifier_runs
                         WHERE job_id=:job_id AND evaluated_plan_version=:plan_version
+                          AND trigger=:trigger
                         """
                     ),
-                    {"job_id": job_id, "plan_version": evaluated_plan_version},
+                    {
+                        "job_id": job_id,
+                        "plan_version": evaluated_plan_version,
+                        "trigger": trigger,
+                    },
                 )
                 .mappings()
                 .one()
@@ -1974,6 +2016,726 @@ class ResearchRepository:
             }
         )
 
+    # The v2 report records intentionally use separate tables.  Old structured drafts stay
+    # readable only as immutable history; no v2 code calls the legacy methods below.
+    def begin_synthesis_run(
+        self, job_id: UUID, full_prompt: list[dict[str, str]], verifier_run_id: UUID
+    ) -> tuple[UUID, int]:
+        run_id = uuid4()
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            # A crash between prompting and completion leaves a 'prompted' row that no
+            # completed-run lookup can see.  Reuse it, or the retry collides with the one
+            # synthesis run this verifier round is allowed to have.
+            pending = (
+                conn.execute(
+                    text(
+                        "SELECT id, version FROM app.research_synthesis_runs "
+                        "WHERE job_id=:job_id AND verifier_run_id=:verifier_run_id "
+                        "AND status <> 'completed'"
+                    ),
+                    {"job_id": job_id, "verifier_run_id": verifier_run_id},
+                )
+                .mappings()
+                .first()
+            )
+            if pending is not None:
+                conn.execute(
+                    text(
+                        "UPDATE app.research_synthesis_runs "
+                        "SET full_prompt=CAST(:prompt AS JSONB), status='prompted' WHERE id=:id"
+                    ),
+                    {"prompt": _json(full_prompt), "id": pending["id"]},
+                )
+                return UUID(str(pending["id"])), int(pending["version"])
+            version = int(
+                conn.execute(
+                    text(
+                        "SELECT COALESCE(MAX(version), 0) + 1 FROM app.research_synthesis_runs WHERE job_id=:job_id"
+                    ),
+                    {"job_id": job_id},
+                ).scalar_one()
+            )
+            conn.execute(
+                text("""INSERT INTO app.research_synthesis_runs
+                    (id, job_id, version, verifier_run_id, full_prompt, status, created_at)
+                    VALUES (:id, :job_id, :version, :verifier_run_id, CAST(:prompt AS JSONB), 'prompted', :now)"""),
+                {
+                    "id": run_id,
+                    "job_id": job_id,
+                    "version": version,
+                    "verifier_run_id": verifier_run_id,
+                    "prompt": _json(full_prompt),
+                    "now": now,
+                },
+            )
+        return run_id, version
+
+    def complete_synthesis_run(
+        self, run_id: UUID, result: ResearchSynthesisRun, raw_output: object
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""UPDATE app.research_synthesis_runs SET status='completed', decision=:decision,
+                    synthesis=:synthesis, assertion_ids=CAST(:assertions AS JSONB),
+                    material_conflict_keys=CAST(:conflicts AS JSONB), reason=:reason,
+                    evidence_needed=:needed, raw_output=CAST(:raw AS JSONB), completed_at=:now
+                    WHERE id=:id AND status='prompted'"""),
+                {
+                    "id": run_id,
+                    "decision": result.decision,
+                    "synthesis": result.synthesis,
+                    "assertions": _json(result.assertion_ids),
+                    "conflicts": _json(result.material_conflict_keys),
+                    "reason": result.reason,
+                    "needed": result.evidence_needed,
+                    "raw": _json(raw_output),
+                    "now": datetime.now(UTC),
+                },
+            )
+
+    def get_latest_synthesis_run(self, job_id: UUID) -> ResearchSynthesisRun | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT * FROM app.research_synthesis_runs WHERE job_id=:job_id AND status='completed' ORDER BY version DESC LIMIT 1"
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._synthesis_run(row)
+
+    def get_synthesis_run_for_verifier(
+        self, job_id: UUID, verifier_run_id: UUID
+    ) -> ResearchSynthesisRun | None:
+        """The synthesis built from one verifier run, which is what replay may reuse.
+
+        Keyed on the verifier run rather than on 'latest', because after a confirmed gap
+        sends the Job back through research, the previous synthesis is stale: reusing it
+        would return the same evidence request forever.
+        """
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT * FROM app.research_synthesis_runs "
+                        "WHERE job_id=:job_id AND verifier_run_id=:verifier_run_id "
+                        "AND status='completed'"
+                    ),
+                    {"job_id": job_id, "verifier_run_id": verifier_run_id},
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._synthesis_run(row)
+
+    @staticmethod
+    def _synthesis_run(row: Any) -> ResearchSynthesisRun:
+        return ResearchSynthesisRun(
+            synthesis_run_id=row["id"],
+            job_id=row["job_id"],
+            version=row["version"],
+            verifier_run_id=row["verifier_run_id"],
+            decision=row["decision"],
+            synthesis=row["synthesis"],
+            assertion_ids=row["assertion_ids"],
+            material_conflict_keys=row["material_conflict_keys"],
+            reason=row["reason"],
+            evidence_needed=row["evidence_needed"],
+            raw_output=row["raw_output"],
+        )
+
+    def begin_markdown_revision(
+        self,
+        job_id: UUID,
+        verifier_run_id: UUID,
+        synthesis_run_id: UUID,
+        full_prompt: list[dict[str, str]],
+        *,
+        bump: bool = False,
+    ) -> tuple[UUID, int]:
+        report_id = uuid4()
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""INSERT INTO app.report_runs_v2
+                    (id, job_id, verifier_run_id, current_revision, status, created_at, updated_at)
+                    VALUES (:id, :job_id, :verifier_run_id, 1, 'writing', :now, :now)
+                    ON CONFLICT (job_id) DO NOTHING"""),
+                {"id": report_id, "job_id": job_id, "verifier_run_id": verifier_run_id, "now": now},
+            )
+            current = (
+                conn.execute(
+                    text(
+                        "SELECT id, current_revision FROM app.report_runs_v2 WHERE job_id=:job_id"
+                    ),
+                    {"job_id": job_id},
+                )
+                .mappings()
+                .one()
+            )
+            report_id = UUID(str(current["id"]))
+            revision = int(current["current_revision"]) + (1 if bump else 0)
+            if bump:
+                conn.execute(
+                    text(
+                        "UPDATE app.report_runs_v2 SET current_revision=:revision, status='writing', updated_at=:now WHERE id=:id"
+                    ),
+                    {"id": report_id, "revision": revision, "now": now},
+                )
+            conn.execute(
+                text("""INSERT INTO app.report_revisions_v2
+                    (report_id, revision, synthesis_run_id, full_prompt, status, created_at)
+                    VALUES (:report_id, :revision, :synthesis, CAST(:prompt AS JSONB), 'prompted', :now)
+                    ON CONFLICT (report_id, revision) DO NOTHING"""),
+                {
+                    "report_id": report_id,
+                    "revision": revision,
+                    "synthesis": synthesis_run_id,
+                    "prompt": _json(full_prompt),
+                    "now": now,
+                },
+            )
+        return report_id, revision
+
+    def complete_markdown_revision(
+        self,
+        report_id: UUID,
+        revision: int,
+        markdown: str,
+        raw_output: object,
+        parsed_blocks: list[dict[str, Any]],
+        patch: dict[str, Any] | None = None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""UPDATE app.report_revisions_v2 SET raw_output=CAST(:raw AS JSONB), markdown=:markdown,
+                    markdown_hash=:hash, parsed_blocks=CAST(:blocks AS JSONB), patch=CAST(:patch AS JSONB),
+                    status='generated', completed_at=:now
+                    WHERE report_id=:report_id AND revision=:revision"""),
+                {
+                    "report_id": report_id,
+                    "revision": revision,
+                    "raw": _json(raw_output),
+                    "markdown": markdown,
+                    "hash": _hash(markdown),
+                    "blocks": _json(parsed_blocks),
+                    "patch": _json(patch),
+                    "now": datetime.now(UTC),
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE app.report_runs_v2 SET status='attributing', updated_at=:now WHERE id=:id"
+                ),
+                {"id": report_id, "now": datetime.now(UTC)},
+            )
+
+    def get_markdown_revision(
+        self, job_id: UUID, revision: int | None = None
+    ) -> dict[str, Any] | None:
+        """The report's current revision, or a named earlier one.
+
+        Incremental attribution needs the text the current revision was patched from, so
+        it can tell which blocks a repair actually rewrote.
+        """
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text("""SELECT r.id AS report_id, r.verifier_run_id, r.status AS report_status,
+                    r.verification_status, r.markdown_ref, r.json_ref, rr.*
+                    FROM app.report_runs_v2 r JOIN app.report_revisions_v2 rr
+                    ON rr.report_id=r.id
+                    AND rr.revision=COALESCE(CAST(:revision AS INTEGER), r.current_revision)
+                    WHERE r.job_id=:job_id"""),
+                    {"job_id": job_id, "revision": revision},
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
+    def begin_attribution_run(self, report_id: UUID, revision: int, plan: dict[str, Any]) -> UUID:
+        """Record the deterministic batch plan before the first model call."""
+
+        run_id = uuid4()
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            existing = (
+                conn.execute(
+                    text(
+                        """SELECT id, status FROM app.attribution_runs_v2
+                        WHERE report_id=:report AND revision=:revision"""
+                    ),
+                    {"report": report_id, "revision": revision},
+                )
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                if existing["status"] == "failed":
+                    conn.execute(
+                        text(
+                            """UPDATE app.attribution_runs_v2
+                            SET status='prompted', contract_error=NULL
+                            WHERE id=:id AND status='failed'"""
+                        ),
+                        {"id": existing["id"]},
+                    )
+                return UUID(str(existing["id"]))
+            conn.execute(
+                text(
+                    """INSERT INTO app.attribution_runs_v2
+                    (id, report_id, revision, full_prompt, status, created_at)
+                    VALUES (:id,:report,:revision,CAST(:plan AS JSONB),'prompted',:now)"""
+                ),
+                {
+                    "id": run_id,
+                    "report": report_id,
+                    "revision": revision,
+                    "plan": _json(plan),
+                    "now": now,
+                },
+            )
+        return run_id
+
+    def get_attribution_attempt(self, report_id: UUID, revision: int) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """SELECT id, report_id, revision, full_prompt, result, raw_output,
+                        contract_error, status FROM app.attribution_runs_v2
+                        WHERE report_id=:report AND revision=:revision"""
+                    ),
+                    {"report": report_id, "revision": revision},
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
+    def list_attribution_batches(self, run_id: UUID) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    text(
+                        """SELECT * FROM app.attribution_batches_v2
+                        WHERE attribution_run_id=:run_id ORDER BY batch_index"""
+                    ),
+                    {"run_id": run_id},
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+
+    def begin_attribution_batch(
+        self,
+        run_id: UUID,
+        batch_index: int,
+        *,
+        block_ids: Sequence[str],
+        candidate_refs: Sequence[str],
+        selection_prompt: list[dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        batch_id = uuid4()
+        with self.engine.begin() as conn:
+            existing = (
+                conn.execute(
+                    text(
+                        """SELECT * FROM app.attribution_batches_v2
+                        WHERE attribution_run_id=:run_id AND batch_index=:batch_index"""
+                    ),
+                    {"run_id": run_id, "batch_index": batch_index},
+                )
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                if existing["status"] in {"selected", "completed"}:
+                    return dict(existing)
+                if existing["status"] == "failed" and existing.get("selection_result"):
+                    return dict(existing)
+                conn.execute(
+                    text(
+                        """UPDATE app.attribution_batches_v2
+                        SET selection_prompt=CAST(:prompt AS JSONB), status='prompted',
+                            contract_error=NULL WHERE id=:id AND status IN ('prompted','failed')"""
+                    ),
+                    {"prompt": _json(selection_prompt), "id": existing["id"]},
+                )
+                return {
+                    **dict(existing),
+                    "status": "prompted",
+                    "selection_prompt": selection_prompt,
+                }
+            conn.execute(
+                text(
+                    """INSERT INTO app.attribution_batches_v2
+                    (id, attribution_run_id, batch_index, block_ids, candidate_refs,
+                     selection_prompt, status, created_at)
+                    VALUES (:id,:run_id,:batch_index,CAST(:blocks AS JSONB),CAST(:candidates AS JSONB),
+                            CAST(:prompt AS JSONB),'prompted',:now)"""
+                ),
+                {
+                    "id": batch_id,
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                    "blocks": _json(list(block_ids)),
+                    "candidates": _json(list(candidate_refs)),
+                    "prompt": _json(selection_prompt),
+                    "now": now,
+                },
+            )
+        return {
+            "id": batch_id,
+            "attribution_run_id": run_id,
+            "batch_index": batch_index,
+            "status": "prompted",
+            "selection_prompt": selection_prompt,
+        }
+
+    def save_attribution_batch_selection(
+        self,
+        run_id: UUID,
+        batch_index: int,
+        *,
+        raw_output: object,
+        result: dict[str, Any],
+        verify_prompt: list[dict[str, str]],
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_batches_v2
+                    SET selection_raw=CAST(:raw AS JSONB), selection_result=CAST(:result AS JSONB),
+                        verify_prompt=CAST(:prompt AS JSONB), status='selected', contract_error=NULL
+                    WHERE attribution_run_id=:run_id AND batch_index=:batch_index
+                      AND status IN ('prompted','selected','failed')"""
+                ),
+                {
+                    "raw": _json(raw_output),
+                    "result": _json(result),
+                    "prompt": _json(verify_prompt),
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                },
+            )
+
+    def complete_attribution_batch(
+        self,
+        run_id: UUID,
+        batch_index: int,
+        *,
+        raw_output: object,
+        result: dict[str, Any],
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_batches_v2
+                    SET verify_raw=CAST(:raw AS JSONB), verify_result=CAST(:result AS JSONB),
+                        status='completed', contract_error=NULL, completed_at=:now
+                    WHERE attribution_run_id=:run_id AND batch_index=:batch_index"""
+                ),
+                {
+                    "raw": _json(raw_output),
+                    "result": _json(result),
+                    "now": datetime.now(UTC),
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                },
+            )
+
+    def fail_attribution_batch(
+        self,
+        run_id: UUID,
+        batch_index: int,
+        *,
+        raw_output: object,
+        error: str,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_batches_v2
+                    SET verify_raw=CAST(:raw AS JSONB), contract_error=:error, status='failed',
+                        completed_at=:now
+                    WHERE attribution_run_id=:run_id AND batch_index=:batch_index"""
+                ),
+                {
+                    "raw": _json(raw_output),
+                    "error": error[:2000],
+                    "now": datetime.now(UTC),
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                },
+            )
+
+    def begin_attribution_summary(
+        self, run_id: UUID, prompt: list[dict[str, str]]
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            existing = (
+                conn.execute(
+                    text("SELECT raw_output FROM app.attribution_runs_v2 WHERE id=:id"),
+                    {"id": run_id},
+                )
+                .mappings()
+                .first()
+            )
+            payload = dict(existing["raw_output"] or {}) if existing else {}
+            if payload.get("summary_result"):
+                return payload
+            payload = {
+                **payload,
+                "summary_prompt": prompt,
+                "summary_prompted_at": now.isoformat(),
+            }
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_runs_v2
+                    SET raw_output=CAST(:raw AS JSONB) WHERE id=:id AND status IN ('prompted','failed')"""
+                ),
+                {"raw": _json(payload), "id": run_id},
+            )
+        return payload
+
+    def complete_attribution_summary(
+        self, run_id: UUID, *, raw_output: object, result: dict[str, Any]
+    ) -> None:
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text("SELECT raw_output FROM app.attribution_runs_v2 WHERE id=:id"),
+                {"id": run_id},
+            ).scalar_one_or_none()
+            payload = dict(existing or {})
+            payload.update({"summary_raw": raw_output, "summary_result": result})
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_runs_v2
+                    SET raw_output=CAST(:raw AS JSONB) WHERE id=:id AND status IN ('prompted','failed')"""
+                ),
+                {"raw": _json(payload), "id": run_id},
+            )
+
+    def fail_attribution_run(self, run_id: UUID, *, raw_output: object, error: str) -> None:
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text("SELECT raw_output FROM app.attribution_runs_v2 WHERE id=:id"),
+                {"id": run_id},
+            ).scalar_one_or_none()
+            payload = dict(existing) if isinstance(existing, dict) else {}
+            payload.update({"error_raw": raw_output, "error": error[:2000]})
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_runs_v2
+                    SET raw_output=CAST(:raw AS JSONB), contract_error=:error, status='failed',
+                        completed_at=:now
+                    WHERE id=:id AND status IN ('prompted','failed')"""
+                ),
+                {
+                    "raw": _json(payload),
+                    "error": error[:2000],
+                    "now": datetime.now(UTC),
+                    "id": run_id,
+                },
+            )
+
+    def complete_attribution_run(self, run: AttributionRun) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE app.attribution_runs_v2
+                    SET result=CAST(:result AS JSONB), status='completed', contract_error=NULL,
+                        completed_at=:now
+                    WHERE id=:id AND status IN ('prompted','failed')"""
+                ),
+                {
+                    "id": run.attribution_run_id,
+                    "result": _json(run.model_dump(mode="json")),
+                    "now": datetime.now(UTC),
+                },
+            )
+            conn.execute(
+                text(
+                    """UPDATE app.report_revisions_v2 SET status='attributed'
+                    WHERE report_id=:report AND revision=:revision"""
+                ),
+                {"report": run.report_id, "revision": run.revision},
+            )
+
+    def get_attribution_run(self, report_id: UUID, revision: int) -> AttributionRun | None:
+        with self.engine.connect() as conn:
+            data = conn.execute(
+                text(
+                    "SELECT result FROM app.attribution_runs_v2 WHERE report_id=:report AND revision=:revision AND status='completed'"
+                ),
+                {"report": report_id, "revision": revision},
+            ).scalar_one_or_none()
+        return AttributionRun.model_validate(data) if data else None
+
+    def save_report_review_run(
+        self, run: ReportReviewRun, full_prompt: list[dict[str, str]]
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""INSERT INTO app.report_review_runs_v2
+                (id, report_id, revision, synthesis_run_id, full_prompt, result, status, created_at, completed_at)
+                VALUES (:id,:report,:revision,:synthesis,CAST(:prompt AS JSONB),CAST(:result AS JSONB),'completed',:now,:now)
+                ON CONFLICT (report_id, revision) DO NOTHING"""),
+                {
+                    "id": run.review_run_id,
+                    "report": run.report_id,
+                    "revision": run.revision,
+                    "synthesis": run.synthesis_run_id,
+                    "prompt": _json(full_prompt),
+                    "result": _json(run.model_dump(mode="json")),
+                    "now": datetime.now(UTC),
+                },
+            )
+            conn.execute(
+                text(
+                    """UPDATE app.report_revisions_v2 SET status='reviewed'
+                    WHERE report_id=:report AND revision=:revision"""
+                ),
+                {"report": run.report_id, "revision": run.revision},
+            )
+
+    def save_readthrough(
+        self,
+        report_id: UUID,
+        revision: int,
+        *,
+        prompt: list[dict[str, str]],
+        raw_output: object,
+        result: dict[str, Any],
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""UPDATE app.report_review_runs_v2
+                    SET readthrough_prompt=CAST(:prompt AS JSONB),
+                        readthrough_raw=CAST(:raw AS JSONB),
+                        readthrough=CAST(:result AS JSONB)
+                    WHERE report_id=:report AND revision=:revision"""),
+                {
+                    "report": report_id,
+                    "revision": revision,
+                    "prompt": _json(prompt),
+                    "raw": _json(raw_output),
+                    "result": _json(result),
+                },
+            )
+
+    def get_readthrough(self, report_id: UUID, revision: int) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            data = conn.execute(
+                text(
+                    "SELECT readthrough FROM app.report_review_runs_v2 "
+                    "WHERE report_id=:report AND revision=:revision"
+                ),
+                {"report": report_id, "revision": revision},
+            ).scalar_one_or_none()
+        return cast("dict[str, Any] | None", data)
+
+    def get_report_review_run(self, report_id: UUID, revision: int) -> ReportReviewRun | None:
+        with self.engine.connect() as conn:
+            data = conn.execute(
+                text(
+                    "SELECT result FROM app.report_review_runs_v2 WHERE report_id=:report AND revision=:revision AND status='completed'"
+                ),
+                {"report": report_id, "revision": revision},
+            ).scalar_one_or_none()
+        return ReportReviewRun.model_validate(data) if data else None
+
+    def set_v2_report_status(self, report_id: UUID, status: str) -> None:
+        # A terminal verdict is also stored on its own column: rendering overwrites
+        # ``status`` with 'report_rendered', and an unqualified report is still delivered,
+        # so the verdict has to survive somewhere other than the phase field.
+        verdict = status if status in {"verified", "partial", "failed"} else None
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """UPDATE app.report_runs_v2 SET status=:status, updated_at=:now,
+                    verification_status=COALESCE(:verdict, verification_status) WHERE id=:id"""
+                ),
+                {
+                    "id": report_id,
+                    "status": status,
+                    "verdict": verdict,
+                    "now": datetime.now(UTC),
+                },
+            )
+
+    def complete_v2_report_render(
+        self,
+        job_id: UUID,
+        report_id: UUID,
+        *,
+        revision: int,
+        markdown_ref: str,
+        markdown_hash: str,
+        json_ref: str,
+        json_hash: str,
+        verification_status: str,
+    ) -> None:
+        """Record the rendered report and announce it the way the timeline expects.
+
+        The delivery event and the Job outcome are written in the same transaction as
+        the refs: a render that is durable but unannounced leaves the Job sitting at
+        'running' with a finished report nobody downstream can see.
+        """
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("""UPDATE app.report_runs_v2 SET status='report_rendered', markdown_ref=:markdown_ref,
+                    markdown_hash=:markdown_hash, json_ref=:json_ref, json_hash=:json_hash, updated_at=:now
+                    WHERE id=:id"""),
+                {
+                    "id": report_id,
+                    "markdown_ref": markdown_ref,
+                    "markdown_hash": markdown_hash,
+                    "json_ref": json_ref,
+                    "json_hash": json_hash,
+                    "now": now,
+                },
+            )
+            conn.execute(
+                text(
+                    """UPDATE app.report_revisions_v2 SET status='rendered'
+                    WHERE report_id=:report_id AND revision=:revision"""
+                ),
+                {"report_id": report_id, "revision": revision},
+            )
+            self._event(
+                conn,
+                job_id=job_id,
+                event_type=EventType.REPORT_DRAFT_RENDERED,
+                payload={
+                    "report_id": str(report_id),
+                    "revision": revision,
+                    "verification_status": verification_status,
+                    "markdown_ref": markdown_ref,
+                    "json_ref": json_ref,
+                    "structure": {},
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.jobs SET outcome='report_rendered', error_code=NULL, updated_at=:now
+                    WHERE id=:job_id
+                    """
+                ),
+                {"job_id": job_id, "now": now},
+            )
+
     def get_report_revision(
         self, job_id: UUID, *, revision: int | None = None
     ) -> dict[str, Any] | None:
@@ -2114,7 +2876,7 @@ class ResearchRepository:
     def complete_report_revision(
         self,
         report_id: UUID,
-        draft: ReportDraft,
+        draft: Any,
         raw_output: object,
         *,
         revision: int | None = None,
@@ -2587,10 +3349,10 @@ class ResearchRepository:
         self,
         run_id: UUID,
         *,
-        findings: ReportVerifierFindings,
+        findings: Any,
         statement_checks: list[dict[str, Any]],
         decisions: list[Any],
-        draft: ReportDraft,
+        draft: Any,
         report_id: UUID,
         revision: int,
         next_status: str,
@@ -2670,7 +3432,7 @@ class ResearchRepository:
         report_id: UUID,
         revision: int,
         run_id: UUID,
-        draft: ReportDraft,
+        draft: Any,
         decisions: list[Any],
         now: datetime,
     ) -> dict[str, UUID]:
@@ -2835,10 +3597,10 @@ class ResearchRepository:
         revision: int,
         round_number: int,
         dirty_statement_ids: set[str],
-        draft: ReportDraft,
+        draft: Any,
         skip_statement_verification: bool = False,
-        reused_statement_decisions: list[StatementDecision] | None = None,
-    ) -> ReportVerifierSnapshot:
+        reused_statement_decisions: list[Any] | None = None,
+    ) -> Any:
         with self.engine.connect() as conn:
             brief = (
                 conn.execute(
@@ -2925,7 +3687,7 @@ class ResearchRepository:
             passed_ids = self.get_passed_statement_ids(report_id, revision=revision)
 
         statement_map = {item.statement_id: item for item in draft.statements()}
-        scopes: list[tuple[str, str | None, list[ReportParagraph]]] = [
+        scopes: list[tuple[str, str | None, list[Any]]] = [
             ("introduction", None, list(draft.introduction)),
             *(("section", section.title, list(section.paragraphs)) for section in draft.sections),
             ("conclusion", None, list(draft.conclusion)),
@@ -3004,7 +3766,7 @@ class ResearchRepository:
             ],
         }
 
-        inputs: list[ReportVerifierStatementInput] = []
+        inputs: list[Any] = []
         allowed_excerpt_ids: list[UUID] = []
         for statement in draft.statements():
             if statement.statement_id not in dirty_statement_ids:

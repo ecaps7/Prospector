@@ -1,5 +1,5 @@
 """Deterministic report presentation."""
 
-from prospector.reporting.render import RenderedReportDraft, render_report_draft
+from prospector.reporting.render import RenderedReport, render_final_report
 
-__all__ = ["RenderedReportDraft", "render_report_draft"]
+__all__ = ["RenderedReport", "render_final_report"]

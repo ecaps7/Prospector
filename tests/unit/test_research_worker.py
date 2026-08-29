@@ -578,8 +578,8 @@ def test_worker_runtime_message_exposes_actions_and_concrete_limits() -> None:
 
     assert "search、save、finish" in message
     assert "自动抓取排名前 2 个结果" in message
-    assert "剩余决策轮：42" in message
-    assert "单轮并行工具调用上限：8" in message
+    assert "剩余：42" in message
+    assert "单轮并行上限：8" in message
 
 
 async def test_openai_summary_uses_required_fixed_slots_and_returns_ledger_order() -> None:
@@ -782,9 +782,9 @@ async def test_worker_executes_independent_calls_concurrently_within_round_budge
     assert feedback.worker_rounds_used == 2
     assert repository.round_events == [(1, 5), (2, 5)]
     assert feedback.stop_reason == "no_public_evidence"
-    assert "已使用决策轮：0" in model.runtime_messages[0]
-    assert "已使用决策轮：1" in model.runtime_messages[1]
-    assert "单轮并行工具调用上限" in model.runtime_messages[0]
+    assert "已使用：0" in model.runtime_messages[0]
+    assert "已使用：1" in model.runtime_messages[1]
+    assert "单轮并行上限" in model.runtime_messages[0]
 
 
 async def test_worker_stops_after_persisting_current_round_when_cancelled() -> None:
@@ -901,10 +901,10 @@ async def test_failed_tool_calls_still_consume_rounds_but_not_call_count() -> No
     assert feedback.tool_calls_used == 1
     assert feedback.worker_rounds_used == 3
     assert feedback.stop_reason == "no_public_evidence"
-    assert "已使用决策轮：0" in model.runtime_messages[0]
-    assert "已使用决策轮：1" in model.runtime_messages[1]
-    assert "已使用决策轮：2" in model.runtime_messages[2]
-    assert "剩余决策轮：3" in model.runtime_messages[2]
+    assert "已使用：0" in model.runtime_messages[0]
+    assert "已使用：1" in model.runtime_messages[1]
+    assert "已使用：2" in model.runtime_messages[2]
+    assert "剩余：3" in model.runtime_messages[2]
 
 
 async def test_two_failed_batches_do_not_force_worker_to_stop() -> None:

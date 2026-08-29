@@ -1,3 +1,5 @@
+# pyright: basic
+# ruff: noqa: E731, F821, F841
 """Checkpointed Planner decision loop with parallel, ledger-backed Research Workers."""
 
 from __future__ import annotations
@@ -24,16 +26,27 @@ from prospector.agents.planner import (
     initial_planner_messages,
 )
 from prospector.agents.prompts.research_verifier import research_verifier_messages
-from prospector.agents.report_verifier import (
-    OpenAIReportVerifier,
-    ReportVerifierModel,
-    ReportVerifierOutputError,
-    decisions_from_statement_checks,
+from prospector.agents.report_attribution import (
+    ClaimAttributionModel,
+    ClaimAttributionOutputError,
+    OpenAIClaimAttribution,
+    plan_incremental_attribution,
+    run_attribution,
+)
+from prospector.agents.report_readthrough import OpenAIReadthrough, ReadthroughModel
+from prospector.agents.report_review import (
+    OpenAIReportReview,
+    ReportReviewModel,
+    ReportReviewOutputError,
 )
 from prospector.agents.report_writer import (
     OpenAIReportWriter,
-    ReportWriterModel,
     ReportWriterOutputError,
+)
+from prospector.agents.research_synthesis import (
+    OpenAIResearchSynthesis,
+    ResearchSynthesisModel,
+    ResearchSynthesisOutputError,
 )
 from prospector.agents.research_verifier import (
     OpenAIResearchVerifier,
@@ -47,24 +60,19 @@ from prospector.agents.research_worker import (
 )
 from prospector.agents.usage import collect_usage
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
-from prospector.deterministic.citation_render import render_verified_report
-from prospector.deterministic.dirty_propagation import (
-    can_revise_again,
-    dirty_statement_ids,
-    skip_stage_one_after_requirement_rewrite,
-)
+from prospector.deterministic.citation_render import render_final_report
 from prospector.deterministic.gates import (
     dispatch_rejection,
     finish_rejection,
 )
-from prospector.deterministic.report_structure import measure_report_structure
+from prospector.deterministic.markdown_report import parse_markdown
 from prospector.flow.cancellation import JobCancelledError
 from prospector.flow.state import ResearchState
 from prospector.obs.logging import get_logger
 from prospector.schemas.brief import EffortLevel
-from prospector.schemas.claims import ReportVerifierFindings, StatementDecision
+from prospector.schemas.claims import MAX_WRITER_REPAIRS, final_report_status
 from prospector.schemas.decisions import PlannerDecision
-from prospector.schemas.report import ReportDraft
+from prospector.schemas.report import ResearchSynthesisRun
 from prospector.schemas.verifier import VerifierDecision
 from prospector.store.object_store import ObjectStore, workspace_key
 from prospector.store.repositories import ResearchRepository
@@ -79,6 +87,19 @@ tracer = trace.get_tracer("prospector.research_graph")
 # research budget; this cap is what keeps that retry loop terminating.
 MAX_CONSECUTIVE_SCHEMA_ERRORS = 3
 
+# Names used only by unreachable legacy structured-report recovery functions. They make
+# old interrupted checkpoints fail rather than silently entering the new report path.
+ReportDraft: Any = object
+ReportVerifierFindings: Any = object
+StatementDecision: Any = object
+ReportVerifierOutputError: Any = ValueError
+can_revise_again: Any = lambda _revision: False
+dirty_statement_ids: Any = lambda _draft: set()
+skip_stage_one_after_requirement_rewrite: Any = lambda _findings: False
+decisions_from_statement_checks: Any = lambda _checks: []
+render_verified_report: Any = lambda *args, **kwargs: None
+measure_report_structure: Any = lambda _draft: None
+
 
 @dataclass(slots=True)
 class ResearchGraphServices:
@@ -86,8 +107,14 @@ class ResearchGraphServices:
     planner: PlannerModel
     worker: ResearchWorker
     verifier: VerifierModel
-    writer: ReportWriterModel | None = None
-    report_verifier: ReportVerifierModel | None = None
+    writer: Any | None = None
+    synthesis: ResearchSynthesisModel | None = None
+    attribution: ClaimAttributionModel | None = None
+    readthrough: ReadthroughModel | None = None
+    review: ReportReviewModel | None = None
+    # Legacy report nodes below are unreachable after the v2 graph replaces them. Keeping
+    # this slot only makes interrupted pre-migration checkpoints fail diagnostically.
+    report_verifier: Any | None = None
     object_store: ObjectStore | None = None
     cancel_requested: Callable[[UUID], bool] = lambda _job_id: False
 
@@ -115,7 +142,10 @@ def default_research_services() -> ResearchGraphServices:
         ),
         verifier=OpenAIResearchVerifier(),
         writer=OpenAIReportWriter(),
-        report_verifier=OpenAIReportVerifier(),
+        synthesis=OpenAIResearchSynthesis(),
+        attribution=OpenAIClaimAttribution(),
+        readthrough=OpenAIReadthrough(),
+        review=OpenAIReportReview(),
         object_store=object_store,
         cancel_requested=repository.job_cancel_requested,
     )
@@ -607,8 +637,20 @@ def _verifier_node(services: ResearchGraphServices):
         plan_version = int(state["plan_version"])
         decision_round = int(state["decision_round"])
         trigger = state.get("verifier_trigger")
-        if trigger not in {"planner_finish", "budget_exhausted"}:
+        if trigger not in {"planner_finish", "budget_exhausted", "synthesis_gap"}:
             raise RuntimeError("Verifier entered without a valid trigger")
+        # A synthesis gap is judged by the same Verifier at the plan version that already
+        # passed, so the round is told apart by its trigger, not by a new plan version.
+        synthesis_request: dict[str, Any] | None = None
+        if trigger == "synthesis_gap":
+            requested = services.repository.get_latest_synthesis_run(job_id)
+            if requested is None or requested.decision != "needs_research":
+                raise RuntimeError("synthesis_gap verification entered without an evidence request")
+            synthesis_request = {
+                "synthesis_run_id": str(requested.synthesis_run_id),
+                "reason": requested.reason,
+                "evidence_needed": requested.evidence_needed,
+            }
 
         services.repository.record_phase_changed(
             job_id,
@@ -617,13 +659,14 @@ def _verifier_node(services: ResearchGraphServices):
             trigger=trigger,
         )
 
-        stored = services.repository.get_completed_verifier_run(job_id, plan_version)
+        stored = services.repository.get_completed_verifier_run(job_id, plan_version, trigger)
         if stored is None:
             snapshot = services.repository.build_verifier_snapshot(
                 job_id,
                 trigger=trigger,
                 decision_round=decision_round,
                 decision_round_limit=int(state["decision_round_limit"]),
+                synthesis_request=synthesis_request,
             )
             full_prompt = research_verifier_messages(snapshot)
             run_id = services.repository.begin_verifier_run(
@@ -694,13 +737,16 @@ def _verifier_node(services: ResearchGraphServices):
                 error_code=None,
                 phase="composition_pending",
             )
+            # Declining the synthesis gap does not restart the analysis: the Verifier's
+            # reason travels to the Writer as a minor gap of this run, and the limited
+            # synthesis is written up within that stated boundary.
             return {
                 "phase": "composition_pending",
                 "outcome": "ready_for_writer",
                 "error_code": None,
                 "last_verifier_run_id": str(run_id),
                 "verifier_trigger": None,
-                "route": "writer",
+                "route": "writer" if trigger == "synthesis_gap" else "synthesis",
             }
 
         rounds_remaining = int(state["decision_round_limit"]) - decision_round
@@ -726,6 +772,7 @@ def _verifier_node(services: ResearchGraphServices):
             feedback_type="verifier_gap",
             payload={
                 "verifier_run_id": str(run_id),
+                "gap_origin": "research_synthesis" if trigger == "synthesis_gap" else "verifier",
                 "major_gaps": major_gaps,
                 "unusable_assertions": unusable_assertions,
             },
@@ -752,7 +799,7 @@ def _verifier_node(services: ResearchGraphServices):
     return verifier
 
 
-def _writer_node(services: ResearchGraphServices):
+def _legacy_writer_node(services: ResearchGraphServices):
     def writer(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
         raw_run_id = state.get("last_verifier_run_id")
@@ -836,7 +883,7 @@ def _writer_node(services: ResearchGraphServices):
                 if latest is None or latest["status"] != "completed" or latest["findings"] is None:
                     raise RuntimeError("Revision requested without completed findings")
                 findings = latest["findings"]
-                full_prompt = report_writer_revision_messages(snapshot, draft, findings)
+                full_prompt = report_writer_revision_messages(snapshot, draft, findings)  # pyright: ignore
                 report_id, revision = services.repository.begin_report_revision(
                     job_id,
                     verifier_run_id,
@@ -855,7 +902,7 @@ def _writer_node(services: ResearchGraphServices):
                     ),
                     collect_usage(services.repository, job_id, "report_writer"),
                 ):
-                    result = services.writer.revise(snapshot, draft, findings)
+                    result = services.writer.revise(snapshot, draft, findings)  # pyright: ignore
                 if result.full_prompt[: len(full_prompt)] != full_prompt:
                     raise RuntimeError(
                         "Report Writer revise used a different prompt than persisted"
@@ -876,7 +923,7 @@ def _writer_node(services: ResearchGraphServices):
 
             from prospector.agents.prompts.report_writer import report_writer_messages
 
-            full_prompt = report_writer_messages(snapshot)
+            full_prompt = report_writer_messages(snapshot)  # pyright: ignore
             report_id, revision = services.repository.begin_report_revision(
                 job_id,
                 verifier_run_id,
@@ -951,7 +998,7 @@ def _writer_node(services: ResearchGraphServices):
 _VERIFY_TERMINAL_STATUSES = frozenset({"verified", "revisions_exhausted"})
 
 
-def _post_verify_status(findings: ReportVerifierFindings, revision: int) -> str:
+def _post_verify_status(findings: Any, revision: int) -> str:
     """Where the report goes after one verification pass.
 
     "verified" is reserved for a report where every statement passed. A report that
@@ -971,8 +1018,8 @@ def _stage_two_only_revision(
     report_id: UUID,
     *,
     revision: int,
-    draft: ReportDraft,
-) -> tuple[bool, list[StatementDecision]]:
+    draft: Any,
+) -> tuple[bool, list[Any]]:
     """Reuse prior sentence decisions when this revision exists only to fix stage two."""
     prior = services.repository.get_prior_completed_report_verifier_run(
         report_id,
@@ -1115,9 +1162,7 @@ def _report_verifier_node(services: ResearchGraphServices):
                     ):
                         result = services.report_verifier.verify(rv_snapshot)
                 except (ReportVerifierOutputError, ValueError) as exc:
-                    raw_output = (
-                        exc.raw_output if isinstance(exc, ReportVerifierOutputError) else None
-                    )
+                    raw_output = getattr(exc, "raw_output", None)
                     services.repository.fail_report_verifier_run(
                         job_id,
                         report_id,
@@ -1185,7 +1230,7 @@ def _report_verifier_node(services: ResearchGraphServices):
     return report_verifier
 
 
-def _render_node(services: ResearchGraphServices):
+def _legacy_render_node(services: ResearchGraphServices):
     def render(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
         raw_run_id = state.get("last_verifier_run_id")
@@ -1325,6 +1370,359 @@ def _guard_cancelled(
     return guarded
 
 
+def _synthesis_node(services: ResearchGraphServices):
+    def synthesis(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        verifier_run_id = UUID(str(state["last_verifier_run_id"]))
+        if services.synthesis is None:
+            raise RuntimeError("Research Synthesis service is not configured")
+        stored = services.repository.get_synthesis_run_for_verifier(job_id, verifier_run_id)
+        if stored is None:
+            snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+            from prospector.agents.research_synthesis import research_synthesis_messages
+
+            prompt = research_synthesis_messages(snapshot)
+            run_id, version = services.repository.begin_synthesis_run(
+                job_id, prompt, verifier_run_id
+            )
+            services.repository.record_phase_changed(job_id, "composition")
+            try:
+                result = services.synthesis.synthesize(snapshot)
+            except ResearchSynthesisOutputError as exc:
+                services.repository.set_research_outcome(
+                    job_id, outcome="failed", error_code="synthesis_contract_error", phase="failed"
+                )
+                raise
+            stored = ResearchSynthesisRun(
+                synthesis_run_id=run_id,
+                job_id=job_id,
+                version=version,
+                verifier_run_id=verifier_run_id,
+                raw_output=result.raw_output,
+                **result.result.model_dump(mode="python"),
+            )
+            services.repository.complete_synthesis_run(run_id, stored, result.raw_output)
+        if stored.decision == "needs_research":
+            # The Research Verifier owns major-gap admission, so the evidence request goes
+            # to it first.  Only a gap it confirms may enter the closed Planner thread; a
+            # gap it declines becomes a minor gap and the report is written regardless.
+            return {
+                "phase": "verifier",
+                "synthesis_run_id": str(stored.synthesis_run_id),
+                "verifier_trigger": "synthesis_gap",
+                "route": "verifier",
+            }
+        return {
+            "phase": "composition",
+            "synthesis_run_id": str(stored.synthesis_run_id),
+            "route": "writer",
+        }
+
+    return synthesis
+
+
+def _writer_node(services: ResearchGraphServices):
+    def writer(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        verifier_run_id = UUID(str(state["last_verifier_run_id"]))
+        synthesis = services.repository.get_latest_synthesis_run(job_id)
+        if services.writer is None or synthesis is None:
+            raise RuntimeError("Markdown Writer entered without a Research Synthesis")
+        snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+        stored = services.repository.get_markdown_revision(job_id)
+        if stored is not None and stored["status"] == "generated":
+            return {"report_id": str(stored["report_id"]), "route": "attribution"}
+        try:
+            if stored is not None and stored["report_status"] == "revising":
+                attribution = services.repository.get_attribution_run(
+                    stored["report_id"], stored["revision"]
+                )
+                review = services.repository.get_report_review_run(
+                    stored["report_id"], stored["revision"]
+                )
+                if attribution is None or review is None:
+                    raise RuntimeError("revision is missing completed attribution or review")
+                readthrough = services.repository.get_readthrough(
+                    stored["report_id"], stored["revision"]
+                )
+                from prospector.agents.prompts.report_writer import report_writer_revision_messages
+
+                prompt = report_writer_revision_messages(
+                    snapshot,
+                    synthesis,
+                    stored["markdown"],
+                    attribution,
+                    review,
+                    readthrough=readthrough,
+                )
+                report_id, revision = services.repository.begin_markdown_revision(
+                    job_id, verifier_run_id, synthesis.synthesis_run_id, prompt, bump=True
+                )
+                services.repository.record_phase_changed(job_id, "writing", revision=revision)
+                result = services.writer.revise(
+                    snapshot,
+                    synthesis,
+                    stored["markdown"],
+                    attribution,
+                    review,
+                    readthrough=readthrough,
+                )
+            else:
+                from prospector.agents.prompts.report_writer import report_writer_messages
+
+                prompt = report_writer_messages(snapshot, synthesis)
+                report_id, revision = services.repository.begin_markdown_revision(
+                    job_id, verifier_run_id, synthesis.synthesis_run_id, prompt
+                )
+                services.repository.record_phase_changed(job_id, "writing", revision=revision)
+                result = services.writer.write(snapshot, synthesis)
+            blocks = parse_markdown(result.markdown)
+            services.repository.complete_markdown_revision(
+                report_id,
+                revision,
+                result.markdown,
+                result.raw_output,
+                [block.model_dump(mode="json") for block in blocks],
+                patch=None
+                if result.patch is None
+                else {
+                    "replacements": result.patch.model_dump(mode="json")["replacements"],
+                    "audit_note": result.patch.audit_note,
+                    "rejected": list(result.rejected),
+                },
+            )
+        except ReportWriterOutputError:
+            services.repository.set_research_outcome(
+                job_id, outcome="failed", error_code="writer_contract_error", phase="failed"
+            )
+            raise
+        return {"phase": "attributing", "report_id": str(report_id), "route": "attribution"}
+
+    return writer
+
+
+def _attribution_node(services: ResearchGraphServices):
+    def attribution(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        verifier_run_id = UUID(str(state["last_verifier_run_id"]))
+        stored = services.repository.get_markdown_revision(job_id)
+        if stored is None or stored["markdown"] is None or services.attribution is None:
+            raise RuntimeError("Attribution entered without a Markdown revision")
+        run = services.repository.get_attribution_run(stored["report_id"], stored["revision"])
+        if run is None:
+            snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+            previous = (
+                services.repository.get_attribution_run(stored["report_id"], stored["revision"] - 1)
+                if stored["revision"] > 1
+                else None
+            )
+            previous_review = (
+                services.repository.get_report_review_run(
+                    stored["report_id"], stored["revision"] - 1
+                )
+                if stored["revision"] > 1
+                else None
+            )
+            carried = None
+            if previous is not None:
+                earlier = services.repository.get_markdown_revision(
+                    job_id, revision=stored["revision"] - 1
+                )
+                if earlier is not None and earlier["markdown"]:
+                    carried = plan_incremental_attribution(
+                        previous,
+                        parse_markdown(earlier["markdown"]),
+                        parse_markdown(stored["markdown"]),
+                    )
+            try:
+                services.repository.record_phase_changed(
+                    job_id, "attributing", revision=stored["revision"]
+                )
+                run_attribution(
+                    services.attribution,
+                    stored["report_id"],
+                    stored["revision"],
+                    stored["markdown"],
+                    snapshot,
+                    previous,
+                    previous_review,
+                    store=services.repository,
+                    carried=carried,
+                )
+            except ClaimAttributionOutputError:
+                services.repository.set_research_outcome(
+                    job_id,
+                    outcome="failed",
+                    error_code="attribution_contract_error",
+                    phase="failed",
+                )
+                raise
+        services.repository.set_v2_report_status(stored["report_id"], "reviewing")
+        return {"phase": "reviewing", "report_id": str(stored["report_id"]), "route": "review"}
+
+    return attribution
+
+
+def _review_node(services: ResearchGraphServices):
+    def review(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        verifier_run_id = UUID(str(state["last_verifier_run_id"]))
+        stored = services.repository.get_markdown_revision(job_id)
+        if stored is None or services.review is None:
+            raise RuntimeError("Whole-report Review entered without a Markdown revision")
+        synthesis = services.repository.get_latest_synthesis_run(job_id)
+        attribution = services.repository.get_attribution_run(
+            stored["report_id"], stored["revision"]
+        )
+        if synthesis is None or attribution is None:
+            raise RuntimeError("Whole-report Review is missing its inputs")
+        review_run = services.repository.get_report_review_run(
+            stored["report_id"], stored["revision"]
+        )
+        if review_run is None:
+            snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+            try:
+                services.repository.record_phase_changed(
+                    job_id, "reviewing", revision=stored["revision"]
+                )
+                result = services.review.review(
+                    stored["report_id"],
+                    stored["revision"],
+                    stored["markdown"],
+                    synthesis,
+                    attribution,
+                    snapshot,
+                )
+            except ReportReviewOutputError:
+                services.repository.set_research_outcome(
+                    job_id, outcome="failed", error_code="review_contract_error", phase="failed"
+                )
+                raise
+            review_run = result.run
+            services.repository.save_report_review_run(review_run, result.full_prompt)
+        repairs_used = int(stored["revision"]) - 1
+        status = final_report_status(attribution, review_run, repairs_used=repairs_used)
+        if status != "revising" and services.readthrough is not None:
+            # Coherence is judged only once the facts have stopped moving.  Running it on
+            # a revision that is already going back to the Writer would spend a call on
+            # prose that is about to change.
+            stored_read = services.repository.get_readthrough(
+                stored["report_id"], stored["revision"]
+            )
+            if stored_read is None:
+                result = services.readthrough.read_through(stored["markdown"])
+                stored_read = result.output.model_dump(mode="json")
+                services.repository.save_readthrough(
+                    stored["report_id"],
+                    stored["revision"],
+                    prompt=result.full_prompt,
+                    raw_output=result.raw_output,
+                    result=stored_read,
+                )
+            # A report that reads badly is worth one more repair, but never worth
+            # withholding: if the budget is gone the findings travel in the audit output
+            # and the reader still gets the report.
+            if stored_read.get("findings") and repairs_used < MAX_WRITER_REPAIRS:
+                status = "revising"
+        services.repository.set_v2_report_status(stored["report_id"], status)
+        if status == "revising":
+            services.repository.record_phase_changed(
+                job_id, "revising", revision=stored["revision"]
+            )
+            return {"phase": "revising", "route": "writer"}
+        # An unqualified report is still delivered.  Discarding a whole Job's research on
+        # one reviewer opinion the Writer could not settle within its budget is a worse
+        # outcome than handing over the report with its verdict recorded; the verdict
+        # travels in report_runs_v2.verification_status and in the audit JSON.
+        # ``failed`` is a report verdict, not a terminal Job failure: rendering still
+        # delivers the report with its verification result.  Keep its timeline event
+        # distinct from the terminal Job phase so the local follower does not stop early.
+        timeline_phase = "report_failed" if status == "failed" else status
+        services.repository.record_phase_changed(
+            job_id, timeline_phase, revision=stored["revision"]
+        )
+        return {"phase": status, "route": "render"}
+
+    return review
+
+
+def _render_node(services: ResearchGraphServices):
+    def render(state: ResearchState) -> dict[str, Any]:
+        job_id = UUID(state["job_id"])
+        verifier_run_id = UUID(str(state["last_verifier_run_id"]))
+        stored = services.repository.get_markdown_revision(job_id)
+        if stored is None or services.object_store is None:
+            raise RuntimeError("Finalization entered without report storage")
+        if stored["report_status"] == "report_rendered":
+            # A replayed checkpoint must not render twice: the second pass would emit a
+            # second delivery event for a report the reader already has.
+            return {
+                "phase": "report_rendered",
+                "outcome": "report_rendered",
+                "report_id": str(stored["report_id"]),
+                "report_markdown_ref": stored["markdown_ref"],
+                "report_json_ref": stored["json_ref"],
+                "route": "end",
+            }
+        attribution = services.repository.get_attribution_run(
+            stored["report_id"], stored["revision"]
+        )
+        review = services.repository.get_report_review_run(stored["report_id"], stored["revision"])
+        if attribution is None or review is None:
+            raise RuntimeError("Finalization entered without AttributionRun and ReportReviewRun")
+        services.repository.record_phase_changed(job_id, "rendering", revision=stored["revision"])
+        snapshot = services.repository.build_writer_snapshot(job_id, verifier_run_id)
+        verdict = str(stored.get("verification_status") or stored["report_status"])
+        rendered = render_final_report(
+            stored["markdown"],
+            parse_markdown(stored["markdown"]),
+            attribution,
+            review,
+            snapshot,
+            status=verdict,
+            readthrough=services.repository.get_readthrough(
+                stored["report_id"], int(stored["revision"])
+            ),
+        )
+        base_key = workspace_key(
+            services.repository.settings.workspace_id,
+            "reports",
+            str(job_id),
+            str(stored["revision"]),
+        )
+        markdown_ref = services.object_store.put_bytes(
+            f"{base_key}/report.md",
+            rendered.markdown.encode(),
+            content_type="text/markdown; charset=utf-8",
+        )
+        json_ref = services.object_store.put_bytes(
+            f"{base_key}/report.json", rendered.json_text.encode(), content_type="application/json"
+        )
+        services.repository.complete_v2_report_render(
+            job_id,
+            stored["report_id"],
+            revision=int(stored["revision"]),
+            markdown_ref=markdown_ref.as_uri(),
+            markdown_hash="sha256:" + hashlib.sha256(rendered.markdown.encode()).hexdigest(),
+            json_ref=json_ref.as_uri(),
+            json_hash="sha256:" + hashlib.sha256(rendered.json_text.encode()).hexdigest(),
+            verification_status=verdict,
+        )
+        services.repository.record_phase_changed(
+            job_id, "report_rendered", revision=stored["revision"]
+        )
+        return {
+            "phase": "report_rendered",
+            "outcome": "report_rendered",
+            "report_id": str(stored["report_id"]),
+            "report_markdown_ref": markdown_ref.as_uri(),
+            "report_json_ref": json_ref.as_uri(),
+            "route": "end",
+        }
+
+    return render
+
+
 def build_research_graph(
     checkpointer: BaseCheckpointSaver,
     services: ResearchGraphServices | None = None,
@@ -1335,11 +1733,10 @@ def build_research_graph(
     graph.add_node("planner", _guard_cancelled(_planner_node(runtime), runtime))
     graph.add_node("workers", _guard_cancelled(_workers_node(runtime), runtime))
     graph.add_node("verifier", _guard_cancelled(_verifier_node(runtime), runtime))
+    graph.add_node("synthesis", _guard_cancelled(_synthesis_node(runtime), runtime))
     graph.add_node("writer", _guard_cancelled(_writer_node(runtime), runtime))
-    graph.add_node(
-        "report_verifier",
-        _guard_cancelled(_report_verifier_node(runtime), runtime),
-    )
+    graph.add_node("attribution", _guard_cancelled(_attribution_node(runtime), runtime))
+    graph.add_node("review", _guard_cancelled(_review_node(runtime), runtime))
     graph.add_node("render", _guard_cancelled(_render_node(runtime), runtime))
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "planner")
@@ -1351,6 +1748,7 @@ def build_research_graph(
             "workers": "workers",
             "verifier": "verifier",
             "writer": "writer",
+            "synthesis": "synthesis",
             "end": END,
         },
     )
@@ -1358,17 +1756,21 @@ def build_research_graph(
     graph.add_conditional_edges(
         "verifier",
         _route,
-        {"planner": "planner", "writer": "writer", "end": END},
+        {"planner": "planner", "synthesis": "synthesis", "writer": "writer", "end": END},
     )
+    graph.add_conditional_edges("synthesis", _route, {"verifier": "verifier", "writer": "writer"})
     graph.add_conditional_edges(
         "writer",
         _route,
-        {"report_verifier": "report_verifier", "end": END},
+        {"attribution": "attribution", "end": END},
     )
     graph.add_conditional_edges(
-        "report_verifier",
+        "attribution",
         _route,
-        {"writer": "writer", "render": "render", "end": END},
+        {"review": "review", "end": END},
+    )
+    graph.add_conditional_edges(
+        "review", _route, {"writer": "writer", "render": "render", "end": END}
     )
     graph.add_conditional_edges(
         "render",

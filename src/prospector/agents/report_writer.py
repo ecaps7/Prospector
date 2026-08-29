@@ -1,11 +1,4 @@
-"""Strong-model adapter for structured deep-research report writing.
-
-The Writer holds one continuous authoring conversation: the model emits a flat
-line-record stream (see prospector.schemas.report_stream), the runtime folds it
-into a ReportDraft turn by turn, asks the model to continue when a turn ends
-before {"record": "end"}, and feeds validation errors back for a localized
-rewrite instead of restarting the whole report.
-"""
+"""Markdown-only Report Writer adapter."""
 
 from __future__ import annotations
 
@@ -17,41 +10,51 @@ from pydantic import ValidationError
 
 from prospector.agents.llm import get_openai_client, strong_model, thinking_extra_body
 from prospector.agents.prompts.report_writer import (
-    continuation_message,
-    patch_restart_message,
     report_writer_messages,
     report_writer_revision_messages,
-    retry_message,
 )
 from prospector.agents.streaming import stream_text
-from prospector.deterministic.statement_patches import (
-    apply_report_patches,
-    preceding_statement_ids,
+from prospector.deterministic.markdown_report import (
+    MarkdownContractError,
+    apply_block_replacements,
+    parse_markdown,
 )
-from prospector.schemas.claims import ReportVerifierFindings
-from prospector.schemas.report import ReportDraft, WriterSnapshot, validate_writer_draft
-from prospector.schemas.report_patch import ReportPatchAssembler
-from prospector.schemas.report_stream import ReportStreamAssembler, ReportStreamError
+from prospector.schemas.claims import AttributionRun, ReportReviewRun
+from prospector.schemas.report import (
+    ReportRevisionPatch,
+    ResearchSynthesisRun,
+    WriterSnapshot,
+)
 
-MAX_WRITER_TURNS = 16
-MAX_ERROR_FEEDBACKS = 3
+WRITER_ATTEMPTS = 2
 
 
 @dataclass(frozen=True, slots=True)
 class ReportWriterResult:
     full_prompt: list[dict[str, str]]
     raw_output: object
-    draft: ReportDraft
+    markdown: str
+    patch: ReportRevisionPatch | None = None
+    # Character ranges of newly written text in ``markdown``.  Empty on a first draft,
+    # where every block is new; on a revision this is what the next attribution round
+    # uses to tell rewritten passages from ones that keep their verdicts.
+    new_regions: tuple[tuple[int, int], ...] = ()
+    rejected: tuple[dict[str, object], ...] = ()
 
 
 class ReportWriterModel(Protocol):
-    def write(self, snapshot: WriterSnapshot) -> ReportWriterResult: ...
+    def write(
+        self, snapshot: WriterSnapshot, synthesis: ResearchSynthesisRun
+    ) -> ReportWriterResult: ...
 
     def revise(
         self,
         snapshot: WriterSnapshot,
-        draft: ReportDraft,
-        findings: ReportVerifierFindings,
+        synthesis: ResearchSynthesisRun,
+        markdown: str,
+        attribution: AttributionRun,
+        review: ReportReviewRun,
+        readthrough: dict[str, object] | None = None,
     ) -> ReportWriterResult: ...
 
 
@@ -66,10 +69,79 @@ class OpenAIReportWriter:
         self.client = client or get_openai_client()
         self.model = model or strong_model()
 
-    def _stream_content(
+    def _complete(self, messages: list[dict[str, str]]) -> ReportWriterResult:
+        # One retry before giving up: a malformed draft is a formatting slip, and failing
+        # the Job discards every Assertion the research phase paid for.
+        last: MarkdownContractError | None = None
+        content = ""
+        for _ in range(WRITER_ATTEMPTS):
+            content = stream_text(
+                self.client,
+                agent="report_writer",
+                model=self.model,
+                messages=messages,
+                temperature=0.2,
+                extra_body=thinking_extra_body(self.model),
+            ).strip()
+            try:
+                parse_markdown(content)
+            except MarkdownContractError as exc:
+                last = exc
+                continue
+            return ReportWriterResult(full_prompt=messages, raw_output=content, markdown=content)
+        raise ReportWriterOutputError(f"invalid Markdown Writer output: {last}", content)
+
+    def write(
+        self, snapshot: WriterSnapshot, synthesis: ResearchSynthesisRun
+    ) -> ReportWriterResult:
+        return self._complete(report_writer_messages(snapshot, synthesis))
+
+    def revise(
         self,
-        messages: list[dict[str, str]],
-    ) -> str:
+        snapshot: WriterSnapshot,
+        synthesis: ResearchSynthesisRun,
+        markdown: str,
+        attribution: AttributionRun,
+        review: ReportReviewRun,
+        readthrough: dict[str, object] | None = None,
+    ) -> ReportWriterResult:
+        """Apply the Writer's patch to the frozen report; never re-emit the whole thing.
+
+        A full rewrite was measured on this project's own history: two revisions asked for
+        19 and 39 fixes and came back with 25% and 15% of the document changed, and the
+        first of them left the report with more statements and new failures than it
+        started with.  Rewriting is not how coherence is kept, it is how it is re-rolled.
+        """
+        messages = report_writer_revision_messages(
+            snapshot, synthesis, markdown, attribution, review, readthrough=readthrough
+        )
+        blocks = parse_markdown(markdown)
+        last: Exception | None = None
+        raw = ""
+        for _ in range(WRITER_ATTEMPTS):
+            raw = self._request(messages)
+            try:
+                patch = ReportRevisionPatch.model_validate_json(raw)
+            except (ValidationError, ValueError) as exc:
+                last = exc
+                continue
+            applied = apply_block_replacements(markdown, blocks, patch.replacements)
+            try:
+                parse_markdown(applied.markdown)
+            except MarkdownContractError as exc:
+                last = exc
+                continue
+            return ReportWriterResult(
+                full_prompt=messages,
+                raw_output=raw,
+                markdown=applied.markdown,
+                patch=patch,
+                new_regions=applied.new_regions,
+                rejected=applied.rejected,
+            )
+        raise ReportWriterOutputError(f"invalid Markdown Writer revision: {last}", raw)
+
+    def _request(self, messages: list[dict[str, str]]) -> str:
         return stream_text(
             self.client,
             agent="report_writer",
@@ -77,142 +149,4 @@ class OpenAIReportWriter:
             messages=messages,
             temperature=0.2,
             extra_body=thinking_extra_body(self.model),
-        )
-
-    def write(self, snapshot: WriterSnapshot) -> ReportWriterResult:
-        return self._write_complete(
-            snapshot,
-            report_writer_messages(snapshot),
-            empty_error="Report Writer returned empty content",
-        )
-
-    def _write_complete(
-        self,
-        snapshot: WriterSnapshot,
-        messages: list[dict[str, str]],
-        *,
-        empty_error: str,
-    ) -> ReportWriterResult:
-        assembler = ReportStreamAssembler(snapshot)
-        turns: list[str] = []
-        error_feedbacks = 0
-        for _ in range(MAX_WRITER_TURNS):
-            content = self._stream_content(messages)
-            turns.append(content)
-            if not content.strip():
-                raise ReportWriterOutputError(empty_error, turns)
-            messages.append({"role": "assistant", "content": content})
-            outcome = assembler.consume(content)
-            if assembler.done:
-                break
-            if outcome.error is not None:
-                error_feedbacks += 1
-                if error_feedbacks > MAX_ERROR_FEEDBACKS:
-                    raise ReportWriterOutputError(
-                        f"invalid Report Writer output after retries: {outcome.error}", turns
-                    )
-                feedback = retry_message(outcome.error, assembler.last_accepted)
-                messages.append({"role": "user", "content": feedback})
-            else:
-                messages.append(
-                    {"role": "user", "content": continuation_message(assembler.last_accepted)}
-                )
-        else:
-            raise ReportWriterOutputError(
-                f"Report Writer did not finish within {MAX_WRITER_TURNS} turns", turns
-            )
-        try:
-            draft = assembler.build()
-            validate_writer_draft(snapshot, draft)
-        except (ValidationError, ReportStreamError, ValueError) as exc:
-            raise ReportWriterOutputError(f"invalid Report Writer output: {exc}", turns) from exc
-        return ReportWriterResult(full_prompt=messages, raw_output=turns, draft=draft)
-
-    def revise(
-        self,
-        snapshot: WriterSnapshot,
-        draft: ReportDraft,
-        findings: ReportVerifierFindings,
-    ) -> ReportWriterResult:
-        if findings.all_passed:
-            raise ReportWriterOutputError("revision requested with empty findings", findings)
-        messages = report_writer_revision_messages(snapshot, draft, findings)
-        if findings.report_rewrite_required:
-            return self._write_complete(
-                snapshot,
-                messages,
-                empty_error="Report Writer full revision returned empty content",
-            )
-        allowed_paragraphs = findings.paragraph_repair_ids
-        paragraph_by_statement = {
-            statement.statement_id: paragraph.paragraph_id
-            for paragraph in draft.paragraphs()
-            for statement in paragraph.statements
-        }
-        allowed = {
-            item.statement_id
-            for item in findings.failures
-            if paragraph_by_statement.get(item.statement_id) not in allowed_paragraphs
-        }
-        legal_premise_ids = preceding_statement_ids(draft)
-
-        def new_assembler() -> ReportPatchAssembler:
-            return ReportPatchAssembler(
-                snapshot=snapshot,
-                allowed_statement_ids=allowed,
-                legal_premise_ids=legal_premise_ids,
-                allowed_paragraph_ids=allowed_paragraphs,
-            )
-
-        assembler = new_assembler()
-        turns: list[str] = []
-        error_feedbacks = 0
-        for _ in range(MAX_WRITER_TURNS):
-            content = self._stream_content(messages)
-            turns.append(content)
-            if not content.strip():
-                raise ReportWriterOutputError("Report Writer revise returned empty content", turns)
-            messages.append({"role": "assistant", "content": content})
-            outcome = assembler.consume(content)
-            error = outcome.error
-            restart = False
-            if error is None and assembler.done:
-                try:
-                    patched = apply_report_patches(
-                        draft,
-                        statement_patches=assembler.patches,
-                        paragraph_patches=assembler.paragraph_patches,
-                        allowed_statement_ids=allowed,
-                        allowed_paragraph_ids=allowed_paragraphs,
-                    )
-                    validate_writer_draft(snapshot, patched)
-                except (ValidationError, ReportStreamError, ValueError) as exc:
-                    # Invariants that only hold across the finished draft -- a reasoning chain
-                    # deepened by a patch, say -- cannot be judged until every patch is in.
-                    # Feeding the rejection back costs one turn; raising here used to cost the
-                    # entire Job, research included.
-                    error = str(exc)
-                    restart = True
-                    assembler = new_assembler()
-                else:
-                    return ReportWriterResult(full_prompt=messages, raw_output=turns, draft=patched)
-            if error is not None:
-                error_feedbacks += 1
-                if error_feedbacks > MAX_ERROR_FEEDBACKS:
-                    raise ReportWriterOutputError(
-                        f"invalid Report Writer revise output after retries: {error}",
-                        turns,
-                    )
-                feedback = (
-                    patch_restart_message(error)
-                    if restart
-                    else retry_message(error, assembler.last_accepted)
-                )
-                messages.append({"role": "user", "content": feedback})
-            else:
-                messages.append(
-                    {"role": "user", "content": continuation_message(assembler.last_accepted)}
-                )
-        raise ReportWriterOutputError(
-            f"Report Writer revise did not finish within {MAX_WRITER_TURNS} turns", turns
-        )
+        ).strip()

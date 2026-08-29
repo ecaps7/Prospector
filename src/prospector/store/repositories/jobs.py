@@ -327,10 +327,15 @@ class JobRepository:
         ).scalar_one_or_none()
         return None if value is None else str(value)
 
+    # Terminal phases that mean the graph delivered a report.  'draft_rendered' is the
+    # pre-refactor name and stays accepted so a checkpoint written before the rename can
+    # still finalize; 'report_rendered' is what the current pipeline emits.
+    RENDERED_PHASES = frozenset({"draft_rendered", "report_rendered"})
+
     def finalize_success(self, job_id: UUID, result: Mapping[str, Any]) -> None:
         phase = str(result.get("phase") or "draft_rendered")
         outcome = str(result.get("outcome") or "draft_rendered")
-        if phase != "draft_rendered" or outcome != "draft_rendered":
+        if phase not in self.RENDERED_PHASES or outcome not in self.RENDERED_PHASES:
             self.finalize_failure(job_id, fallback_error_code="job_execution_error")
             return
         self._finalize(
@@ -558,16 +563,16 @@ class JobRepository:
                     {"job_id": job_id},
                 ).mappings()
             ]
+            # The current pipeline writes report_runs_v2 and keeps its verdict on the
+            # row; the legacy table is still read for Jobs that predate the refactor,
+            # where the verdict only ever existed in the delivery event.
             report = (
                 conn.execute(
                     text(
                         """
-                        SELECT r.id AS report_id, r.status, r.markdown_ref, r.json_ref,
-                               (SELECT e.payload->>'verification_status' FROM app.events e
-                                WHERE e.job_id=r.job_id
-                                  AND e.event_type='report.draft_rendered'
-                                ORDER BY e.id DESC LIMIT 1) AS verification_status
-                        FROM app.reports r WHERE r.job_id=:job_id
+                        SELECT r.id AS report_id, r.status, r.verification_status,
+                               r.markdown_ref, r.json_ref
+                        FROM app.report_runs_v2 r WHERE r.job_id=:job_id
                         """
                     ),
                     {"job_id": job_id},
@@ -575,6 +580,24 @@ class JobRepository:
                 .mappings()
                 .first()
             )
+            if report is None:
+                report = (
+                    conn.execute(
+                        text(
+                            """
+                            SELECT r.id AS report_id, r.status, r.markdown_ref, r.json_ref,
+                                   (SELECT e.payload->>'verification_status' FROM app.events e
+                                    WHERE e.job_id=r.job_id
+                                      AND e.event_type='report.draft_rendered'
+                                    ORDER BY e.id DESC LIMIT 1) AS verification_status
+                            FROM app.reports r WHERE r.job_id=:job_id
+                            """
+                        ),
+                        {"job_id": job_id},
+                    )
+                    .mappings()
+                    .first()
+                )
         result = dict(base)
         result["tasks"] = tasks
         result["usage"] = usage

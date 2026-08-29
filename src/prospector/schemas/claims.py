@@ -1,225 +1,279 @@
-"""Contracts for statement-level Report Verifier decisions and claim persistence."""
+"""Claim-attribution and whole-report-review contracts."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from prospector.schemas.brief import UserConstraints
-
-ClaimType = Literal["fact", "number", "causal", "opinion_attributed"]
-ClaimGrounding = Literal["evidence", "derived"]
-EvidenceRelation = Literal["support", "contradict", "partial", "irrelevant"]
-VerdictStatus = Literal["pass", "unsupported", "conflicted", "overreach", "miscalibrated"]
-QualityReminderKind = Literal[
-    "evidence_listing",
-    "repetition",
-    "section_without_judgement",
-    "long_reasoning_chain",
-]
-ReportRequirementKind = Literal[
-    "core_answer",
+MarkerFamily = Literal["retrieval", "candidate", "advisory"]
+FindingKind = Literal[
+    "brief_response",
     "user_constraint",
-    "conclusion_support",
-    "internal_consistency",
     "material_omission",
-    "overall_calibration",
+    "conclusion_integrity",
 ]
-RepairScope = Literal["paragraph", "report"]
-MAX_REPORT_REVISION_ROUNDS = 2
+MAX_WRITER_REPAIRS = 2
 
 
-class EvidencePairDecision(BaseModel):
+class ClaimMarker(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    family: MarkerFamily
+    kind: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1)
+    start_offset: int = Field(..., ge=0)
+    end_offset: int = Field(..., gt=0)
+
+
+class ClaimSpan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: UUID
+    block_id: str
+    start_offset: int = Field(..., ge=0)
+    end_offset: int = Field(..., gt=0)
+    text_hash: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
+    text: str = Field(..., min_length=1)
+    markers: list[ClaimMarker] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _span_is_nonempty(self) -> ClaimSpan:
+        if self.end_offset <= self.start_offset:
+            raise ValueError("claim span must be non-empty")
+        return self
+
+
+class ClaimEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: UUID
     excerpt_id: UUID
-    relation: EvidenceRelation
 
 
-class EvidenceStatementDecision(BaseModel):
+class ClaimPremise(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    statement_id: str
-    kind: Literal["evidence"] = "evidence"
-    claim_type: ClaimType
-    pairs: list[EvidencePairDecision] = Field(..., min_length=1)
-    conflict_keys: list[str] = Field(default_factory=list)
-    status: VerdictStatus
+    claim_id: UUID
+    premise_claim_ids: list[UUID] = Field(default_factory=list)
+    direct_assertion_ids: list[UUID] = Field(default_factory=list)
+    known_conflict_keys: list[str] = Field(default_factory=list)
+    audit_note: str | None = None
+
+
+class AttributionFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: UUID = Field(default_factory=uuid4)
+    kind: Literal["attribution", "in_place_downgrade"]
+    claim_id: UUID | None = None
+    block_id: str
+    start_offset: int | None = Field(default=None, ge=0)
+    end_offset: int | None = Field(default=None, gt=0)
+    text: str = Field(..., min_length=1)
     reason: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
-    def _status_matches_pairs(self) -> EvidenceStatementDecision:
-        supports = [pair for pair in self.pairs if pair.relation == "support"]
-        contradicts = [pair for pair in self.pairs if pair.relation == "contradict"]
-        if self.status == "pass" and not supports:
-            raise ValueError("pass requires at least one support relation")
-        if self.status == "conflicted" and not contradicts and not self.conflict_keys:
-            raise ValueError("conflicted requires a contradict relation or known conflict")
-        if self.status != "conflicted" and self.conflict_keys:
-            raise ValueError("conflict_keys are only valid for conflicted decisions")
+    def _optional_span_is_complete(self) -> AttributionFinding:
+        if (self.start_offset is None) != (self.end_offset is None):
+            raise ValueError("finding span offsets must be provided together")
+        if (
+            self.start_offset is not None
+            and self.end_offset is not None
+            and self.end_offset <= self.start_offset
+        ):
+            raise ValueError("finding span must be non-empty")
         return self
 
 
-class DerivedStatementDecision(BaseModel):
+class BlockAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    statement_id: str
-    kind: Literal["derived"] = "derived"
-    claim_type: ClaimType = "causal"
-    inference_note: str = Field(..., min_length=1)
-    # Direct Excerpts may support a judgement alongside, or instead of, premise claims.
-    # Empty for a premise-only judgement.
-    pairs: list[EvidencePairDecision] = Field(default_factory=list)
-    conflict_keys: list[str] = Field(default_factory=list)
-    status: VerdictStatus
+    block_id: str
+    status: Literal["assessed", "no_claims"]
+
+
+class RevisionFailureDisposition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prior_finding_id: UUID
+    outcome: Literal["corrected", "replaced_source", "removed", "in_place_downgrade"]
     reason: str = Field(..., min_length=1)
+
+
+class AttributionBatchSelection(BaseModel):
+    """First-stage batch output: choose related Assertions from the statement catalog.
+
+    Material is named by short catalog reference ("a17"), never by UUID.  Asking a model
+    to transcribe seventy 36-character identifiers produced both a quarter of the output
+    volume and a recurring failure where the head of one real id was joined to the tail
+    of another -- an id that exists nowhere, from a model that had picked correctly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    assertion_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _status_matches_conflicts(self) -> DerivedStatementDecision:
-        contradicts = [pair for pair in self.pairs if pair.relation == "contradict"]
-        if self.status == "conflicted" and not contradicts and not self.conflict_keys:
-            raise ValueError("conflicted requires a contradict relation or known conflict")
-        if self.status != "conflicted" and self.conflict_keys:
-            raise ValueError("conflict_keys are only valid for conflicted decisions")
+    def _assertion_refs_are_unique(self) -> AttributionBatchSelection:
+        if len(self.assertion_refs) != len(set(self.assertion_refs)):
+            raise ValueError("selected assertion_refs must be unique")
         return self
 
 
-class BridgeStatementDecision(BaseModel):
+class AttributionBatchClaim(BaseModel):
+    """One span verdict inside a single attribution batch."""
+
     model_config = ConfigDict(extra="forbid")
 
-    statement_id: str
-    kind: Literal["elaboration", "limitation"]
-    contains_factual_claim: bool
+    claim_ref: str = Field(..., min_length=1, max_length=96)
+    block_id: str
+    start_offset: int = Field(..., ge=0)
+    end_offset: int = Field(..., gt=0)
+    status: Literal["verified", "failed", "analysis"]
+    candidate_refs: list[str] = Field(default_factory=list)
+    excerpt_refs: list[str] = Field(default_factory=list)
+    assertion_refs: list[str] = Field(default_factory=list)
+    premise_claim_refs: list[str] = Field(default_factory=list)
+    known_conflict_keys: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    audit_note: str | None = None
+
+
+class AttributionBatchVerification(BaseModel):
+    """Second-stage batch output: fact-check only this batch's candidates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claims: list[AttributionBatchClaim] = Field(default_factory=list)
+    audit_notes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AttributionDisposition(BaseModel):
+    """Model-facing prior-failure outcome; code rewrites it into RevisionFailureDisposition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prior_ref: str = Field(..., min_length=1, max_length=32)
+    outcome: Literal["corrected", "replaced_source", "removed", "in_place_downgrade"]
     reason: str = Field(..., min_length=1)
-
-    @property
-    def status(self) -> VerdictStatus:
-        """A bridge may organise prose, but facts must use an auditable statement kind."""
-        return "pass" if not self.contains_factual_claim else "unsupported"
+    current_block_id: str | None = None
+    current_start_offset: int | None = Field(default=None, ge=0)
+    current_end_offset: int | None = Field(default=None, ge=0)
 
 
-class StatementFailure(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    statement_id: str
-    kind: Literal["evidence", "derived", "elaboration", "limitation"]
-    status: VerdictStatus
-    reason: str = Field(..., min_length=1)
-    allowed_excerpt_ids: list[UUID] = Field(default_factory=list)
-
-
-class ReportQualityReminder(BaseModel):
-    """A report-level writing issue that is recorded but never enters sentence revision."""
+class AttributionSummary(BaseModel):
+    """Final model pass: prior-failure destinations that cannot be decided inside one batch."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: QualityReminderKind
-    location: str = Field(..., min_length=1)
-    statement_ids: list[str] = Field(default_factory=list)
-    reason: str = Field(..., min_length=1)
+    dispositions: list[AttributionDisposition] = Field(default_factory=list)
+    audit_notes: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class ReportRequirementFailure(BaseModel):
-    """A whole-report contract failure that must trigger another Writer revision."""
-
+class AttributionRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: ReportRequirementKind
-    repair_scope: RepairScope = "report"
-    paragraph_ids: list[str] = Field(default_factory=list)
-    statement_ids: list[str] = Field(default_factory=list)
-    reason: str = Field(..., min_length=1)
-
-    @model_validator(mode="after")
-    def _repair_scope_has_matching_locations(self) -> ReportRequirementFailure:
-        self.paragraph_ids = list(dict.fromkeys(self.paragraph_ids))
-        if self.repair_scope == "paragraph" and not self.paragraph_ids:
-            raise ValueError("paragraph repair requires paragraph_ids")
-        if self.repair_scope == "report" and self.paragraph_ids:
-            raise ValueError("report repair must not name paragraph_ids")
-        return self
-
-
-class ReportQualityDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    requirement_failures: list[ReportRequirementFailure] = Field(default_factory=list)
-    reminders: list[ReportQualityReminder] = Field(default_factory=list)
-
-
-class ReportVerifierFindings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    round: int = Field(..., ge=1)
-    revision: int = Field(..., ge=1)
-    failures: list[StatementFailure] = Field(default_factory=list)
-    requirement_failures: list[ReportRequirementFailure] = Field(default_factory=list)
-    passed_statement_ids: list[str] = Field(default_factory=list)
-    quality_reminders: list[ReportQualityReminder] = Field(default_factory=list)
-
-    @property
-    def all_passed(self) -> bool:
-        return not self.failures and not self.requirement_failures
-
-    @property
-    def report_rewrite_required(self) -> bool:
-        return any(item.repair_scope == "report" for item in self.requirement_failures)
-
-    @property
-    def paragraph_repair_ids(self) -> set[str]:
-        return {
-            paragraph_id
-            for item in self.requirement_failures
-            if item.repair_scope == "paragraph"
-            for paragraph_id in item.paragraph_ids
-        }
-
-
-class ReportVerifierStatementInput(BaseModel):
-    """One statement plus only the evidence and premises it explicitly declares."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    statement_id: str
-    text: str
-    kind: Literal["evidence", "derived", "elaboration", "limitation"]
-    candidate_excerpts: list[dict[str, Any]] = Field(default_factory=list)
-    premises: list[dict[str, Any]] = Field(default_factory=list)
-    premises_all_passed: bool = True
-    premise_depth: int = Field(default=0, ge=0)
-    known_conflicts: list[dict[str, Any]] = Field(default_factory=list)
-
-
-StatementDecision = EvidenceStatementDecision | DerivedStatementDecision | BridgeStatementDecision
-
-
-class ReportVerifierSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    job_id: UUID
+    attribution_run_id: UUID
     report_id: UUID
     revision: int = Field(..., ge=1)
-    round: int = Field(..., ge=1)
-    brief_question: str
-    user_constraints: UserConstraints = Field(default_factory=UserConstraints)
-    statements: list[ReportVerifierStatementInput] = Field(default_factory=list)
-    allowed_excerpt_ids: list[UUID] = Field(default_factory=list)
-    # Present on full-report verification runs. It is omitted only by isolated
-    # statement-level evaluations that intentionally do not run the report quality pass.
-    report_context: dict[str, Any] = Field(default_factory=dict)
-    # Set when the previous revision already passed every sentence and is being
-    # rewritten only for whole-report requirement failures. Stage one is not rerun.
-    skip_statement_verification: bool = False
-    reused_statement_decisions: list[StatementDecision] = Field(default_factory=list)
+    status: Literal["prompted", "completed", "failed"] = "completed"
+    block_assessments: list[BlockAssessment] = Field(default_factory=list)
+    claims: list[ClaimSpan] = Field(default_factory=list)
+    claim_evidence: list[ClaimEvidence] = Field(default_factory=list)
+    claim_premises: list[ClaimPremise] = Field(default_factory=list)
+    blocking_findings: list[AttributionFinding] = Field(default_factory=list)
+    dispositions: list[RevisionFailureDisposition] = Field(default_factory=list)
+    audit_notes: list[dict[str, Any]] = Field(default_factory=list)
+    marker_lexicon_version: str = Field(..., min_length=1)
+    raw_output: Any | None = None
+    contract_error: str | None = None
 
     @model_validator(mode="after")
-    def _stage_inputs_match_verification_mode(self) -> ReportVerifierSnapshot:
-        if self.skip_statement_verification:
-            if not self.report_context:
-                raise ValueError("stage-two-only verification requires report_context")
-            return self
-        if not self.statements:
-            raise ValueError("stage-one verification requires statements")
+    def _blocks_are_complete(self) -> AttributionRun:
+        block_ids = [item.block_id for item in self.block_assessments]
+        if len(block_ids) != len(set(block_ids)):
+            raise ValueError("block assessment ids must be unique")
         return self
+
+
+class ReviewFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: FindingKind
+    reason: str = Field(..., min_length=1)
+    block_ids: list[str] = Field(..., min_length=1)
+
+
+class ReportReviewRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_run_id: UUID
+    report_id: UUID
+    revision: int = Field(..., ge=1)
+    synthesis_run_id: UUID
+    status: Literal["prompted", "completed", "failed"] = "completed"
+    blocking_findings: list[ReviewFinding] = Field(default_factory=list)
+    key_block_ids: list[str] = Field(default_factory=list)
+    audit_notes: list[dict[str, Any]] = Field(default_factory=list)
+    raw_output: Any | None = None
+    contract_error: str | None = None
+
+
+def core_attribution_finding_ids(attribution: AttributionRun, review: ReportReviewRun) -> set[UUID]:
+    """Return the attribution failures that carry the report's main reasoning."""
+    claim_by_id = {claim.claim_id: claim for claim in attribution.claims}
+    premise_claim_ids = {
+        premise_id
+        for premise in attribution.claim_premises
+        for premise_id in premise.premise_claim_ids
+    }
+    core_blocks = set(review.key_block_ids)
+    return {
+        item.finding_id
+        for item in attribution.blocking_findings
+        if item.kind == "in_place_downgrade"
+        or (
+            item.claim_id is not None
+            and (
+                item.claim_id in premise_claim_ids
+                or (
+                    (claim := claim_by_id.get(item.claim_id)) is not None
+                    and claim.block_id in core_blocks
+                )
+            )
+        )
+    }
+
+
+def has_core_problem(attribution: AttributionRun, review: ReportReviewRun) -> bool:
+    """Whether anything load-bearing is still wrong.
+
+    Whole-report findings and in-place downgrades are core by construction; a span
+    failure is core when another claim rests on it or it sits in a block the review
+    marked as carrying the report's main reading.
+    """
+    if review.blocking_findings:
+        return True
+    return bool(core_attribution_finding_ids(attribution, review))
+
+
+def final_report_status(
+    attribution: AttributionRun,
+    review: ReportReviewRun,
+    *,
+    repairs_used: int,
+) -> Literal["verified", "partial", "failed", "revising"]:
+    """Compute the report state without a model judgement at finalization time.
+
+    A full rewrite re-exposes the whole report to every check.  Only a problem that affects
+    the report's actual answer is allowed to spend that budget; peripheral failed anchors
+    remain visible and produce a partial report without teaching the Writer to avoid detail.
+    """
+    if not attribution.blocking_findings and not review.blocking_findings:
+        return "verified"
+    core = has_core_problem(attribution, review)
+    if repairs_used < MAX_WRITER_REPAIRS and core:
+        return "revising"
+    return "failed" if core else "partial"

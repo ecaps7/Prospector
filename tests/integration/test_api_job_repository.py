@@ -15,6 +15,7 @@ from prospector.api.app import ApiServices, create_app
 from prospector.api.scheduler import JobScheduler
 from prospector.config import clear_settings_cache
 from prospector.schemas.brief import ResearchBrief, ScopeOutcome
+from prospector.schemas.report import ResearchSynthesisRun
 from prospector.store.checkpoint import close_pool, setup_checkpointer
 from prospector.store.database import clear_engine_cache
 from prospector.store.object_store import ObjectStore
@@ -426,6 +427,183 @@ def test_unaccepted_verifier_run_refreezes_its_prompt_instead_of_stranding_the_j
             )
         assert row["full_prompt"] == new_prompt
         assert row["raw_output"] == {"content": "被拒的原话"}
+    finally:
+        with jobs.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_rendered_report_finalizes_as_completed_and_surfaces_its_verdict() -> None:
+    """The v2 pipeline's terminal phase must read as success, verdict and all.
+
+    Before this was wired, ``finalize_success`` only recognised the pre-refactor phase
+    name, so every successful run of the current pipeline was written to the Job row as
+    a failure.
+    """
+    jobs = JobRepository()
+    research = ResearchRepository(engine=jobs.engine)
+    created = jobs.create_with_brief(
+        ResearchBrief(question="Render integration", brief_text="Verify rendered finalization."),
+        start_immediately=True,
+    )
+    job_id = created["job_id"]
+    try:
+        verifier_run_id = research.begin_verifier_run(
+            job_id,
+            evaluated_plan_version=1,
+            decision_round=1,
+            trigger="planner_finish",
+            full_prompt=[{"role": "system", "content": "verify"}],
+        )
+        synthesis_run_id, synthesis_version = research.begin_synthesis_run(
+            job_id, [{"role": "system", "content": "synthesize"}], verifier_run_id
+        )
+        synthesis_raw = {
+            "draft": '{"decision":"ready"}',
+            "review_prompt": [{"role": "system", "content": "review"}],
+            "review": '{"decision":"accept"}',
+        }
+        research.complete_synthesis_run(
+            synthesis_run_id,
+            ResearchSynthesisRun(
+                synthesis_run_id=synthesis_run_id,
+                job_id=job_id,
+                version=synthesis_version,
+                verifier_run_id=verifier_run_id,
+                decision="ready",
+                synthesis="材料已经能够回应问题。",
+            ),
+            synthesis_raw,
+        )
+        persisted_synthesis = research.get_latest_synthesis_run(job_id)
+        assert persisted_synthesis is not None
+        assert persisted_synthesis.raw_output == synthesis_raw
+        report_id, revision = research.begin_markdown_revision(
+            job_id,
+            verifier_run_id,
+            synthesis_run_id,
+            [{"role": "system", "content": "write"}],
+        )
+        research.set_v2_report_status(report_id, "partial")
+        research.complete_v2_report_render(
+            job_id,
+            report_id,
+            revision=revision,
+            markdown_ref="s3://reports/report.md",
+            markdown_hash="sha256:" + "0" * 64,
+            json_ref="s3://reports/report.json",
+            json_hash="sha256:" + "1" * 64,
+            verification_status="partial",
+        )
+
+        jobs.finalize_success(job_id, {"phase": "report_rendered", "outcome": "report_rendered"})
+        detail = jobs.get_job(job_id)
+        assert detail is not None
+        assert detail["status"] == "completed"
+        assert detail["outcome"] == "report_rendered"
+        assert detail["error_code"] is None
+        # An unqualified report is still delivered; the verdict rides on the report row.
+        assert detail["report"]["report_id"] == report_id
+        assert detail["report"]["verification_status"] == "partial"
+        assert detail["report"]["markdown_ref"] == "s3://reports/report.md"
+        delivery = [
+            event
+            for event in jobs.list_events_after(job_id, 0)
+            if event["event_type"] == "report.draft_rendered"
+        ]
+        assert delivery and delivery[-1]["payload"]["verification_status"] == "partial"
+    finally:
+        with jobs.engine.begin() as conn:
+            conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_attribution_batches_remain_after_a_later_batch_fails() -> None:
+    jobs = JobRepository()
+    research = ResearchRepository(engine=jobs.engine)
+    created = jobs.create_with_brief(
+        ResearchBrief(question="Attribution batches", brief_text="Persist batch recovery."),
+        start_immediately=True,
+    )
+    job_id = created["job_id"]
+    try:
+        verifier_run_id = research.begin_verifier_run(
+            job_id,
+            evaluated_plan_version=1,
+            decision_round=1,
+            trigger="planner_finish",
+            full_prompt=[{"role": "system", "content": "verify"}],
+        )
+        synthesis_run_id, synthesis_version = research.begin_synthesis_run(
+            job_id, [{"role": "system", "content": "synthesize"}], verifier_run_id
+        )
+        research.complete_synthesis_run(
+            synthesis_run_id,
+            ResearchSynthesisRun(
+                synthesis_run_id=synthesis_run_id,
+                job_id=job_id,
+                version=synthesis_version,
+                verifier_run_id=verifier_run_id,
+                decision="ready",
+                synthesis="材料已经能够回应问题。",
+            ),
+            {"draft": "{}", "review": "{}"},
+        )
+        report_id, revision = research.begin_markdown_revision(
+            job_id,
+            verifier_run_id,
+            synthesis_run_id,
+            [{"role": "system", "content": "write"}],
+        )
+        run_id = research.begin_attribution_run(
+            report_id, revision, {"batches": [{"batch_index": 0}, {"batch_index": 1}]}
+        )
+        research.begin_attribution_batch(
+            run_id,
+            0,
+            block_ids=["b_0001"],
+            candidate_refs=["k1"],
+            selection_prompt=[{"role": "user", "content": "select-0"}],
+        )
+        research.save_attribution_batch_selection(
+            run_id,
+            0,
+            raw_output="selected-0",
+            result={"assertion_ids": []},
+            verify_prompt=[{"role": "user", "content": "verify-0"}],
+        )
+        research.complete_attribution_batch(
+            run_id, 0, raw_output="verified-0", result={"claims": []}
+        )
+        research.begin_attribution_batch(
+            run_id,
+            1,
+            block_ids=["b_0002"],
+            candidate_refs=["k2"],
+            selection_prompt=[{"role": "user", "content": "select-1"}],
+        )
+        research.fail_attribution_batch(
+            run_id, 1, raw_output="bad-1", error="omitted candidates: ['k2']"
+        )
+        research.fail_attribution_run(
+            run_id, raw_output="bad-1", error="omitted candidates: ['k2']"
+        )
+
+        attempt = research.get_attribution_attempt(report_id, revision)
+        assert attempt is not None
+        assert attempt["status"] == "failed"
+        assert "omitted candidates" in str(attempt["contract_error"])
+        batches = research.list_attribution_batches(run_id)
+        assert [row["status"] for row in batches] == ["completed", "failed"]
+        assert research.get_attribution_run(report_id, revision) is None
+
+        resumed = research.begin_attribution_run(report_id, revision, {"batches": []})
+        assert resumed == run_id
+        resumed_attempt = research.get_attribution_attempt(report_id, revision)
+        assert resumed_attempt is not None
+        assert resumed_attempt["status"] == "prompted"
+        assert [row["status"] for row in research.list_attribution_batches(run_id)] == [
+            "completed",
+            "failed",
+        ]
     finally:
         with jobs.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})

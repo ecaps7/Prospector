@@ -15,7 +15,7 @@ GapKind = Literal[
     "source_credibility",
 ]
 GapSeverity = Literal["minor", "major"]
-VerifierTrigger = Literal["planner_finish", "budget_exhausted"]
+VerifierTrigger = Literal["planner_finish", "budget_exhausted", "synthesis_gap"]
 
 
 class VerifierGap(BaseModel):

@@ -107,7 +107,7 @@ class WorkerSearch(BaseModel):
     query: str = Field(
         ...,
         min_length=1,
-        description="围绕单个证据缺口的一句完整自然语言问题或请求",
+        description="清楚表达当前要寻找的证据或候选来源",
     )
 
 

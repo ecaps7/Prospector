@@ -14,7 +14,7 @@ from uuid import UUID
 from prospector.deterministic.budget import ResearchLimits
 
 POLL_INTERVAL_SECONDS = 0.2
-TERMINAL_PHASES = {"draft_rendered", "failed"}
+TERMINAL_PHASES = {"draft_rendered", "report_rendered", "failed"}
 
 EmitLine = Callable[[str], None]
 
@@ -145,6 +145,7 @@ _CONFLICT_DECISION_LABELS = {
 _VERIFIER_TRIGGER_LABELS = {
     "planner_finish": "Planner finish",
     "budget_exhausted": "决策轮耗尽",
+    "synthesis_gap": "研究综合请求补研究",
 }
 
 
@@ -305,7 +306,9 @@ class ResearchTimelineRenderer:
             if reason:
                 lines.append(f"[核验] 收工：{reason}")
             if unusable_summaries:
-                lines.extend(self._render_unusable_tree(unusable_summaries))
+                lines.extend(
+                    self._render_unusable_tree(unusable_summaries, total_count=unusable_count)
+                )
             return lines
 
         remaining = self._remaining_rounds()
@@ -316,7 +319,7 @@ class ResearchTimelineRenderer:
         lines = [header]
         lines.extend(self._render_gap_tree(gap_summaries))
         if unusable_summaries:
-            lines.extend(self._render_unusable_tree(unusable_summaries))
+            lines.extend(self._render_unusable_tree(unusable_summaries, total_count=unusable_count))
         if conflict_summaries:
             points = "；".join(
                 f"{_CONFLICT_DECISION_LABELS.get(str(item.get('decision')), item.get('decision'))}"
@@ -357,10 +360,15 @@ class ResearchTimelineRenderer:
         return lines
 
     @staticmethod
-    def _render_unusable_tree(unusable_summaries: list[Any]) -> list[str]:
+    def _render_unusable_tree(unusable_summaries: list[Any], *, total_count: int) -> list[str]:
         if not unusable_summaries:
             return []
-        lines = [f"[核验] 废证 {len(unusable_summaries)} 条："]
+        displayed_count = len(unusable_summaries)
+        if total_count > displayed_count:
+            header = f"[核验] 废证 {total_count} 条（以下展示 {displayed_count} 条）："
+        else:
+            header = f"[核验] 废证 {total_count} 条："
+        lines = [header]
         for index, item in enumerate(unusable_summaries):
             row = dict(item or {})
             branch = "└─" if index == len(unusable_summaries) - 1 else "├─"
@@ -380,7 +388,7 @@ class ResearchTimelineRenderer:
             plan_part = f"Plan v{plan_version}，" if plan_version is not None else ""
             return [f"[研究] 研究阶段结束，等待核验（{plan_part}触发：{trigger_label}）"]
         if phase == "composition_pending":
-            return ["[成文] Research Verifier 已放行，等待 Writer"]
+            return ["[综合] Research Verifier 已放行，等待 Research Synthesis"]
         if phase == "writing":
             return ["[成文] Writer 正在组织深度研究报告"]
         if phase == "verifying":
@@ -393,7 +401,17 @@ class ResearchTimelineRenderer:
             return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"]
         if phase == "rendering":
             return ["[成文] 正在渲染最终报告"]
-        if phase == "draft_rendered":
+        if phase == "composition":
+            return ["[成文] 研究综合完成，开始写作"]
+        if phase == "attributing":
+            return ["[成文] 正在为正文寻找出处"]
+        if phase == "reviewing":
+            return ["[成文] 正在通读全文审阅"]
+        if phase == "partial":
+            return ["[成文] 部分内容未获事实支持，报告仍会交付"]
+        if phase == "report_failed":
+            return ["[成文] 核验未通过，报告仍会随核验结论交付"]
+        if phase in {"draft_rendered", "report_rendered"}:
             return ["[成文] 报告渲染完成"]
         if phase == "failed":
             error_code = str(payload.get("error_code") or "unknown_error")

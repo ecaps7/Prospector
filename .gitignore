@@ -17,3 +17,6 @@ htmlcov/
 web/node_modules/
 web/*.local
 .claude
+
+# Local debugging artifacts (DB dumps, one-off scripts).
+.scratch*

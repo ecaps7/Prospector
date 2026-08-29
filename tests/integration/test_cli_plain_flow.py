@@ -95,6 +95,7 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
                     "brief_id": str(brief_id),
                     "language": "zh",
                     "plan_version": 0,
+                    "latest_event_id": 0,
                     "tasks": [],
                     "usage": [],
                     "report": None,
