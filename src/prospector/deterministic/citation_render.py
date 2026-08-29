@@ -11,7 +11,6 @@ from uuid import UUID
 from prospector.schemas.claims import AttributionRun, ReportReviewRun
 from prospector.schemas.report import MarkdownBlock, WriterSnapshot
 
-UNVERIFIED_MARKER = "〔未获事实支持〕"
 # A footnote exists so a reader can check one statement against one source.  Past a
 # handful the marks stop being navigable and start burying the prose: the first real
 # report came back with 519 marks, one span carrying 21, and a title carrying 5.  The
@@ -145,7 +144,7 @@ def health_summary_markdown(health: ReportHealth, status: str) -> str:
         f"{health.reasoned_blocks} 段含有基于这些事实的推理。"
     ]
     if health.failed_claims:
-        lines.append(f"有 {health.failed_claims} 处核对未通过，正文中已标注。")
+        lines.append(f"有 {health.failed_claims} 处核对未通过，详情见审计信息。")
     if health.unchecked_spans:
         lines.append(f"有 {health.unchecked_spans} 处未能给出核对结论。")
     lines.append(
@@ -207,7 +206,6 @@ def render_final_report(
     # produced them.  Claim spans nest and often end together, so a per-claim cap still
     # let three claims stack nine marks against one full stop.
     marks_at: dict[int, list[str]] = {}
-    unverified_at: set[int] = set()
     block_text = {block.block_id: block.text for block in blocks}
     for claim in attribution.claims:
         block_start = block_starts.get(claim.block_id)
@@ -220,21 +218,9 @@ def render_final_report(
             number = source_numbers.setdefault(key, len(source_numbers) + 1)
             source_refs.setdefault(key, excerpt)
             marks_at.setdefault(at, []).append(f"[^{number}]")
-        if claim.claim_id in failed_claims:
-            unverified_at.add(at)
-    for finding in attribution.blocking_findings:
-        if finding.claim_id is not None or finding.end_offset is None:
-            continue
-        block_start = block_starts.get(finding.block_id)
-        if block_start is not None and finding.block_id not in heading_blocks:
-            unverified_at.add(
-                block_start + _readable_offset(block_text[finding.block_id], finding.end_offset)
-            )
     inserts: list[tuple[int, str]] = []
-    for at in sorted(marks_at.keys() | unverified_at):
+    for at in sorted(marks_at):
         marks = list(dict.fromkeys(marks_at.get(at, [])))[:MAX_INLINE_CITATIONS]
-        if at in unverified_at:
-            marks.append(UNVERIFIED_MARKER)
         if marks:
             inserts.append((at, "".join(marks)))
     health = report_health(attribution, snapshot, blocks)

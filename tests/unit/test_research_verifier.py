@@ -976,16 +976,66 @@ def test_verifier_checks_core_question_and_constraints_not_every_brief_direction
     assert "完全没有进入任何研究计划的方向" not in prompt
 
 
-def test_verifier_rejects_compound_assertions_without_turning_task_completion_into_a_gate() -> None:
+def test_a_compound_assertion_is_noted_not_destroyed() -> None:
+    """122 of 187 disqualifications were merged facts the bound Excerpt fully supported."""
     prompt = "\n".join(
         message["content"]
         for message in research_verifier_messages({"brief": {"question": "q", "brief_text": "b"}})
     )
 
-    assert "单一、可独立核对" in prompt
     assert "多个可分别成立的事实合并成一条" in prompt
+    # The packaging verdict and the truth verdict must be told apart in the instructions.
+    assert "granularity" in prompt
+    assert "仍然可用" in prompt
+    assert "不得标为 unusable" in prompt
     assert "task 未完全达到 expected_evidence" in prompt
     assert "无法实质回应 Brief" in prompt
+
+
+def test_the_timeline_separates_destroyed_material_from_merely_packed_material() -> None:
+    """A reader must be able to see the evidence pool did not shrink."""
+    renderer = ResearchTimelineRenderer(cast(Any, object()), limits_for_effort("quick"))
+    lines = renderer.render(
+        {
+            "event_type": "verifier.completed",
+            "payload": {
+                "plan_version": 1,
+                "release_decision": "pass",
+                "decision_reason": "放行。",
+                "major_gap_count": 0,
+                "minor_gap_count": 0,
+                "conflict_resolution_count": 2,
+                "unusable_assertion_count": 4,
+                "granularity_assertion_count": 47,
+            },
+        }
+    )
+    assert any("废证 4，粒度备注 47" in line for line in lines)
+
+
+def test_a_granularity_note_leaves_the_assertion_usable() -> None:
+    packed = uuid4()
+    fabricated = uuid4()
+    unusable = effective_unusable_assertion_ids(
+        [
+            (
+                1,
+                [
+                    AssertionDisposition(
+                        assertion_id=packed,
+                        status="granularity",
+                        reason="合并了两项可分别核对的事实。",
+                    ),
+                    AssertionDisposition(
+                        assertion_id=fabricated,
+                        status="unusable",
+                        reason="绑定摘录未给出该日期。",
+                    ),
+                ],
+            )
+        ]
+    )
+    assert unusable == {fabricated}
 
 
 def test_planner_prompt_defines_execution_roles_without_prescribing_research_strategy() -> None:

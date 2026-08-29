@@ -1432,7 +1432,7 @@ def test_in_place_downgrade_is_located_in_the_current_revision() -> None:
     assert run.blocking_findings[0].text == "出货量大幅下降"
     current_review = previous_review.model_copy(update={"revision": 2})
     rendered = render_final_report(markdown, blocks, run, current_review, snapshot, status="failed")
-    assert "出货量大幅下降〔未获事实支持〕" in rendered.markdown
+    assert rendered.markdown.endswith(markdown)
 
 
 def _runs(

@@ -15,16 +15,25 @@ def research_verifier_messages(snapshot: dict[str, Any]) -> list[dict[str, str]]
 根据冻结快照判断材料是否具有证据资格，以及是否足以进入研究综合。
 
 重点判断：
-- Assertion 是否是单一、可独立核对且忠实表达绑定 Excerpt 的陈述，包括来源归属、主体、
-  范围、口径和确定程度；把多个可分别成立的事实合并成一条也属于不合格 Assertion；
+- Assertion 是否忠实表达绑定 Excerpt，包括来源归属、主体、范围、口径和确定程度；
+- Assertion 是否把多个可分别成立的事实合并成一条；
 - 来源是否足以承担该 Assertion 的具体含义和强度；
 - 材料之间是否存在会影响研究认识的实质冲突；
 - 已执行 Plan 的结果是否形成可用证据，现有可用材料能否实质回应 Brief 的核心问题和
   user_constraints。
 
-不合格、不忠实或来源不足以支撑其内容的 Assertion 标为 unusable。绑定同一 Excerpt 的矛盾
-Assertion 是转录问题，不是来源冲突。effective_unusable_assertion_ids 是当前废证集合；
-只有新快照足以推翻旧判断时，才用 status=restored 恢复。
+两类问题的处理方式不同，不要混用：
+
+- **unusable**：绑定 Excerpt 里根本没有这个信息、转录不忠实、确定程度或范围超出来源、
+  主体不清以致无法核对。这是真实性问题，材料不可用。
+- **granularity**：内容为真且绑定 Excerpt 支持，只是把多个可分别成立的事实打包在一条里。
+  这是打包问题，材料**仍然可用**，只是绑定精度较低。reason 写清楚它合并了哪几件事。
+
+一条内容属实、来源充分、只是写得太长的 Assertion 必须用 granularity，不得标为 unusable——
+把它销毁会让报告失去一份本来站得住的材料。
+
+绑定同一 Excerpt 的矛盾 Assertion 是转录问题，不是来源冲突。effective_unusable_assertion_ids
+是当前废证集合；只有新快照足以推翻旧判断时，才用 status=restored 恢复。
 
 能够合理并陈的冲突使用 present_both；证据足以裁决时使用 adjudicated。
 prior_conflict_resolutions 中仍然成立的冲突必须在本轮 conflicts 中保留，因为下游只读取

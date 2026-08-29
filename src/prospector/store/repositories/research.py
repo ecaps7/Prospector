@@ -1651,6 +1651,12 @@ class ResearchRepository:
                     "minor_gap_count": minor_count,
                     "conflict_resolution_count": len(decision.conflict_resolutions),
                     "unusable_assertion_count": len(unusable_dispositions),
+                    # Kept separate from the disqualified count: material noted for
+                    # packaging is still in the report's evidence pool, and collapsing
+                    # the two would hide that the pool did not shrink.
+                    "granularity_assertion_count": sum(
+                        item.status == "granularity" for item in decision.assertion_dispositions
+                    ),
                     "gap_summaries": [
                         {
                             "severity": gap.severity,

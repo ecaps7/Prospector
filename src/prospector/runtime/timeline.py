@@ -293,6 +293,8 @@ class ResearchTimelineRenderer:
         minor_count = int(payload.get("minor_gap_count", 0))
         conflict_count = int(payload.get("conflict_resolution_count", 0))
         unusable_count = int(payload.get("unusable_assertion_count", 0))
+        granularity_count = int(payload.get("granularity_assertion_count", 0))
+        packed = f"，粒度备注 {granularity_count}" if granularity_count else ""
         reason = _first_line(payload.get("decision_reason"))
         gap_summaries = list(payload.get("gap_summaries") or [])
         conflict_summaries = list(payload.get("conflict_summaries") or [])
@@ -302,7 +304,7 @@ class ResearchTimelineRenderer:
             lines = [
                 f"[核验] Plan v{plan_version} 通过"
                 f"（重大缺口 {major_count}，冲突裁决 {conflict_count}"
-                f"，废证 {unusable_count}）"
+                f"，废证 {unusable_count}{packed}）"
             ]
             if reason:
                 lines.append(f"[核验] 收工：{reason}")
@@ -315,7 +317,7 @@ class ResearchTimelineRenderer:
         remaining = self._remaining_rounds()
         header = (
             f"[核验] Plan v{plan_version} 不通过：{major_count} 个重大缺口"
-            f"（次要 {minor_count}，冲突 {conflict_count}，废证 {unusable_count}）"
+            f"（次要 {minor_count}，冲突 {conflict_count}，废证 {unusable_count}{packed}）"
         )
         lines = [header]
         lines.extend(self._render_gap_tree(gap_summaries))

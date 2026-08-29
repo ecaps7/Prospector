@@ -95,12 +95,22 @@ class ConflictResolution(BaseModel):
 
 
 class AssertionDisposition(BaseModel):
-    """Evidence-usability judgement for one assertion (LLM and persisted shape)."""
+    """Evidence-usability judgement for one assertion (LLM and persisted shape).
+
+    ``granularity`` records an Assertion that packs several separately checkable facts
+    into one row.  That is a real cost -- a Claim bound to a bundle says less about which
+    fact it rests on -- but it is a packaging cost, not a truth one, and it used to be
+    answered with deletion: of 187 disqualifications across this project's Jobs, 122 were
+    merged facts that the bound Excerpt fully supported, and one Job lost 47 of its 51
+    disqualified Assertions that way. The material stays usable and the note travels;
+    attribution binds Claims to Excerpts as well as Assertions, so a bundled statement
+    still points a reader at the passage it came from.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     assertion_id: UUID
-    status: Literal["unusable", "restored"]
+    status: Literal["unusable", "granularity", "restored"]
     reason: str = Field(..., min_length=1)
 
 
@@ -367,7 +377,7 @@ def effective_unusable_assertion_ids(
     dispositions_by_plan_version: list[tuple[int, list[AssertionDisposition]]],
 ) -> set[UUID]:
     """Fold versioned dispositions: last write wins; never-seen → usable."""
-    status_by_id: dict[UUID, Literal["unusable", "restored"]] = {}
+    status_by_id: dict[UUID, Literal["unusable", "granularity", "restored"]] = {}
     for _plan_version, dispositions in sorted(
         dispositions_by_plan_version, key=lambda item: item[0]
     ):
