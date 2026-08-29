@@ -83,7 +83,7 @@ def test_planner_cannot_author_runtime_budget() -> None:
     assert "task_id" not in schema["properties"]
 
     task = inject_task_budget(_draft(), "standard")
-    assert task.budget.max_worker_rounds == 48
+    assert task.budget.max_worker_rounds == 20
     assert task.allowed_tools == ["web_search", "web_fetch", "save_findings"]
 
 
@@ -95,8 +95,8 @@ def test_task_budget_depends_only_on_effort() -> None:
     first = inject_task_budget(another, "standard")
     second = inject_task_budget(_draft(), "standard")
 
-    assert first.budget.max_worker_rounds == 48
-    assert second.budget.max_worker_rounds == 48
+    assert first.budget.max_worker_rounds == 20
+    assert second.budget.max_worker_rounds == 20
 
 
 def test_worker_rounds_are_the_only_task_budget() -> None:
@@ -224,6 +224,20 @@ def test_worker_receives_source_rules_and_exclusions_directly() -> None:
     assert worker_constraints_message(UserConstraints(deliverable_rules=["附带图表"])) is None
 
 
+def test_round_caps_leave_ordinary_research_untouched() -> None:
+    """Sized from 137 finished tasks: median 4 rounds, 95th percentile 16.
+
+    The cap is not a research budget, it is a stop for a task that has stopped making
+    progress.  It has to sit above what real tasks use and far below the point where a
+    stuck Worker can burn half an hour repeating itself.
+    """
+    observed_95th_percentile = 16
+    for effort in ("quick", "standard", "deep"):
+        limits = limits_for_effort(effort)
+        assert limits.max_worker_rounds <= 2 * observed_95th_percentile
+    assert limits_for_effort("standard").max_worker_rounds > observed_95th_percentile
+
+
 def test_effort_maps_to_flat_research_limits() -> None:
     quick = limits_for_effort("quick")
     standard = limits_for_effort("standard")
@@ -232,17 +246,17 @@ def test_effort_maps_to_flat_research_limits() -> None:
     assert (quick.decision_round_limit, quick.max_concurrency, quick.max_worker_rounds) == (
         8,
         6,
-        24,
+        12,
     )
     assert (
         standard.decision_round_limit,
         standard.max_concurrency,
         standard.max_worker_rounds,
-    ) == (12, 5, 48)
+    ) == (12, 5, 20)
     assert (deep.decision_round_limit, deep.max_concurrency, deep.max_worker_rounds) == (
         24,
         6,
-        72,
+        32,
     )
 
 
@@ -257,7 +271,7 @@ def test_planner_receives_concrete_runtime_capabilities() -> None:
         "available_decisions": ["dispatch", "finish"],
         "decision_rounds_remaining": 11,
         "max_tasks_per_dispatch": 5,
-        "max_worker_rounds": 48,
+        "max_worker_rounds": 20,
         "worker_actions": ["search", "save", "finish"],
         "worker_tools": ["web_search", "web_fetch", "save_findings"],
         "max_parallel_tool_calls": 8,
