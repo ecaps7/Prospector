@@ -17,6 +17,28 @@ UNVERIFIED_MARKER = "〔未获事实支持〕"
 # report came back with 519 marks, one span carrying 21, and a title carrying 5.  The
 # full chain is never lost -- every binding stays in the audit JSON.
 MAX_INLINE_CITATIONS = 3
+# A mark may sit anywhere except inside a Latin word or number.  Claim spans end where a
+# checkable statement ends, which is occasionally mid-token ("agentic AI foundat|ion").
+#
+# The rule covers only what a renderer can decide: Chinese has no word boundaries, so a
+# mark landing inside "2026年|初" cannot be repaired here.  Nudging it one character was
+# tried and made things worse -- it moved 12 marks to fix 3, and the other 9 landed
+# inside a different word ("2025年逐|步", "2025年提|供").  That is a span-choice problem
+# and belongs upstream, not in presentation.
+
+
+def _splits_a_word(text: str, at: int) -> bool:
+    if not 0 < at < len(text):
+        return False
+    before, after = text[at - 1], text[at]
+    return before.isascii() and before.isalnum() and after.isascii() and after.isalnum()
+
+
+def _readable_offset(text: str, at: int) -> int:
+    """Move an insertion point past a Latin word or number it would otherwise split."""
+    while _splits_a_word(text, at):
+        at += 1
+    return at
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,11 +208,12 @@ def render_final_report(
     # let three claims stack nine marks against one full stop.
     marks_at: dict[int, list[str]] = {}
     unverified_at: set[int] = set()
+    block_text = {block.block_id: block.text for block in blocks}
     for claim in attribution.claims:
         block_start = block_starts.get(claim.block_id)
         if block_start is None or claim.block_id in heading_blocks:
             continue
-        at = block_start + claim.end_offset
+        at = block_start + _readable_offset(block_text[claim.block_id], claim.end_offset)
         for excerpt_id in evidence_by_claim.get(claim.claim_id, []):
             excerpt = excerpts[excerpt_id]
             key = (excerpt.source.source_uri, excerpt.source.document_version)
@@ -204,7 +227,9 @@ def render_final_report(
             continue
         block_start = block_starts.get(finding.block_id)
         if block_start is not None and finding.block_id not in heading_blocks:
-            unverified_at.add(block_start + finding.end_offset)
+            unverified_at.add(
+                block_start + _readable_offset(block_text[finding.block_id], finding.end_offset)
+            )
     inserts: list[tuple[int, str]] = []
     for at in sorted(marks_at.keys() | unverified_at):
         marks = list(dict.fromkeys(marks_at.get(at, [])))[:MAX_INLINE_CITATIONS]

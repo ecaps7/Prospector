@@ -883,6 +883,86 @@ def test_a_heading_carries_no_footnotes_and_a_span_shows_at_most_three() -> None
     assert report_health(run, snapshot, blocks).spans_over_citation_cap == 2
 
 
+def test_a_citation_never_lands_inside_a_latin_word() -> None:
+    """A span may end mid-token; the mark it produces may not sit inside the word."""
+    snapshot = _snapshot("IBM 发布了 foundation 服务。", "IBM 发布了 foundation 服务。")
+    markdown = "e&与IBM宣布企业级agentic AI foundation，随后扩展。"
+    blocks = parse_markdown(markdown)
+    body = blocks[0]
+    # The model ended its span in the middle of "foundation".
+    end = body.text.index("foundation") + len("foundat")
+    claim = ClaimSpan(
+        claim_id=uuid4(),
+        block_id=body.block_id,
+        start_offset=0,
+        end_offset=end,
+        text=body.text[:end],
+        text_hash=text_hash(body.text[:end]),
+    )
+    run = AttributionRun(
+        attribution_run_id=uuid4(),
+        report_id=uuid4(),
+        revision=1,
+        block_assessments=[BlockAssessment(block_id=body.block_id, status="assessed")],
+        claims=[claim],
+        claim_evidence=[
+            ClaimEvidence(
+                claim_id=claim.claim_id,
+                excerpt_id=snapshot.evidence_cards[0].excerpts[0].excerpt_id,
+            )
+        ],
+        marker_lexicon_version="v5",
+    )
+    review = ReportReviewRun(
+        review_run_id=uuid4(),
+        report_id=run.report_id,
+        revision=1,
+        synthesis_run_id=uuid4(),
+    )
+    rendered = render_final_report(markdown, blocks, run, review, snapshot, status="verified")
+    assert "foundation[^1]，" in rendered.markdown
+    assert "foundat[^1]ion" not in rendered.markdown
+
+
+def test_a_citation_against_a_separator_is_left_alone() -> None:
+    """Enumerated citations already sit well; the fix must not drag them anywhere."""
+    snapshot = _snapshot("MCP 是连接标准。", "MCP 是连接标准。")
+    markdown = "函数调用、计算机操作、MCP、A2A等机制让模型连接外部系统。"
+    blocks = parse_markdown(markdown)
+    body = blocks[0]
+    end = body.text.index("、A2A") + len("、A2A")
+    claim = ClaimSpan(
+        claim_id=uuid4(),
+        block_id=body.block_id,
+        start_offset=0,
+        end_offset=end,
+        text=body.text[:end],
+        text_hash=text_hash(body.text[:end]),
+    )
+    run = AttributionRun(
+        attribution_run_id=uuid4(),
+        report_id=uuid4(),
+        revision=1,
+        block_assessments=[BlockAssessment(block_id=body.block_id, status="assessed")],
+        claims=[claim],
+        claim_evidence=[
+            ClaimEvidence(
+                claim_id=claim.claim_id,
+                excerpt_id=snapshot.evidence_cards[0].excerpts[0].excerpt_id,
+            )
+        ],
+        marker_lexicon_version="v5",
+    )
+    review = ReportReviewRun(
+        review_run_id=uuid4(),
+        report_id=run.report_id,
+        revision=1,
+        synthesis_run_id=uuid4(),
+    )
+    rendered = render_final_report(markdown, blocks, run, review, snapshot, status="verified")
+    assert "A2A[^1]等机制" in rendered.markdown
+
+
 def test_claims_ending_together_share_one_capped_run_of_citations() -> None:
     """Nesting spans stacked nine marks on one full stop when the cap was per claim."""
     snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
