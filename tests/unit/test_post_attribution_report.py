@@ -1640,7 +1640,7 @@ def test_synthesis_reruns_after_new_research_instead_of_reusing_a_stale_run() ->
     result = _synthesis_node(services)(cast(Any, _synthesis_state(fresh_verifier_run)))
 
     assert repository.begun == [fresh_verifier_run]
-    assert repository.phases[-1][1] == "composition"
+    assert repository.phases[-1][1] == "synthesizing"
     assert result["route"] == "writer"
 
 

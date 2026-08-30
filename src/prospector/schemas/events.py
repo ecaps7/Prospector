@@ -26,6 +26,7 @@ class EventType(StrEnum):
     TASK_EVIDENCE_SAVED = "task.evidence_saved"
     TASK_FINISHED = "task.finished"
     VERIFIER_COMPLETED = "verifier.completed"
+    SYNTHESIS_COMPLETED = "synthesis.completed"
     REPLAN_TRIGGERED = "replan.triggered"
     REPORT_DRAFT_RENDERED = "report.draft_rendered"
     REPORT_GENERATED = "report.generated"
@@ -162,6 +163,12 @@ class VerifierCompletedPayload(_EventPayload):
     unusable_summaries: list[VerifierUnusableSummary] = Field(default_factory=list)
 
 
+class SynthesisCompletedPayload(_EventPayload):
+    synthesis_run_id: UUID
+    decision: Literal["ready", "needs_research"]
+    synthesis: str
+
+
 class ReplanTriggeredPayload(_EventPayload):
     verifier_run_id: UUID
     plan_version: int
@@ -249,6 +256,11 @@ class VerifierCompletedEvent(SseEventBase):
     payload: VerifierCompletedPayload
 
 
+class SynthesisCompletedEvent(SseEventBase):
+    event_type: Literal["synthesis.completed"]
+    payload: SynthesisCompletedPayload
+
+
 class ReplanTriggeredEvent(SseEventBase):
     event_type: Literal["replan.triggered"]
     payload: ReplanTriggeredPayload
@@ -272,6 +284,7 @@ SseEventVariant = Annotated[
     | TaskEvidenceSavedEvent
     | TaskFinishedEvent
     | VerifierCompletedEvent
+    | SynthesisCompletedEvent
     | ReplanTriggeredEvent
     | ReportDraftRenderedEvent,
     Field(discriminator="event_type"),

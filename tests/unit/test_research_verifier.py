@@ -925,6 +925,22 @@ def test_timeline_renders_verifier_and_replan_events() -> None:
     ) == ["[核验] Report Verifier 正在逐句验证"]
 
 
+def test_timeline_renders_completed_research_synthesis() -> None:
+    renderer = ResearchTimelineRenderer(cast(Any, object()), limits_for_effort("quick"))
+
+    assert renderer.render(
+        {
+            "event_type": "synthesis.completed",
+            "payload": {
+                "synthesis": "材料显示需求下降并非短期波动，而是供给约束与价格变化共同作用的结果。"
+            },
+        }
+    ) == [
+        "[综合] Research Synthesis：",
+        "材料显示需求下降并非短期波动，而是供给约束与价格变化共同作用的结果。",
+    ]
+
+
 def test_timeline_distinguishes_total_unusable_assertions_from_displayed_summaries() -> None:
     renderer = ResearchTimelineRenderer(cast(Any, object()), limits_for_effort("quick"))
     summaries = [

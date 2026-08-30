@@ -205,6 +205,29 @@ def test_encoded_planner_started_matches_published_event_schema() -> None:
     assert event.payload.decision_round == 1
 
 
+def test_encoded_synthesis_completed_matches_published_event_schema() -> None:
+    synthesis_run_id = uuid4()
+    frame = encode_event(
+        {
+            "id": 4,
+            "event_type": "synthesis.completed",
+            "payload": {
+                "synthesis_run_id": str(synthesis_run_id),
+                "decision": "ready",
+                "synthesis": "材料已经能够回应问题。",
+            },
+            "task_id": None,
+            "decision_round": None,
+            "created_at": datetime(2026, 7, 19, tzinfo=UTC),
+        }
+    )
+
+    event = sse_event_adapter.validate_json(_sse_data(frame)).root
+    assert event.event_type == "synthesis.completed"
+    assert event.payload.synthesis_run_id == synthesis_run_id
+    assert event.payload.synthesis == "材料已经能够回应问题。"
+
+
 def test_sse_openapi_documents_event_envelope_and_reconnect() -> None:
     repository = FakeRepository()
     app = create_app(_services(repository), validate_startup=False)

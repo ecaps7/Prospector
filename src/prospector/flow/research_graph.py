@@ -841,7 +841,7 @@ def _synthesis_node(services: ResearchGraphServices):
             run_id, version = services.repository.begin_synthesis_run(
                 job_id, prompt, verifier_run_id
             )
-            services.repository.record_phase_changed(job_id, "composition")
+            services.repository.record_phase_changed(job_id, "synthesizing")
             try:
                 result = services.synthesis.synthesize(snapshot)
             except ResearchSynthesisOutputError as exc:

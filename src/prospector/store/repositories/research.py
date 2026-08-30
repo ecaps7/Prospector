@@ -2077,7 +2077,7 @@ class ResearchRepository:
         self, run_id: UUID, result: ResearchSynthesisRun, raw_output: object
     ) -> None:
         with self.engine.begin() as conn:
-            conn.execute(
+            updated = conn.execute(
                 text("""UPDATE app.research_synthesis_runs SET status='completed', decision=:decision,
                     synthesis=:synthesis, assertion_ids=CAST(:assertions AS JSONB),
                     material_conflict_keys=CAST(:conflicts AS JSONB), reason=:reason,
@@ -2093,6 +2093,18 @@ class ResearchRepository:
                     "needed": result.evidence_needed,
                     "raw": _json(raw_output),
                     "now": datetime.now(UTC),
+                },
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("Synthesis run is missing or already completed")
+            self._event(
+                conn,
+                job_id=result.job_id,
+                event_type=EventType.SYNTHESIS_COMPLETED,
+                payload={
+                    "synthesis_run_id": str(result.synthesis_run_id),
+                    "decision": result.decision,
+                    "synthesis": result.synthesis,
                 },
             )
 

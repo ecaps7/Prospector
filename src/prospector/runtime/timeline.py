@@ -226,6 +226,10 @@ class ResearchTimelineRenderer:
         if event_type == "verifier.completed":
             return self._render_verifier_completed(event, payload)
 
+        if event_type == "synthesis.completed":
+            synthesis = str(payload.get("synthesis") or "").strip()
+            return ["[综合] Research Synthesis：", synthesis] if synthesis else []
+
         if event_type == "replan.triggered":
             return [
                 f"[重规划] Verifier {_short_id(payload.get('verifier_run_id'))} "
@@ -392,6 +396,8 @@ class ResearchTimelineRenderer:
             return [f"[研究] 研究阶段结束，等待核验（{plan_part}触发：{trigger_label}）"]
         if phase == "composition_pending":
             return ["[综合] Research Verifier 已放行，等待 Research Synthesis"]
+        if phase == "synthesizing":
+            return ["[综合] Research Synthesis 正在整合研究材料"]
         if phase == "writing":
             return ["[成文] Writer 正在组织深度研究报告"]
         if phase == "verifying":

@@ -477,6 +477,17 @@ def test_rendered_report_finalizes_as_completed_and_surfaces_its_verdict() -> No
         persisted_synthesis = research.get_latest_synthesis_run(job_id)
         assert persisted_synthesis is not None
         assert persisted_synthesis.raw_output == synthesis_raw
+        synthesis_events = [
+            event
+            for event in jobs.list_events_after(job_id, 0)
+            if event["event_type"] == "synthesis.completed"
+        ]
+        assert len(synthesis_events) == 1
+        assert synthesis_events[0]["payload"] == {
+            "synthesis_run_id": str(synthesis_run_id),
+            "decision": "ready",
+            "synthesis": "材料已经能够回应问题。",
+        }
         report_id, revision = research.begin_markdown_revision(
             job_id,
             verifier_run_id,

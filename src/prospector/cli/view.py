@@ -237,6 +237,7 @@ class JobView:
             "research": 2,
             "verifier": 3,
             "composition_pending": 4,
+            "synthesizing": 4,
             "composition": 4,
             "writing": 4,
             "verifying": 5,
