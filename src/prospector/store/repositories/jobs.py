@@ -480,7 +480,10 @@ class JobRepository:
                               ORDER BY e.id DESC LIMIT 1),
                              j.status
                            ) AS phase,
-                           j.outcome, j.error_code, j.created_at, j.updated_at
+                           j.outcome, j.error_code,
+                           (SELECT r.verification_status FROM app.report_runs_v2 r
+                            WHERE r.job_id=j.id) AS verification_status,
+                           j.created_at, j.updated_at
                     FROM app.jobs j
                     LEFT JOIN app.briefs b ON b.id=j.brief_id
                     ORDER BY j.created_at DESC, j.id DESC
@@ -602,6 +605,7 @@ class JobRepository:
         result["tasks"] = tasks
         result["usage"] = usage
         result["report"] = None if report is None else dict(report)
+        result["verification_status"] = None if report is None else report["verification_status"]
         return result
 
     def list_events_after(self, job_id: UUID, after_id: int) -> list[dict[str, Any]]:

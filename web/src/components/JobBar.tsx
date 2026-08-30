@@ -7,9 +7,10 @@ type Props = {
   question: string;
   status: string;
   outcome?: string | null;
+  verification?: string | null;
 };
 
-export function JobBar({ jobId, question, status, outcome }: Props) {
+export function JobBar({ jobId, question, status, outcome, verification }: Props) {
   const onReport = Boolean(useMatch("/jobs/:jobId/report"));
   const { rootRef, thumbRef } = useSegThumb<HTMLDivElement>(onReport ? 1 : 0, 2);
 
@@ -21,7 +22,7 @@ export function JobBar({ jobId, question, status, outcome }: Props) {
         </NavLink>
         <div className="jobid">
           <span className="st">
-            <StatusDot status={status} outcome={outcome} />
+            <StatusDot status={status} outcome={outcome} verification={verification} />
           </span>
           <span className="q">{question}</span>
         </div>

@@ -505,6 +505,11 @@ def test_rendered_report_finalizes_as_completed_and_surfaces_its_verdict() -> No
         assert detail["report"]["report_id"] == report_id
         assert detail["report"]["verification_status"] == "partial"
         assert detail["report"]["markdown_ref"] == "s3://reports/report.md"
+        # 'outcome' only says a report was delivered, so the verdict is lifted to the top
+        # level as well: the Jobs list has no report object to read it from.
+        assert detail["verification_status"] == "partial"
+        listed = next(row for row in jobs.list_jobs() if row["job_id"] == job_id)
+        assert listed["verification_status"] == "partial"
         delivery = [
             event
             for event in jobs.list_events_after(job_id, 0)

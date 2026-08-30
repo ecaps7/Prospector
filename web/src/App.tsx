@@ -124,6 +124,7 @@ export default function App() {
           question={shownJob ? shownJob.question || "（未命名研究）" : jobId}
           status={shownJob?.status ?? "failed"}
           outcome={shownJob?.outcome ?? null}
+          verification={shownJob?.verification_status ?? null}
         />
       ) : null}
       <Outlet context={jobContext} />

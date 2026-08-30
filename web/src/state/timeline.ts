@@ -5,6 +5,7 @@ import {
   jobStatusLabel,
   outcomeLabel,
   phaseLabel,
+  verificationLabel,
 } from "../lib/labels";
 import { limitsForEffort } from "./budget";
 import type { TimelineDisplayClass, TimelineDisplayEntry } from "./timelineDisplay";
@@ -15,8 +16,15 @@ const STOP_REASON_LABELS: Record<string, string> = {
   worker_rounds_exhausted: "调查轮次用尽",
   no_public_evidence: "未发现公开证据",
   low_information_gain: "连续两批未产生新证据",
+  repeating_without_progress: "连续重复同一组检索且未落库",
   blocked_by_scope: "受任务范围限制",
   tool_error: "运行时错误",
+};
+
+const VERIFIER_TRIGGER_LABELS: Record<string, string> = {
+  planner_finish: "规划判定收尾",
+  budget_exhausted: "决策轮耗尽",
+  synthesis_gap: "研究综合请求补研究",
 };
 
 const REJECTION_LABELS: Record<string, string> = {
@@ -30,6 +38,17 @@ function firstLine(value: unknown): string {
     .trim()
     .split("\n")[0]
     ?.trim() ?? "";
+}
+
+/**
+ * 时间轴的行是行，不是段。研究综合的结论有两三百字，整段铺进去会把面板撑成一堵墙
+ * ——留第一句，长过 60 字再截断，完整结论去报告里读。
+ */
+function firstSentence(value: unknown, max = 60): string {
+  const line = firstLine(value);
+  const stop = line.search(/[。！？]/);
+  const head = stop >= 0 ? line.slice(0, stop + 1) : line;
+  return head.length > max ? `${head.slice(0, max)}…` : head;
 }
 
 function shortId(value: unknown): string {
@@ -70,6 +89,7 @@ function classify(eventType: string, text: string): TimelineClass {
   if (eventType === "verifier.completed") {
     return text.includes("不通过") || text.includes("失败") ? "gap" : "evidence";
   }
+  if (eventType === "synthesis.completed") return text.includes("补研究") ? "gap" : "evidence";
   if (
     eventType === "job.phase_changed" ||
     eventType === "job.stopped" ||
@@ -130,11 +150,20 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
   if (eventType === "verifier.completed") {
     return renderVerifier(ctx, payload);
   }
+  if (eventType === "synthesis.completed") {
+    const summary = firstSentence(payload.synthesis);
+    const head =
+      payload.decision === "needs_research" ? "研究综合请求补研究" : "研究综合完成";
+    return [`[综合] ${head}${summary ? `：${summary}` : ""}`];
+  }
   if (eventType === "replan.triggered") {
     return [`[重规划] 证据核对未放行，改出研究计划 第 ${payload.plan_version} 版`];
   }
   if (eventType === "report.draft_rendered") {
-    return ["[成文] 报告已渲染"];
+    // 交付判定只在这条事件里，phase=report_rendered 那条什么都不多说，所以让这条
+    // 独占收尾行，`renderPhase` 对渲染完成的阶段返回空。
+    const verdict = verificationLabel(String(payload.verification_status ?? ""));
+    return [`[成文] 报告已交付${verdict ? `（${verdict}）` : ""}`];
   }
   if (eventType === "job.stopped") {
     return renderStopped(payload);
@@ -175,15 +204,33 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
 function renderPhase(payload: Record<string, unknown>): string[] {
   const phase = String(payload.phase ?? "");
   if (phase === "research") return ["[研究] 开始"];
-  if (phase === "verifier") return ["[研究] 研究阶段结束，等待核验"];
-  if (phase === "composition_pending") return ["[成文] 证据核对已放行，准备撰写"];
+  if (phase === "verifier") {
+    // 核验现在有三个触发口，其中"研究综合请求补研究"发生在研究已经放行之后——
+    // 不写出来的话，时间轴上会莫名其妙地第二次"研究阶段结束"。
+    const trigger = String(payload.trigger ?? "");
+    const label = VERIFIER_TRIGGER_LABELS[trigger] ?? trigger ?? "";
+    const planVersion = payload.plan_version;
+    const plan = planVersion == null ? "" : `研究计划 第 ${planVersion} 版，`;
+    const note = label ? `（${plan}触发：${label}）` : "";
+    return [`[研究] 研究阶段结束，等待核验${note}`];
+  }
+  if (phase === "composition_pending") return ["[综合] 证据核对已放行，等待研究综合"];
+  if (phase === "synthesizing") return ["[综合] 正在整合研究材料"];
+  if (phase === "composition") return ["[成文] 研究综合完成，开始写作"];
   if (phase === "writing") return ["[成文] 正在组织深度研究报告"];
-  if (phase === "verifying") return ["[核验] Report Verifier 正在逐句验证"];
-  if (phase === "revising") return ["[成文] 存在未通过的句子，正在修订"];
-  if (phase === "verified") return ["[成文] 逐句验证全部通过"];
-  if (phase === "revisions_exhausted") return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"];
+  if (phase === "attributing") return ["[成文] 正在为正文寻找出处"];
+  if (phase === "reviewing") return ["[成文] 正在通读全文审阅"];
+  if (phase === "revising") return ["[成文] 存在未获支持的表述，正在修订"];
+  if (phase === "verified") return ["[成文] 出处与审阅全部通过"];
+  if (phase === "partial") return ["[成文] 部分内容未获事实支持，报告仍会交付"];
+  if (phase === "report_failed") return ["[成文] 核验未通过，报告仍会随核验结论交付"];
   if (phase === "rendering") return ["[成文] 正在渲染最终报告"];
-  if (phase === "draft_rendered") return ["[成文] 报告渲染完成"];
+  // 渲染完成的阶段事件和 report.draft_rendered 同秒到达，说的是同一件事——
+  // 交给带判定的那一条去说，这里出行只会连着出现两句"报告渲染完成"。
+  if (phase === "report_rendered" || phase === "draft_rendered") return [];
+  // 改版前的阶段，只在旧任务的事件回放里出现。
+  if (phase === "verifying") return ["[核验] Report Verifier 正在逐句验证"];
+  if (phase === "revisions_exhausted") return ["[成文] 修订轮次已用尽，仍有未通过语句；报告将标记为部分通过"];
   // 终态只由 job.stopped 出一行：`cancelled` / `failed` 的 phase 事件后面永远
   // 紧跟一条 job.stopped，两边都渲染就会连着出现两行"已取消"。
   if (phase === "cancelled" || phase === "failed") return [];
@@ -192,16 +239,24 @@ function renderPhase(payload: Record<string, unknown>): string[] {
 }
 
 /**
- * 收尾行。取消或失败时 status / phase / outcome 三个字段是同一个词，
- * 去重后只留一次，失败再补上具体原因。
+ * 收尾行。取消或失败时 status / phase / outcome 三个字段是同一个词，成功收尾时
+ * phase 和 outcome 同为 `report_rendered`——去重要按原始取值来，因为阶段表和收尾表
+ * 对同一个词给的说法并不相同（"报告已生成" / "报告已交付"），按文案去重拦不住。
+ * 失败再补上具体原因。
  */
 function renderStopped(payload: Record<string, unknown>): string[] {
-  const labels = [
-    jobStatusLabel(String(payload.status ?? "")),
-    phaseLabel(String(payload.phase ?? "")),
-    outcomeLabel(String(payload.outcome ?? "")),
-  ].filter(Boolean);
-  const head = [...new Set(labels)].join(" · ");
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  const push = (raw: string, label: string): void => {
+    if (!raw || !label || seen.has(raw)) return;
+    seen.add(raw);
+    labels.push(label);
+  };
+  const status = String(payload.status ?? "");
+  push(status, jobStatusLabel(status));
+  push(String(payload.phase ?? ""), phaseLabel(String(payload.phase ?? "")));
+  push(String(payload.outcome ?? ""), outcomeLabel(String(payload.outcome ?? "")));
+  const head = labels.join(" · ");
   const reason = errorLabel(String(payload.error_code ?? ""));
   return [`[结束] ${head}${reason ? `：${reason}` : ""}`];
 }

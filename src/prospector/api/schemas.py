@@ -101,6 +101,11 @@ class JobListItem(BaseModel):
     phase: str
     outcome: str | None
     error_code: str | None
+    # The delivery verdict, 'verified' / 'partial' / 'failed'. `outcome` says only that a
+    # report was delivered; since the post-attribution pipeline the verdict lives on the
+    # report run, and the Jobs list needs it without fetching each report.  Null for a Job
+    # that has not delivered one, and for pre-refactor Jobs whose verdict is in `outcome`.
+    verification_status: str | None = None
     created_at: datetime
     updated_at: datetime
 

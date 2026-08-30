@@ -25,7 +25,8 @@ export type ReportGateKind =
 
 export type ReportGate = { kind: ReportGateKind };
 
-/** `composition_pending` 在阶段轨道上的位置，也就是"开始产出报告"的那一刀。 */
+/** `composition_pending` 在阶段轨道上的位置，也就是"开始产出报告"的那一刀。
+ *  综合、撰写、标注、审阅都在这一刀之后，索引只增不减。 */
 const COMPOSITION_STEP = 4;
 
 export function reportGate(job: JobDetail): ReportGate {
@@ -58,11 +59,21 @@ export function gateStageName(job: JobDetail): string {
   return STATUS_PHASES.has(job.phase) ? "" : phaseLabel(job.phase);
 }
 
-/** 撰写那几步各有各的说法，"正在修订次数用尽"这种话不能让它拼出来。 */
+/**
+ * 成文那几步各有各的说法，"正在修订次数用尽"这种话不能让它拼出来。
+ * 轨道把综合、撰写、标注、审阅合并成两格，这里反而要说细——读者盯着这一屏等，
+ * 标注出处那一步最慢，得让他知道慢在哪。
+ */
 function composingTitle(phase: string): string {
+  if (phase === "composition_pending") return "证据核验已放行，正在准备综合";
+  if (phase === "synthesizing") return "正在整合研究材料";
+  if (phase === "composition" || phase === "writing") return "正在撰写报告";
+  if (phase === "attributing") return "正文已写完，正在为每处表述寻找出处";
+  if (phase === "reviewing") return "正在通读全文审阅";
+  if (phase === "revising") return "正在按审阅结果修订报告";
+  if (phase === "rendering") return "正在渲染最终报告";
+  // 改版前的阶段，回看旧任务时才会走到。
   if (phase === "verifying") return "正在逐句核对初稿";
-  if (phase === "revising") return "正在按核对结果修订初稿";
-  if (phase === "writing" || phase === "composition_pending") return "正在撰写初稿";
   return "正在生成报告";
 }
 

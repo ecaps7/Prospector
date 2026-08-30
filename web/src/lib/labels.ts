@@ -20,12 +20,32 @@ const LANGUAGE: Record<string, string> = {
   en: "English",
 };
 
+/**
+ * 任务的收尾方式。改版后 `report_rendered` 是唯一的成功收尾——"报告已交付"，
+ * 交付的成色由 VERIFICATION 单独说。verified / partial / draft_rendered 是改版前
+ * 的写法，旧任务的快照里还留着，所以留在表里。
+ */
 const OUTCOME: Record<string, string> = {
+  report_rendered: "报告已交付",
+  // 中途态：证据核验放行后、报告交付前，任务的 outcome 停在这里。
+  ready_for_writer: "证据已放行，待成文",
   verified: "已逐句核对",
   partial: "部分核对",
   draft_rendered: "未逐句核对",
   cancelled: "已取消",
   failed: "失败",
+};
+
+/**
+ * 报告的交付判定。后端在通读审阅之后定这个词：出处和审阅都没有拦截项是
+ * `verified`；只有边角处没站住是 `partial`；主结论没站住是 `failed`——注意
+ * `failed` 说的是报告没通过核验，不是任务跑挂了，报告照样交付。
+ */
+const VERIFICATION: Record<string, string> = {
+  verified: "已核验",
+  partial: "部分核验",
+  failed: "未通过核验",
+  pending: "待核验",
 };
 
 const STATUS: Record<string, string> = {
@@ -38,17 +58,31 @@ const STATUS: Record<string, string> = {
   cancelled: "已取消",
 };
 
+/**
+ * 后端的阶段词。监控页会重放历史事件，所以改版前才会出现的阶段
+ * （verifying / revisions_exhausted / draft_rendered）留着不删，
+ * 否则翻看老任务时它们会以原始英文出现在时间轴上。
+ */
 const PHASE: Record<string, string> = {
   initialize: "准备中",
   queued: "排队中",
   running: "进行中",
   research: "搜集资料",
   verifier: "核验证据",
-  composition_pending: "准备撰写",
-  writing: "撰写初稿",
+  composition_pending: "准备综合",
+  synthesizing: "研究综合",
+  composition: "研究综合完成",
+  writing: "撰写报告",
+  attributing: "标注出处",
+  reviewing: "通读审阅",
+  revising: "修订报告",
+  verified: "核验通过",
+  partial: "部分通过",
+  report_failed: "核验未通过",
+  rendering: "输出报告",
+  report_rendered: "报告已生成",
+  // 改版前的阶段，只会出现在旧任务的事件回放里。
   verifying: "逐句核对",
-  revising: "修订初稿",
-  verified: "核对完成",
   revisions_exhausted: "修订次数用尽",
   draft_rendered: "报告已生成",
   failed: "失败",
@@ -60,9 +94,13 @@ const ERROR: Record<string, string> = {
   research_budget_exhausted_without_evidence: "调查预算用尽，仍未找到足够证据",
   verifier_major_gap: "证据核对发现重大缺口",
   verifier_output_invalid: "证据核对环节返回了无法解析的结果",
-  report_verifier_contract_error: "报告核对环节返回了无法解析的结果",
+  synthesis_contract_error: "研究综合环节返回了无法解析的结果",
   writer_contract_error: "撰写环节返回了无法解析的结果",
+  attribution_contract_error: "出处标注环节返回了无法解析的结果",
+  review_contract_error: "通读审阅环节返回了无法解析的结果",
   planner_schema_error_limit: "任务规划连续返回无法解析的结果",
+  // 改版前的错误码，旧任务的快照里还会出现。
+  report_verifier_contract_error: "报告核对环节返回了无法解析的结果",
   draft_render_error: "报告生成失败",
   job_execution_error: "任务执行出错",
   service_unavailable: "模型服务暂时不可用",
@@ -95,26 +133,46 @@ export function apiErrorLabel(error: unknown, fallback: string): string {
   return ERROR[error.errorCode] ?? fallback;
 }
 
-/** What a finished job produced, e.g. "部分核对". Empty when still running. */
+/** What a finished job produced, e.g. "报告已交付". Empty when still running. */
 export const outcomeLabel = (value: string | null | undefined): string => pick(OUTCOME, value);
 
-/** One phrase covering both the job's status and, once done, how it ended. */
-export function jobStatusLabel(status: string, outcome?: string | null): string {
-  if (status === "completed") {
-    if (outcome === "partial") return "部分完成";
-    if (outcome === "draft_rendered") return "已完成 · 未逐句核对";
-    return "已完成";
-  }
-  return pick(STATUS, status);
+/** 报告的交付判定，例如"部分核验"。没有判定（还没交付、或旧任务）时是空串。 */
+export const verificationLabel = (value: string | null | undefined): string =>
+  pick(VERIFICATION, value);
+
+/**
+ * One phrase covering both the job's status and, once done, how it ended.
+ *
+ * 判定优先看 `verification_status`：改版后 `outcome` 恒为 `report_rendered`，
+ * 成色只在判定里。旧任务没有判定字段，退回按 `outcome` 读——那时候成色就写在
+ * `outcome` 上。
+ */
+export function jobStatusLabel(
+  status: string,
+  outcome?: string | null,
+  verification?: string | null,
+): string {
+  if (status !== "completed") return pick(STATUS, status);
+  if (verification === "verified") return "已完成";
+  if (verification) return `已完成 · ${verificationLabel(verification)}`;
+  if (outcome === "partial") return "部分完成";
+  if (outcome === "draft_rendered") return "已完成 · 未逐句核对";
+  return "已完成";
 }
 
-/** The seven steps of the pipeline, named for the person watching them. */
+/**
+ * The seven steps of the pipeline, named for the person watching them.
+ *
+ * 后端的阶段比七步多：综合、撰写、标注、审阅各是独立阶段。轨道故意合并成七格，
+ * 和 `cli/view.py` 的 `_phase_index` 一致——九格会把轨道挤到横向滚动，而"现在具体
+ * 在哪一步"由阶段文案和时间轴负责说清楚。
+ */
 export const PHASE_STEPS = [
   "确认问题",
   "制定计划",
   "搜集资料",
   "核验证据",
-  "撰写初稿",
-  "逐句核对",
+  "综合撰写",
+  "出处审阅",
   "输出报告",
 ] as const;

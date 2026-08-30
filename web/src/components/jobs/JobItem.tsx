@@ -2,12 +2,15 @@ import { Link } from "react-router-dom";
 import type { JobListItem } from "../../api/types";
 import { fmtDateTime } from "../../lib/format";
 import { effortLabel, jobStatusLabel } from "../../lib/labels";
+import { statusTone } from "../../lib/status";
 import { StatusDot } from "../ui/StatusDot";
 import { Tag, type TagTone } from "../ui/Tag";
 
 function statusTag(job: JobListItem): { tone: TagTone; label: string } {
-  const label = jobStatusLabel(job.status, job.outcome);
-  if (job.status === "completed") return { tone: job.outcome === "partial" ? "warn" : "ok", label };
+  const label = jobStatusLabel(job.status, job.outcome, job.verification_status);
+  if (job.status === "completed") {
+    return { tone: statusTone(job.status, job.outcome, job.verification_status) === "warn" ? "warn" : "ok", label };
+  }
   if (job.status === "failed") return { tone: "danger", label };
   if (job.status === "cancelled") return { tone: "warn", label };
   return { tone: "neutral", label };
@@ -20,7 +23,7 @@ export function JobItem({ job }: { job: JobListItem }) {
   return (
     <Link className="job-item" to={href}>
       <span className="st">
-        <StatusDot status={job.status} outcome={job.outcome} />
+        <StatusDot status={job.status} outcome={job.outcome} verification={job.verification_status} />
       </span>
       <div className="main">
         <div className="q">{job.question || "（未命名研究）"}</div>

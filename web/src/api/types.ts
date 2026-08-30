@@ -52,6 +52,9 @@ export type JobListItem = {
   phase: string;
   outcome: string | null;
   error_code: string | null;
+  /** 交付判定：`verified` / `partial` / `failed`。`outcome` 只说"报告已交付"，
+   *  判定挂在报告运行上；改版前的旧任务这里是 null，判定还在 `outcome` 里。 */
+  verification_status: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -157,7 +160,7 @@ export type ReportSource = {
 };
 
 export type ReportJson = {
-  verification_status: "pending" | "verified" | "partial";
+  verification_status: "pending" | "verified" | "partial" | "failed";
   failed_statement_ids: string[];
   requirement_failures: Array<{
     kind:

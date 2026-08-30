@@ -31,6 +31,8 @@ export type JobViewState = {
   status: string;
   phase: string;
   outcome: string | null;
+  /** 报告的交付判定。改版后 `outcome` 恒为 `report_rendered`，成色只在这里。 */
+  verificationStatus: string | null;
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
@@ -48,6 +50,7 @@ export type JobViewState = {
   researchDecisionsUsed: number;
 };
 
+/** 阶段 → 轨道格子。与 `cli/view.py` 的 `_phase_index` 保持同一套归并。 */
 const PHASE_INDEX: Record<string, number> = {
   initialize: 0,
   queued: 0,
@@ -55,12 +58,20 @@ const PHASE_INDEX: Record<string, number> = {
   research: 2,
   verifier: 3,
   composition_pending: 4,
+  synthesizing: 4,
+  composition: 4,
   writing: 4,
-  verifying: 5,
-  revising: 5,
+  revising: 4,
+  attributing: 5,
+  reviewing: 5,
   verified: 5,
-  revisions_exhausted: 5,
+  partial: 5,
+  report_failed: 5,
   rendering: 6,
+  report_rendered: 6,
+  // 改版前的阶段，只在旧任务的快照和事件回放里出现。
+  verifying: 5,
+  revisions_exhausted: 5,
   draft_rendered: 6,
   cancelling: 0,
   cancelled: 0,
@@ -103,6 +114,7 @@ export function fromSnapshot(detail: JobDetail): JobViewState {
     status: detail.status,
     phase: detail.phase,
     outcome: detail.outcome,
+    verificationStatus: detail.verification_status,
     errorCode: detail.error_code,
     createdAt: detail.created_at,
     updatedAt: detail.updated_at,
@@ -151,6 +163,7 @@ export function mergeSnapshot(state: JobViewState, detail: JobDetail): JobViewSt
     status: detail.status,
     phase: detail.phase,
     outcome: detail.outcome,
+    verificationStatus: detail.verification_status ?? state.verificationStatus,
     errorCode: detail.error_code,
     updatedAt: detail.updated_at,
     planVersion: detail.plan_version,
@@ -265,7 +278,15 @@ export function fold(state: JobViewState, event: ServerEvent): JobViewState {
   } else if (eventType === "verifier.completed") {
     next = { ...next, phaseIndex: Math.max(next.phaseIndex, 3) };
   } else if (eventType === "report.draft_rendered") {
-    next = { ...next, phaseIndex: Math.max(next.phaseIndex, 6) };
+    // 判定随交付事件一起到，比下一次快照轮询早几秒——这几秒里页面不该还说不清成色。
+    next = {
+      ...next,
+      phaseIndex: Math.max(next.phaseIndex, 6),
+      verificationStatus:
+        payload.verification_status == null
+          ? next.verificationStatus
+          : String(payload.verification_status),
+    };
   } else if (eventType === "job.stopped") {
     next = {
       ...next,

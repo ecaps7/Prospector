@@ -6,21 +6,22 @@ export type ResearchLimits = {
   maxWorkerRounds: number;
 };
 
+/** 手抄自 `deterministic/budget.py` 的 EFFORT_LIMITS。改后端记得改这里。 */
 const EFFORT_LIMITS: Record<EffortLevel, ResearchLimits> = {
   quick: {
     decisionRoundLimit: 8,
     maxConcurrency: 6,
-    maxWorkerRounds: 24,
+    maxWorkerRounds: 12,
   },
   standard: {
     decisionRoundLimit: 12,
     maxConcurrency: 5,
-    maxWorkerRounds: 48,
+    maxWorkerRounds: 20,
   },
   deep: {
     decisionRoundLimit: 24,
     maxConcurrency: 6,
-    maxWorkerRounds: 72,
+    maxWorkerRounds: 32,
   },
 };
 

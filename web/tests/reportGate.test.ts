@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { JobDetail } from "../src/api/types.ts";
-import { isGateLive, reportGate, reportGateCopy } from "../src/state/reportGate.ts";
+import { gateStageName, isGateLive, reportGate, reportGateCopy } from "../src/state/reportGate.ts";
 
 function job(overrides: Partial<JobDetail> = {}): JobDetail {
   return {
@@ -12,6 +12,7 @@ function job(overrides: Partial<JobDetail> = {}): JobDetail {
     status: "running",
     phase: "research",
     outcome: null,
+    verification_status: null,
     error_code: null,
     created_at: "2026-08-26T10:00:00Z",
     updated_at: "2026-08-26T10:03:20Z",
@@ -76,10 +77,35 @@ test("阶段字段装的是状态时，不拼出「停在已取消阶段」这�
   assert.ok(!copy.detail.includes("停在"));
 });
 
-test("撰写各步各有说法，不会拼出「正在修订次数用尽」", () => {
-  assert.equal(reportGateCopy(job({ phase: "writing" }), "composing", 10).title, "正在撰写初稿");
-  assert.equal(reportGateCopy(job({ phase: "verifying" }), "composing", 10).title, "正在逐句核对初稿");
+test("成文各步各有说法，不会拼出「正在修订次数用尽」", () => {
+  assert.equal(reportGateCopy(job({ phase: "writing" }), "composing", 10).title, "正在撰写报告");
+  assert.equal(
+    reportGateCopy(job({ phase: "attributing" }), "composing", 10).title,
+    "正文已写完，正在为每处表述寻找出处",
+  );
+  assert.equal(reportGateCopy(job({ phase: "reviewing" }), "composing", 10).title, "正在通读全文审阅");
   assert.equal(reportGateCopy(job({ phase: "revisions_exhausted" }), "composing", 10).title, "正在生成报告");
+});
+
+test("旧任务回看时，改版前的阶段仍说得出自己的话", () => {
+  assert.equal(reportGateCopy(job({ phase: "verifying" }), "composing", 10).title, "正在逐句核对初稿");
+  assert.equal(gateStageName(job({ phase: "draft_rendered" })), "报告已生成");
+});
+
+test("综合到审阅这一整段都算正在生成报告，不再说还在查资料", () => {
+  const phases = [
+    "composition_pending",
+    "synthesizing",
+    "composition",
+    "writing",
+    "attributing",
+    "reviewing",
+    "revising",
+    "rendering",
+  ];
+  for (const phase of phases) {
+    assert.equal(reportGate(job({ phase })).kind, "composing", phase);
+  }
 });
 
 test("等待中的辅助句带上已运行时长", () => {
