@@ -17,7 +17,6 @@ CLIP_MARKER = "\n……（原文中段略去）……\n"
 WRITER_EXCERPT_CHAR_LIMIT = 1500
 WRITER_EXCERPT_MIN_CHARS = 400
 WRITER_EXCERPT_TOTAL_CHAR_BUDGET = 160_000
-PREMISE_EXCERPT_CHAR_LIMIT = 900
 
 
 def writer_excerpt_limit(excerpt_count: int) -> int:

@@ -2,6 +2,17 @@
 
 两次真实运行的完整产物，未经任何人工编辑。
 
+> **这两次运行来自改版前的报告链路。** 那时 Writer 直接产出结构化草稿，Report Verifier
+> 逐句验证，`report.json` 里是 `draft` / `failed_statement_ids` / `statement_citations`。
+> 现在 Writer 直接写 Markdown，出处由 Attribution 按跨度标注、Review 通读全文，`report.json`
+> 换成了一份审计文档（`health` / `claims` / `claim_evidence` / `blocking_findings`），
+> `report.md` 仍然是带 `[^N]` 角标和「来源」节的 Markdown。
+>
+> 下面关于「逐句验证」「`failed_statement_ids`」「句子分型」的说法，以及
+> `verify_lineage.py` 检查的七条不变量，描述的都是改版前那套契约——对这两个目录里的文件
+> 依然成立，对新跑出来的报告不成立。重新录一组实例需要两次真实运行（其中一次约 350 万
+> 输入 token），还没有做。
+
 ## 三分钟看什么
 
 1. `verified-neijuan-semantic-shift/report.md` —— 看 `[^N]` 角标和「来源」节。这些不是模型写

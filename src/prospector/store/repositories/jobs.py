@@ -299,19 +299,26 @@ class JobRepository:
         for job_id in job_ids:
             self.finalize_cancelled(job_id)
 
+    # Both report tables are read, newest first.  The current pipeline stores its refs on
+    # report_runs_v2; app.reports is no longer written but still holds every report
+    # delivered before the refactor, and those Jobs must stay downloadable.
     @staticmethod
-    def _report_refs(conn: Connection, job_id: UUID) -> tuple[str | None, str | None]:
-        row = (
-            conn.execute(
-                text("SELECT markdown_ref, json_ref FROM app.reports WHERE job_id=:job_id"),
+    def _stored_ref(conn: Connection, job_id: UUID, column: str) -> str | None:
+        for table in ("app.report_runs_v2", "app.reports"):
+            value = conn.execute(
+                text(f"SELECT {column} FROM {table} WHERE job_id=:job_id"),
                 {"job_id": job_id},
-            )
-            .mappings()
-            .first()
+            ).scalar_one_or_none()
+            if value is not None:
+                return str(value)
+        return None
+
+    @classmethod
+    def _report_refs(cls, conn: Connection, job_id: UUID) -> tuple[str | None, str | None]:
+        return (
+            cls._stored_ref(conn, job_id, "markdown_ref"),
+            cls._stored_ref(conn, job_id, "json_ref"),
         )
-        if row is None:
-            return None, None
-        return row["markdown_ref"], row["json_ref"]
 
     @staticmethod
     def _latest_phase(conn: Connection, job_id: UUID) -> str | None:
@@ -677,11 +684,7 @@ class JobRepository:
     def report_ref(self, job_id: UUID, report_format: Literal["md", "json"]) -> str | None:
         column = "markdown_ref" if report_format == "md" else "json_ref"
         with self.engine.connect() as conn:
-            value = conn.execute(
-                text(f"SELECT {column} FROM app.reports WHERE job_id=:job_id"),
-                {"job_id": job_id},
-            ).scalar_one_or_none()
-        return None if value is None else str(value)
+            return self._stored_ref(conn, job_id, column)
 
     def health_check(self) -> None:
         required = (

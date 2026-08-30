@@ -1,16 +1,20 @@
 import { useEffect } from "react";
-import type { ExcerptView, ReportSource } from "../../api/types";
+import type { ClaimEvidence } from "../../api/types";
+import type { ReportSource } from "../../state/reportDoc";
 
 type Props = {
   open: boolean;
   source: ReportSource | null;
-  excerpts: ExcerptView[];
-  loading: boolean;
-  error: string | null;
+  /** 这个来源支撑过的每一段存档原文。 */
+  evidence: ClaimEvidence[];
   onClose: () => void;
 };
 
-export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose }: Props) {
+/**
+ * 点开一个角标看到的东西。原文直接来自审计文档，不必再往摘录接口跑一趟——
+ * 后端已经把每条出处对应的那段原文嵌在里面了。
+ */
+export function EvidenceDrawer({ open, source, evidence, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -19,6 +23,11 @@ export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  const first = evidence[0]?.excerpt.source ?? null;
+  // 同一段原文可能支撑好几处跨度，来源面板里只该出现一次。
+  const excerpts = [...new Map(evidence.map((item) => [item.excerpt.excerpt_id, item])).values()];
+  const caveats = [...new Set(evidence.flatMap((item) => item.source_caveats))];
 
   return (
     <>
@@ -31,24 +40,30 @@ export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose
         aria-hidden={!open}
       >
         <div className="evidence-head">
-          <span className="num">{source?.citation_number ?? ""}</span>
-          <h4>{source?.title || source?.source_uri || "来源"}</h4>
+          <span className="num">{source?.number ?? ""}</span>
+          <h4>{first?.title || source?.label || source?.uri || "来源"}</h4>
           <button className="icon-btn" type="button" onClick={onClose} aria-label="关闭证据卡片">
             ✕
           </button>
         </div>
         <div className="evidence-body">
-          {loading ? (
-            <div className="scope-status" style={{ paddingLeft: 0 }}>
-              <span className="spinner" />
-              <span>正在读取存档摘录…</span>
+          {caveats.length ? (
+            <div className="ev-field">
+              <div className="k">核验时的保留意见</div>
+              {caveats.map((caveat) => (
+                <p key={caveat} className="ev-caveat">
+                  {caveat}
+                </p>
+              ))}
             </div>
           ) : null}
-          {error ? <p className="form-error">{error}</p> : null}
-          {excerpts.map((excerpt) => (
-            <div key={excerpt.excerpt_id} className="ev-field">
+          {excerpts.length === 0 ? (
+            <p className="muted">这条来源没有留下可展示的原文摘录。</p>
+          ) : null}
+          {excerpts.map((item) => (
+            <div key={item.excerpt.excerpt_id} className="ev-field">
               <div className="k">原文摘录</div>
-              <div className="ev-excerpt">{excerpt.text}</div>
+              <div className="ev-excerpt">{item.excerpt.text}</div>
             </div>
           ))}
           {source ? (
@@ -58,25 +73,25 @@ export function EvidenceDrawer({ open, source, excerpts, loading, error, onClose
                 <div className="row">
                   <span className="k">来源地址</span>
                   <span className="v">
-                    <a href={source.source_uri} target="_blank" rel="noopener noreferrer">
-                      {source.source_uri}
+                    <a href={source.uri} target="_blank" rel="noopener noreferrer">
+                      {source.uri}
                     </a>
                   </span>
                 </div>
                 <div className="row">
                   <span className="k">快照版本</span>
-                  <span className="v">第 {source.document_version} 版</span>
+                  <span className="v">第 {first?.document_version ?? source.version} 版</span>
                 </div>
-                {source.author ? (
+                {first?.author ? (
                   <div className="row">
                     <span className="k">作者</span>
-                    <span className="v">{source.author}</span>
+                    <span className="v">{first.author}</span>
                   </div>
                 ) : null}
-                {source.published_at ? (
+                {first?.published_at ? (
                   <div className="row">
                     <span className="k">发布时间</span>
-                    <span className="v mono">{source.published_at}</span>
+                    <span className="v mono">{first.published_at}</span>
                   </div>
                 ) : null}
               </div>

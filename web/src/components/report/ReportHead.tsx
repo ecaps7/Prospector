@@ -1,38 +1,71 @@
+import type { ReportHealth, ReportVerdict } from "../../api/types";
+import { verificationLabel } from "../../lib/labels";
+
 type Props = {
   title: string;
-  verified: boolean;
-  statementCount: number;
-  failedCount: number;
-  requirementFailureCount: number;
+  verdict: ReportVerdict | null;
+  health: ReportHealth | null;
+  jobId: string;
 };
 
-export function ReportHead({
-  title,
-  verified,
-  statementCount,
-  failedCount,
-  requirementFailureCount,
-}: Props) {
-  const partialLabel = requirementFailureCount
-    ? `⚠ 未完全履行任务 · ${requirementFailureCount} 项要求未通过${failedCount ? ` · ${failedCount} 句未通过` : ""}`
-    : `⚠ 部分核对 · ${failedCount} 句未通过`;
+const VERDICT_NOTE: Record<ReportVerdict, string> = {
+  verified: "出处标注与通读审阅都没有留下拦截项。",
+  partial: "边角处有内容没能找到出处，主结论不受影响；未通过的地方列在下面。",
+  failed: "有站不住的内容落在报告的主要判断上。报告仍然交付，但读的时候要带着下面这几条看。",
+};
+
+/**
+ * 报告页的抬头。判定和数字都由后端算好——`verification_status` 是流水线定的，
+ * 核对情况的每个数都来自流水线已有的记录，这里一个都不重算。
+ */
+export function ReportHead({ title, verdict, health, jobId }: Props) {
   return (
     <div className="report-head">
       <div className="report-title-row">
         <h1>{title}</h1>
-        <span className={`vbadge ${verified ? "ok" : "warn"}`}>
-          {verified
-            ? `✓ 已逐句核对 · ${statementCount} 句全部通过`
-            : partialLabel}
-        </span>
+        {verdict ? (
+          <span className={`vbadge ${verdict === "verified" ? "ok" : "warn"}`}>
+            {verdict === "verified" ? "✓" : "⚠"} {verificationLabel(verdict)}
+          </span>
+        ) : null}
       </div>
-      {!verified ? (
-        <div className="report-note">
-          {requirementFailureCount
-            ? `报告在修订次数用尽后仍未完全回答核心问题或满足用户要求，因此不能标记为已验证。${failedCount ? "未通过逐句核对的句子也已在正文中标出。" : ""}引用仍只代表相应句子的事实依据通过核对。`
-            : "本报告为部分核对：未通过核对的句子保留原文、不带引用角标并如实标出。"}
+      {verdict && verdict !== "verified" ? (
+        <div className="report-note">{VERDICT_NOTE[verdict]}</div>
+      ) : null}
+      {health ? (
+        <div className="report-stats">
+          <span>
+            全文 <b>{health.blocks}</b> 段
+          </span>
+          <span>
+            含已核对事实 <b>{health.checked_blocks}</b> 段
+          </span>
+          <span>
+            含推理 <b>{health.reasoned_blocks}</b> 段
+          </span>
+          {health.failed_claims ? (
+            <span className="warn">
+              未通过 <b>{health.failed_claims}</b> 处
+            </span>
+          ) : null}
+          {health.unchecked_spans ? (
+            <span className="warn">
+              未给出结论 <b>{health.unchecked_spans}</b> 处
+            </span>
+          ) : null}
+          <span>
+            材料 <b>{health.assertions_used}</b>/{health.assertions_collected} 条
+          </span>
         </div>
       ) : null}
+      <div className="report-actions">
+        <a className="btn ghost sm" href={`/api/jobs/${jobId}/report?format=md`}>
+          下载 Markdown
+        </a>
+        <a className="btn ghost sm" href={`/api/jobs/${jobId}/report?format=json`} target="_blank" rel="noreferrer">
+          查看审计 JSON
+        </a>
+      </div>
     </div>
   );
 }

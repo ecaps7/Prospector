@@ -510,6 +510,11 @@ def test_rendered_report_finalizes_as_completed_and_surfaces_its_verdict() -> No
         assert detail["verification_status"] == "partial"
         listed = next(row for row in jobs.list_jobs() if row["job_id"] == job_id)
         assert listed["verification_status"] == "partial"
+        # The refs are what GET /jobs/{id}/report resolves.  They used to be read from
+        # the pre-refactor table alone, so every Job the current pipeline delivered
+        # answered 409 report_not_ready with its report sitting in object storage.
+        assert jobs.report_ref(job_id, "md") == "s3://reports/report.md"
+        assert jobs.report_ref(job_id, "json") == "s3://reports/report.json"
         delivery = [
             event
             for event in jobs.list_events_after(job_id, 0)

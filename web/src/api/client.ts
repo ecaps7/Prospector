@@ -1,10 +1,9 @@
 import type {
-  ExcerptView,
   JobCancelResponse,
   JobCreateResponse,
   JobDetail,
   JobListItem,
-  ReportJson,
+  ReportAudit,
   ResearchBrief,
   ScopeOutcome,
 } from "./types";
@@ -107,11 +106,23 @@ export const api = {
       body: JSON.stringify({ requested_via: "web_monitor" }),
     }),
 
-  getReportJson: (jobId: string) => request<ReportJson>(`/api/jobs/${jobId}/report?format=json`),
-
-  listExcerpts: (jobId: string, ids: string[]) => {
-    const params = new URLSearchParams();
-    for (const id of ids) params.append("ids", id);
-    return request<ExcerptView[]>(`/api/jobs/${jobId}/excerpts?${params}`);
+  /**
+   * 报告正文。角标和来源编号都是后端确定性渲染好的，前端只显示。
+   * 这里要的是 text 不是 JSON，所以不走 `request`。
+   */
+  getReportMarkdown: async (jobId: string, signal?: AbortSignal): Promise<string> => {
+    const response = await fetch(`/api/jobs/${jobId}/report?format=md`, {
+      headers: { Accept: "text/markdown" },
+      signal,
+    });
+    if (!response.ok) throw await parseError(response);
+    return response.text();
   },
+
+  /** 报告的审计文档：核对情况、未通过的跨度、每条出处的存档原文。 */
+  getReportAudit: (jobId: string, signal?: AbortSignal) =>
+    request<ReportAudit>(`/api/jobs/${jobId}/report?format=json`, { signal }),
+
+  // 摘录接口还在（CLI 用它按 id 取原文），但报告页不再需要：审计文档里每条出处
+  // 都嵌着那段存档原文，再跑一趟只是多一次往返。
 };

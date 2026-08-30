@@ -110,80 +110,88 @@ export type ServerEvent = {
   created_at: string | null;
 };
 
-export type ExcerptView = {
+/**
+ * 报告的审计文档，`GET /api/jobs/{id}/report?format=json` 的返回体。
+ *
+ * 它不是正文——正文是 `format=md` 那份 Markdown。这份记录的是"这份报告有多少
+ * 站得住"：哪些跨度找到了出处、哪些没有、通读审阅怎么说。字段跟着
+ * `deterministic/citation_render.py` 里拼出的那个 dict 走。
+ */
+
+export type ReportVerdict = "verified" | "partial" | "failed";
+
+/** 全部由流水线已有的记录数出来，不依赖任何模型对自己工作的转述。 */
+export type ReportHealth = {
+  blocks: number;
+  checked_blocks: number;
+  reasoned_blocks: number;
+  failed_claims: number;
+  unchecked_spans: number;
+  assertions_collected: number;
+  assertions_used: number;
+  unused_assertion_ids: string[];
+  quantities_in_checked_text: number;
+  quantities_in_reasoning: number;
+  spans_over_citation_cap: number;
+};
+
+export type ExcerptSource = {
+  title: string | null;
+  author: string | null;
+  published_at: string | null;
+  source_uri: string;
+  document_version: number;
+};
+
+export type ReportExcerpt = {
   excerpt_id: string;
   text: string;
-  source_uri: string;
-  document_version: number;
-  title: string | null;
-  author: string | null;
-  published_at: string | null;
-  locator: Record<string, unknown>;
+  source: ExcerptSource;
 };
 
-export type StatementKind = "evidence" | "derived" | "elaboration" | "limitation";
+/** 一条跨度和支撑它的一段存档原文。原文直接嵌在这里，不必再去问摘录接口。 */
+export type ClaimEvidence = {
+  claim_id: string;
+  excerpt: ReportExcerpt;
+  assertion_ids: string[];
+  /** 核验时对这个来源本身提出的保留意见，例如"综合类来源，证据强度较低"。 */
+  source_caveats: string[];
+};
 
-export type ReportStatement = {
-  statement_id: string;
+/** 一处没能找到出处、或被就地降级的正文跨度。 */
+export type AttributionFinding = {
+  finding_id: string;
+  kind: "attribution" | "in_place_downgrade";
+  claim_id: string | null;
+  block_id: string;
+  start_offset: number | null;
+  end_offset: number | null;
   text: string;
-  kind: StatementKind;
-  candidate_excerpt_ids: string[];
-  premise_statement_ids: string[];
+  reason: string;
 };
 
-export type ReportParagraph = {
-  paragraph_id: string;
-  statements: ReportStatement[];
+/** 通读全文之后对整篇提出的问题，落到段落而不是跨度上。 */
+export type ReviewFinding = {
+  kind: "brief_response" | "user_constraint" | "material_omission" | "conclusion_integrity";
+  reason: string;
+  block_ids: string[];
 };
 
-export type ReportSection = {
-  section_id: string;
-  title: string;
-  paragraphs: ReportParagraph[];
+export type ReadthroughFinding = {
+  kind: "dangling_reference" | "broken_transition" | "summary_mismatch" | "orphaned_passage";
+  block_ids: string[];
+  reason: string;
 };
 
-export type ReportDraft = {
-  title: string;
-  introduction: ReportParagraph[];
-  sections: ReportSection[];
-  conclusion: ReportParagraph[];
-};
-
-export type ReportSource = {
-  citation_number: number;
-  source_uri: string;
-  document_version: number;
-  title: string | null;
-  author: string | null;
-  published_at: string | null;
-  excerpt_ids: string[];
-};
-
-export type ReportJson = {
-  verification_status: "pending" | "verified" | "partial" | "failed";
-  failed_statement_ids: string[];
-  requirement_failures: Array<{
-    kind:
-      | "core_answer"
-      | "user_constraint"
-      | "conclusion_support"
-      | "internal_consistency"
-      | "material_omission"
-      | "overall_calibration";
-    repair_scope: "paragraph" | "report";
-    paragraph_ids: string[];
-    statement_ids: string[];
-    reason: string;
-  }>;
-  quality_reminders: Array<{
-    kind: "evidence_listing" | "repetition" | "section_without_judgement" | "long_reasoning_chain";
-    location: string;
-    statement_ids: string[];
-    reason: string;
-  }>;
-  job_id: string;
-  draft: ReportDraft;
-  statement_citations: Record<string, number[]>;
-  citation_excerpt_ids?: Record<string, string[]>;
-  sources: ReportSource[];
+export type ReportAudit = {
+  verification_status: ReportVerdict;
+  inline_citation_cap: number;
+  health: ReportHealth;
+  readthrough: { findings: ReadthroughFinding[] } | null;
+  claim_evidence: ClaimEvidence[];
+  blocking_findings: AttributionFinding[];
+  whole_report_review: {
+    blocking_findings: ReviewFinding[];
+    key_block_ids: string[];
+  };
 };

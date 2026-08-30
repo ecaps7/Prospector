@@ -1,8 +1,8 @@
-import type { ReportSource } from "../../api/types";
+import type { ReportSource } from "../../state/reportDoc";
 
 type Props = {
   sources: ReportSource[];
-  onOpenSource: (source: ReportSource) => void;
+  onOpenSource: (citationNumber: number) => void;
 };
 
 export function SourceList({ sources, onOpenSource }: Props) {
@@ -10,18 +10,15 @@ export function SourceList({ sources, onOpenSource }: Props) {
     <div className="sources-list">
       {sources.map((source) => (
         <button
-          key={source.citation_number}
+          key={source.number}
           className="source-item"
           type="button"
-          onClick={() => onOpenSource(source)}
+          onClick={() => onOpenSource(source.number)}
         >
-          <span className="source-num">{source.citation_number}</span>
+          <span className="source-num">{source.number}</span>
           <div className="source-main">
-            <div className="source-title">
-              {source.title || source.source_uri}
-              {source.author ? ` · ${source.author}` : ""}
-            </div>
-            <span className="source-uri">{source.source_uri}</span>
+            <div className="source-title">{source.label}</div>
+            <span className="source-uri">{source.uri}</span>
           </div>
         </button>
       ))}

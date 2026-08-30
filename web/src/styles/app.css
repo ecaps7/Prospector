@@ -1697,6 +1697,34 @@ kbd {
   border-radius: var(--r-md);
   padding: 11px 15px;
 }
+.report-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 14px;
+  font-size: var(--fs-meta);
+  color: var(--text-2);
+}
+.report-stats b {
+  color: var(--text);
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+.report-stats .warn b,
+.report-stats .warn {
+  color: var(--warn);
+}
+.report-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.ev-caveat {
+  font-size: var(--fs-ui);
+  line-height: 1.7;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
 /* 报告还没出来时的等待页：主句说清在等什么，阶段轨道给出佐证，
    骨架屏只在撰写阶段露面——更早摆出来就是在骗人。 */
 .report-pending {
@@ -1817,8 +1845,94 @@ kbd {
   background: var(--border);
   margin: 8px 10px;
 }
-.report-body {
+.report-main {
   max-width: 720px;
+  min-width: 0;
+}
+/* 交付的报告是一份 Markdown 文档，正文由 marked 渲染成 HTML，所以正文里的元素
+   没有 className 可挂——样式只能落在 .md 这个容器的后代选择器上。 */
+.md h1 {
+  font-size: var(--fs-h1);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.28;
+  margin-bottom: 18px;
+}
+.md h3 {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  margin: 24px 0 10px;
+}
+.md ul,
+.md ol {
+  font-size: var(--fs-lg);
+  line-height: 1.85;
+  margin: 0 0 14px 1.4em;
+  list-style: revert;
+}
+.md li {
+  margin-bottom: 6px;
+}
+.md blockquote {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border-left: 3px solid var(--border-strong);
+  background: color-mix(in srgb, var(--seed-fg) 4%, transparent);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  color: var(--text-2);
+  font-size: var(--fs-ui);
+  line-height: 1.7;
+}
+.md blockquote p:last-child {
+  margin-bottom: 0;
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 28px 0;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: color-mix(in srgb, var(--seed-fg) 7%, transparent);
+  border-radius: var(--r-xs);
+  padding: 1px 5px;
+}
+.md pre {
+  overflow-x: auto;
+  background: color-mix(in srgb, var(--seed-fg) 5%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 13px 15px;
+  margin-bottom: 16px;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+}
+/* 表格可以比正文宽，让它自己横向滚，别把整页推出去。 */
+.md table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: var(--fs-ui);
+  margin-bottom: 16px;
+  max-width: 100%;
+}
+.md th,
+.md td {
+  border: 1px solid var(--border);
+  padding: 7px 11px;
+  text-align: left;
+  line-height: 1.6;
+}
+.md th {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--seed-fg) 4%, transparent);
+}
+/* 核对情况：后端确定性写好的一段，摆在正文之前，读者据此决定这份报告能信几分。 */
+.report-health {
+  margin-bottom: 26px;
 }
 .report-body h2 {
   font-size: var(--fs-h2);
@@ -1859,30 +1973,35 @@ kbd {
 .cite:hover {
   background: color-mix(in srgb, var(--primary) 22%, transparent);
 }
-.cite.plain {
-  cursor: default;
-  background: color-mix(in srgb, var(--seed-fg) 9%, transparent);
-  color: var(--text-2);
+/* 没站住的地方。跨度级的引原话，整篇级的只写理由——正文里没有段落编号可指。 */
+.findings {
+  margin-top: 8px;
 }
-.stmt-failed {
-  background: color-mix(in srgb, var(--warn) 9%, transparent);
-  border-bottom: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
-  padding: 1px 3px;
-  border-radius: var(--r-xs);
+.finding {
+  border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  border-radius: var(--r-md);
+  padding: 13px 16px;
+  margin-bottom: 12px;
 }
-.fail-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.finding-kind {
   font-size: var(--fs-meta);
   font-weight: 600;
   color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 13%, transparent);
-  border-radius: var(--r-xs);
-  padding: 2px 7px;
-  margin-left: 6px;
-  vertical-align: 2px;
-  white-space: nowrap;
+  margin-bottom: 8px;
+}
+.finding-text {
+  margin: 0 0 8px;
+  padding-left: 12px;
+  border-left: 2px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  font-size: var(--fs-ui);
+  line-height: 1.7;
+}
+.finding-reason {
+  font-size: var(--fs-ui);
+  color: var(--text-2);
+  line-height: 1.7;
+  margin: 0;
 }
 .sources-list {
   margin-top: 8px;

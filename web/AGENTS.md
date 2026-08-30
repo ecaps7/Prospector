@@ -33,7 +33,13 @@ styles/app.css   全站唯一样式表
 ## Boundaries
 
 - 认证头与 REST/SSE 契约以现有 `src/api/client.ts`、`src/api/sse.ts` 为准。
-- 报告角标、引用列表、`verified` / `partial` 是后端确定性渲染结果；前端只展示，不重算编号。
+- 报告正文是后端交付的一份 Markdown（`GET /api/jobs/{id}/report?format=md`）：`[^N]` 角标已经
+  插好，末尾带「来源」节，编号由 `deterministic/citation_render.py` 算定。前端只显示，不重算
+  编号——角标和来源靠「网址 + 快照版本」认回同一条，那正是后端编号时用的钥匙。
+- `format=json` 是审计文档，不是正文：核对情况、没找到出处的跨度、每条出处的存档原文。
+  判定 `verified` / `partial` / `failed` 也在里面，同样只展示。
+- 正文由 marked 渲染。报告的字句来自抓回来的网页，所以 `renderReportBody` 把原始 HTML 一律
+  丢掉、链接只放行 http/https/mailto——改那个函数时别把这两道口子改松了。
 - 任务状态到颜色的映射只有 `lib/status.ts` 一处。不要在页面里手写 `status === "completed" ? …` 的 if 链——这类映射散开过一次，三份实现对 `running` 和 `completed` 已经给出不同结果。
 - 样式是 `app.css` 里的全局语义类，组件只负责挂 className。抽组件时保持渲染出的 DOM 与 className 不变，改动才可以用「页面长得完全一样」来验证。
 - 不要引入状态管理库、UI 组件库或第二套样式方案（CSS Modules / Tailwind / CSS-in-JS），除非现有页面明显撑不住。
