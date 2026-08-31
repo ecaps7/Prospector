@@ -628,3 +628,51 @@ def test_attribution_batches_remain_after_a_later_batch_fails() -> None:
     finally:
         with jobs.engine.begin() as conn:
             conn.execute(text("DELETE FROM app.jobs WHERE id=:job_id"), {"job_id": job_id})
+
+
+def test_deleting_a_job_hides_it_from_history_without_erasing_it() -> None:
+    """Delete drops the Job from the list; the row and its evidence stay addressable.
+
+    A Document snapshot is deduplicated workspace-wide, so a later Job's Excerpts can
+    cite the snapshot this Job fetched.  Hiding the row is what keeps that citation
+    valid -- and a Job the scheduler still holds must be refused outright.
+    """
+    repository = JobRepository()
+    brief = ResearchBrief(
+        question="Deletable job",
+        brief_text="Verify that deleting a stopped Job only hides it from history.",
+    )
+    created_ids: list[UUID] = []
+    try:
+        stopped = repository.create_with_brief(brief, start_immediately=True)
+        running = repository.create_with_brief(brief, start_immediately=False)
+        created_ids = [stopped["job_id"], running["job_id"]]
+        repository.mark_running(running["job_id"])
+        repository.finalize_success(
+            stopped["job_id"],
+            {"phase": "report_rendered", "outcome": "report_rendered"},
+        )
+
+        listed = [row["job_id"] for row in repository.list_jobs()]
+        assert stopped["job_id"] in listed
+        assert running["job_id"] in listed
+
+        assert repository.delete_job(stopped["job_id"]) == "completed"
+        assert repository.delete_job(running["job_id"]) == "running"
+
+        listed_after = [row["job_id"] for row in repository.list_jobs()]
+        assert stopped["job_id"] not in listed_after
+        assert running["job_id"] in listed_after
+
+        # Hidden, not gone: an open report page and the evidence behind it still resolve.
+        assert repository.job_exists(stopped["job_id"])
+        view = repository.get_job(stopped["job_id"])
+        assert view is not None and view["status"] == "completed"
+        assert repository.delete_job(stopped["job_id"]) == "completed"
+    finally:
+        if created_ids:
+            with repository.engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM app.jobs WHERE id = ANY(:job_ids)"),
+                    {"job_ids": created_ids},
+                )

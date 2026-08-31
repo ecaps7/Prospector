@@ -40,8 +40,11 @@ export const PlanPanel = memo(function PlanPanel({ pages, roundsLeft }: Props) {
             >
               ‹
             </button>
+            {/* 「轮 N 派发」而不是「第 N 轮」：不是每一轮都会派发——判定收尾的那些轮
+                不产生计划，所以翻页时轮号本来就会跳号（第 2 轮被核验交回后，第 3 轮才是
+                第 2 版计划）。写法与时间线的 `[轮 N] 派发 …` 一致，两处可以直接对照。 */}
             <span className="plan-nav-at mono">
-              第 {page.round || 1} 轮 · {index + 1}/{total}
+              轮 {page.round || 1} 派发 · {index + 1}/{total}
             </span>
             <button
               type="button"

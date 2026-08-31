@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+from prospector.schemas.verifier import VerifierGap
 
 
 class PlannerRejection(StrEnum):
     OVER_CONCURRENCY = "over_concurrency"
     SCHEMA_ERROR = "schema_error"
     EMPTY_FINISH = "empty_finish"
+    FINISH_WITHHELD = "finish_withheld"
 
 
 def dispatch_rejection(task_count: int, max_concurrency: int) -> PlannerRejection | None:
@@ -20,9 +23,18 @@ def dispatch_rejection(task_count: int, max_concurrency: int) -> PlannerRejectio
     return None
 
 
-def finish_rejection(excerpt_count: int) -> PlannerRejection | None:
+def finish_rejection(
+    excerpt_count: int,
+    *,
+    finish_withheld: bool = False,
+) -> PlannerRejection | None:
     if excerpt_count == 0:
         return PlannerRejection.EMPTY_FINISH
+    if finish_withheld:
+        # Withholding finish has to be a gate rather than a line in the runtime state:
+        # available_decisions only advises the model, and the round exists precisely
+        # because the Planner had already talked itself into finishing.
+        return PlannerRejection.FINISH_WITHHELD
     return None
 
 
@@ -74,3 +86,28 @@ class RepeatedRoundCounter:
             return False
         self.repeats += 1
         return self.repeats >= REPEATED_ROUND_LIMIT
+
+
+# A passing Verifier still writes down what it could not find. For gaps it judged minor
+# that note had exactly one destination -- the report's stated limits -- so nobody ever
+# went after the evidence it named: one Job closed research after a single dispatch with
+# a minor gap whose evidence_needed read as a ready-made task. The Verifier's own
+# evidence_needed is the signal here, because a gap it cannot say how to close is a
+# disclosure rather than a task, and the budget test keeps the extra round to the runs
+# where it is nearly free.
+FOLLOW_UP_BUDGET_DIVISOR = 3
+
+
+def follow_up_research_gaps(
+    gaps: Sequence[VerifierGap],
+    *,
+    research_decisions_used: int,
+    decision_round_limit: int,
+    already_used: bool,
+) -> list[VerifierGap]:
+    """Gaps a passing Verifier named evidence for, while another round still costs little."""
+    if already_used:
+        return []
+    if research_decisions_used * FOLLOW_UP_BUDGET_DIVISOR > decision_round_limit:
+        return []
+    return [gap for gap in gaps if gap.evidence_needed]

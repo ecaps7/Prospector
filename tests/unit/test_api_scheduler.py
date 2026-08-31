@@ -24,9 +24,10 @@ class FakeJobRepository:
         self.cancel_requests: dict[UUID, str] = {}
         self.cancel_finalization_attempted = threading.Event()
         self.fail_cancel_finalization_once = False
+        self.pending_cancellation_sweeps = 0
 
     def finalize_pending_cancellations(self) -> None:
-        pass
+        self.pending_cancellation_sweeps += 1
 
     def cancel_requested(self, job_id: UUID) -> bool:
         return self.cancel_requests.get(job_id) in {"cancelling", "cancelled"}
@@ -190,7 +191,7 @@ async def test_startup_recovery_normalizes_extra_running_jobs_to_fifo_queue() ->
             assert release_first.wait(timeout=2)
         return {"phase": "draft_rendered", "outcome": "draft_rendered"}
 
-    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    scheduler = JobScheduler(repository, run_job, recover_on_start=True)  # type: ignore[arg-type]
     await scheduler.start()
     try:
         await asyncio.to_thread(first_started.wait, 2)
@@ -200,6 +201,29 @@ async def test_startup_recovery_normalizes_extra_running_jobs_to_fifo_queue() ->
         assert repository.running == [second_id]
     finally:
         release_first.set()
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_does_not_recover_jobs_on_start_by_default() -> None:
+    repository = FakeJobRepository()
+    recovered_id = uuid4()
+    repository.created = [{"job_id": recovered_id, "brief_id": uuid4()}]
+    repository.recovered = [{"job_id": recovered_id, "status": "running"}]
+    executed: list[UUID] = []
+
+    def run_job(job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
+        executed.append(job_id)
+        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+
+    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    await scheduler.start()
+    try:
+        await asyncio.sleep(0)
+        assert executed == []
+        assert repository.running == []
+        assert repository.queued == []
+    finally:
         await scheduler.stop()
 
 
@@ -225,6 +249,49 @@ async def test_scheduler_cancels_running_job_instead_of_completing_it() -> None:
         assert repository.completed == []
     finally:
         release.set()
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_job_no_worker_holds_finalizes_it_at_once() -> None:
+    """A stranded 'running' row has no worker left to reach a safe boundary.
+
+    Its process died holding it, so leaving the row 'cancelling' strands it for good:
+    nothing stops it, and the Jobs list can never drop it either.  Only the scheduler
+    knows it is not the one executing the Job.
+    """
+    repository = FakeJobRepository()
+    stranded_id = uuid4()
+    repository.created = [{"job_id": stranded_id, "brief_id": uuid4()}]
+
+    def run_job(_job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
+        raise AssertionError("the stranded job must not be executed here")
+
+    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    await scheduler.start()
+    try:
+        assert await scheduler.cancel(stranded_id, requested_via="web_monitor") == "cancelled"
+        assert repository.cancelled == [stranded_id]
+        assert repository.cancel_requests[stranded_id] == "cancelled"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_pending_cancellations_are_swept_even_when_recovery_is_off() -> None:
+    """The sweep is about rows no process is left to honour, not about resuming work."""
+    repository = FakeJobRepository()
+
+    def run_job(_job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
+        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+
+    scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
+    assert scheduler.recover_on_start is False
+    await scheduler.start()
+    try:
+        assert repository.pending_cancellation_sweeps == 1
+        assert repository.recovered == []
+    finally:
         await scheduler.stop()
 
 

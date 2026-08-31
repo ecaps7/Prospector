@@ -28,7 +28,7 @@ class JobScheduler:
         repository: JobRepository,
         run_job: RunJob,
         *,
-        recover_on_start: bool = True,
+        recover_on_start: bool = False,
     ) -> None:
         self.repository = repository
         self.run_job = run_job
@@ -37,12 +37,18 @@ class JobScheduler:
         self._state_lock = asyncio.Lock()
         self._active_job_id: UUID | None = None
         self._worker: asyncio.Task[None] | None = None
+        # Every Job this process is on the hook for: queued, or the one running now.
+        # A Job that is 'running' in the database but missing here is stranded -- an
+        # earlier process died holding it -- and only this scheduler can tell them apart.
+        self._held: set[UUID] = set()
 
     async def start(self) -> None:
         if self._worker is not None:
             return
-        if self.recover_on_start:
-            await asyncio.to_thread(self.repository.finalize_pending_cancellations)
+        # A 'cancelling' row is a request no one is left to honour: the worker that would
+        # have reached a safe boundary died with its process.  Sweeping them is unrelated
+        # to whether this scheduler resumes anything, so it does not hang off that switch.
+        await asyncio.to_thread(self.repository.finalize_pending_cancellations)
         recovered = (
             await asyncio.to_thread(self.repository.recoverable_jobs)
             if self.recover_on_start
@@ -54,11 +60,13 @@ class JobScheduler:
             if first["status"] == "queued":
                 await asyncio.to_thread(self.repository.mark_running, first_id)
             self._active_job_id = first_id
+            self._held.add(first_id)
             await self._queue.put(first_id)
             for row in recovered[1:]:
                 job_id = UUID(str(row["job_id"]))
                 if row["status"] == "running":
                     await asyncio.to_thread(self.repository.mark_queued, job_id)
+                self._held.add(job_id)
                 await self._queue.put(job_id)
         self._worker = asyncio.create_task(self._consume(), name="prospector-job-scheduler")
 
@@ -83,16 +91,25 @@ class JobScheduler:
             job_id = UUID(str(created["job_id"]))
             if start_immediately:
                 self._active_job_id = job_id
+            self._held.add(job_id)
             await self._queue.put(job_id)
             return created
 
     async def cancel(self, job_id: UUID, *, requested_via: CancelRequestSource) -> str | None:
         async with self._state_lock:
-            return await asyncio.to_thread(
+            held = job_id in self._held
+            status = await asyncio.to_thread(
                 self.repository.request_cancel,
                 job_id,
                 requested_via=requested_via,
             )
+            if status != "cancelling" or held:
+                return status
+            # Nothing in this process is executing the Job, so no safe boundary will ever
+            # come.  Leaving it 'cancelling' strands it for good: the row is neither
+            # stoppable nor removable from the Jobs list.
+            await asyncio.to_thread(self.repository.finalize_cancelled, job_id)
+            return "cancelled"
 
     async def _consume(self) -> None:
         while True:
@@ -151,4 +168,5 @@ class JobScheduler:
                 async with self._state_lock:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
+                    self._held.discard(job_id)
                 self._queue.task_done()

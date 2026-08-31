@@ -307,6 +307,10 @@ Brief、Plan 历史、Task、Assertion、Excerpt、来源元数据、既有冲�
 
 Research Verifier 不提出报告结论，也不评价文章写法。
 
+两段核验共享由冻结快照一次生成的局部引用命名空间：Task 使用 `tN`、Assertion 使用
+`aN`、Excerpt 使用 `eN`。模型输入和输出都不暴露存储 UUID；代码先严格还原短引用，再执行
+领域引用校验、冲突物化和持久化。未知短引用属于输出合同错误，不能静默忽略。
+
 #### 输出
 
 - usable 或 unusable Assertion；
@@ -350,16 +354,18 @@ Document 全文仍不进入输入。Excerpt 可以使用现有确定性去重和
 {
   "decision": "ready",
   "synthesis": "对全部材料的连续分析，说明整体上能够形成什么认识、不同事实如何关联、哪些解释相互支持或限制，以及现有证据最多能够说到什么程度。",
-  "assertion_ids": ["A1", "A2", "A5"],
-  "material_conflict_keys": ["conflict_01"]
+  "assertion_refs": ["a1", "a2", "a5"],
+  "material_conflict_refs": ["x1"]
 }
 ```
 
 其中：
 
 - `synthesis` 是连贯的分析文本，不是标题、提纲、编号论点或结论列表；
-- `assertion_ids` 表示这份分析实际使用了哪些 usable Assertion，运行时代码必须校验白名单；
-- `material_conflict_keys` 表示分析已经考虑的重大冲突，运行时代码必须校验其真实存在；
+- `assertion_refs` 表示这份分析实际使用了哪些 usable Assertion；
+- `material_conflict_refs` 表示分析已经考虑的重大冲突；
+- 两者都只能引用本次输入中的 `aN / xN`。运行时代码严格还原并校验，落库后仍保存
+  `assertion_ids / material_conflict_keys`；
 - 证据边界、无法判断的部分和冲突影响直接写入 `synthesis`，不另列成 Writer 容易逐项照抄的清单。
 
 `synthesis` 必须做到：
@@ -378,8 +384,8 @@ Document 全文仍不进入输入。Excerpt 可以使用现有确定性去重和
 {
   "decision": "needs_research",
   "synthesis": "基于当前材料已经能够形成的有限分析，以及为什么关键问题仍无法确定。",
-  "assertion_ids": ["A1", "A2"],
-  "material_conflict_keys": ["conflict_01"],
+  "assertion_refs": ["a1", "a2"],
+  "material_conflict_refs": ["x1"],
   "reason": "缺失证据为什么会阻断对 Brief 的实质回应",
   "evidence_needed": "需要补充什么具体证据"
 }
@@ -410,7 +416,7 @@ Document 全文仍不进入输入。Excerpt 可以使用现有确定性去重和
 Research Synthesis 是输入材料之一，不是必须复述的答案：
 
 - Writer 同时接收最终采用的 `decision / synthesis / reason / evidence_needed` 和全部 usable Assertion、Excerpt；
-- `assertion_ids`、`material_conflict_keys`、运行 id、状态、错误以及 `raw_output` 只用于持久化和审计，不进入 Writer、修订 Writer 或 Whole-report Review；
+- 还原后的 `assertion_ids`、`material_conflict_keys`、运行 id、状态、错误以及 `raw_output` 只用于持久化和审计，不进入 Writer、修订 Writer 或 Whole-report Review；
 - Writer 可以重新组织、合并、限定或用不同语言表达其中的认识；
 - Writer 可以基于同一批材料形成更准确的综合；
 - Writer 不需要逐条使用 `assertion_ids` 中的材料；
@@ -465,7 +471,7 @@ Writer 必须：
 
 - **归属留在句子里**：某项事实来自厂商声明、聚合站或二手转述时，说话的主体必须写在使用该事实的位置，例如“OpenAI 称其企业客户增长三倍”。去掉主体就变成另一个命题，因此这一项不能挪走；
 - **可信度提醒附着到 finding**：`source_credibility` minor gap 不再作为全局 gap 输入，而是以 `source_caveat` 附着到相关 Assertion。Writer 使用该 finding 时在同一处写准来源性质和适用范围，不另写一份全局免责声明；
-- 整体样本边界、研究缺口和不可回答问题在它们实际改变认识的位置说明。除非 Brief 本身询问研究可靠性，不单设材料口径、证据边界或研究说明章节。
+- **争议和缺口按需选取，但归属固定**：`conflicts` 和 `minor_gaps` 与 finding 一样不构成覆盖义务，Writer 没有用到某条冲突或缺口本身不是缺陷（会实质改变认识的遗漏由 Whole-report Review 的 `material_omission` 兜底）。一旦使用，就写在它所改变的那个判断处，不得从正文抽出来集中安置或在文末统一交代研究本身。
 
 正文以 Brief 所问对象为叙述主体。不得用“材料称”“材料显示”“材料能够证明”代替具体事实、来源归属或分析，也不得为了展示覆盖面依次展开 ResearchTask、厂商、产品或案例。深度来自关系、机制和转折，不来自 finding 使用数量。
 
@@ -618,7 +624,7 @@ offset 基于文本块解析后的可见 Unicode 文本，不基于原始 Markdo
 4. 输出 `verified` 或 `failed`；`failed` 必须附 `reason`，说清材料原文是什么、正文写的是什么、差在哪；
 5. `verified` 必须绑定至少一个属于所选 Assertion 的 Excerpt 并落 ClaimEvidence；`failed` 进入当前 revision 的失败记录。
 
-归因模型不能引用 unusable Assertion，也不能引用研究材料之外的 Excerpt。Assertion 和 Excerpt 使用输入中给出的真实 ID；Claim 及其依赖关系使用本轮的短编号，代码负责白名单校验并还原落库关系。
+归因模型不能引用 unusable Assertion，也不能引用研究材料之外的 Excerpt。Assertion 使用 `aN`，Excerpt 使用所属 Assertion 下的 `aNeN`，已知冲突使用 `xN`；Claim 及其依赖关系使用本轮的 `cN`。代码对四类局部引用分别做白名单校验并还原落库关系，模型不填写 UUID 或完整冲突键。
 
 #### 3.7.4 不检索片段的依赖记录
 
@@ -910,8 +916,8 @@ Research Synthesis、Markdown Writer、Claim Attribution 和 Whole-report Review
 - 独立检查 prompt、完整原始输出与缺陷列表；是否采用初稿由代码根据缺陷计算；
 - `decision = ready | needs_research`；
 - `synthesis`；
-- `assertion_ids[]`；
-- `material_conflict_keys[]`；
+- 持久化的 `assertion_ids[]`（模型线协议为 `assertion_refs[]`）；
+- 持久化的 `material_conflict_keys[]`（模型线协议为 `material_conflict_refs[]`）；
 - `reason` 和 `evidence_needed`，仅用于 `needs_research`；
 - 原始模型输出、运行状态和合同错误。
 
@@ -1050,6 +1056,11 @@ ClaimEvidence 与 ClaimPremise 保留，但生产者改为 Claim Attribution。C
 
 材料按 ResearchTask 的研究问题组织，避免把全部 Assertion 变成一条无结构的清单。第一步不要求固定数量的结论，不得生成标题、章节、文章提纲、篇幅或文风建议。
 
+Research Synthesis、Writer、Claim Attribution 和 Whole-report Review 的模型上下文统一使用
+局部短引用：普通研究材料使用 `tN / aN / eN / xN`，Attribution 因需表达 Assertion 与
+Excerpt 归属而使用 `aN / aNeN / xN`。数据库 UUID 与完整冲突哈希只存在于领域对象、确定性
+校验和持久化层。
+
 第二步使用只含 Brief、初稿、研究任务问题与数量信息、已确认冲突和非来源类 minor gap 的独立消息上下文，检查初稿是否实质回应 Brief、是否沿 ResearchTask 复述、是否退化为材料罗列或缩略报告、是否缺少取舍和重要关系解释、是否被证据边界喧宾夺主，以及是否失真或遗漏重大冲突。任务问题和数量只帮助判断是否照搬采集路线，不恢复 Assertion/Excerpt 覆盖核对。出现这些实质分析问题时触发 `revise`；不得按文风、段落结构或另一种同样合理的分析偏好改写。
 
 ### 8.2 Writer prompt
@@ -1068,7 +1079,7 @@ ClaimEvidence 与 ClaimPremise 保留，但生产者改为 Claim Attribution。C
 
 不规定段落顺序、材料取舍、论点位置、篇幅、每段结构或是否必须使用表格。不得要求 Writer 按 Synthesis 的顺序或内容逐项展开。
 
-`source_credibility` minor gap 以 `source_caveat` 附着到受影响的 finding，不以全局 gap 进入 prompt。Writer 在使用该 finding 的位置直接写准来源主体和范围；正文直接讨论 Brief 所问对象，不用“材料”“证据”“本报告”替代事实和分析，也不为展示覆盖面逐项展开输入。除非 Brief 直接询问研究可靠性，不单设材料口径或证据边界章节。
+`source_credibility` minor gap 以 `source_caveat` 附着到受影响的 finding，不以全局 gap 进入 prompt。Writer 在使用该 finding 的位置直接写准来源主体和范围；正文直接讨论 Brief 所问对象，不用“材料”“证据”“本报告”替代事实和分析，也不为展示覆盖面逐项展开输入。`conflicts` 和 `minor_gaps` 按需选取，用到时写在它所改变的判断处，不集中安置于文末。
 
 修订反馈要求写明材料实际支持的范围时，Writer 必须改写范围本身（例如把“行业普遍支持”改成“五家平台中有三家支持”）。不得用“在本报告收集到的材料范围内”“据现有资料”这类免责措辞代替范围改写——这不改变命题，只把过度概括藏进免责声明。
 
@@ -1155,6 +1166,8 @@ LLM 不负责：
 
 - ResearchSynthesis 只接受 `ready` 和 `needs_research` 两种互斥输出；
 - `synthesis` 必须是单个连续文本字段，不存在 `direct_answer`、`conclusions[]` 或候选答案；
+- Research Verifier 与 Research Synthesis 的模型 JSON Schema 不包含 UUID；Verifier 两段共享同一
+  `tN / aN / eN` 命名空间，Synthesis 另使用 `xN` 指向已确认冲突；
 - Synthesis 引用只能指向 usable Assertion；
 - Synthesis 冲突键只能指向当前 Job 的真实 ConflictResolution；
 - `needs_research` 必须同时包含有限分析、`reason` 和具体 `evidence_needed`；

@@ -32,7 +32,10 @@ class ResearchTaskDraft(BaseModel):
     expected_evidence: str = Field(
         ...,
         min_length=1,
-        description="Evidence state that means the task is complete",
+        description=(
+            "Observable evidence state that would answer the task question; material counts "
+            "or category counts alone are not completion"
+        ),
     )
 
     @field_validator("question", "expected_evidence")

@@ -31,6 +31,7 @@ const REJECTION_LABELS: Record<string, string> = {
   over_concurrency: "派发任务超过并发上限",
   schema_error: "输出格式不合法",
   empty_finish: "尚无证据，不能结束研究",
+  finish_withheld: "本轮用于补齐核验指明的证据，不能结束研究",
 };
 
 function firstLine(value: unknown): string {
@@ -203,7 +204,12 @@ function renderLines(ctx: TimelineContext, event: ServerEvent): string[] {
 
 function renderPhase(payload: Record<string, unknown>): string[] {
   const phase = String(payload.phase ?? "");
-  if (phase === "research") return ["[研究] 开始"];
+  if (phase === "research") {
+    if (String(payload.trigger ?? "") === "verifier_follow_up") {
+      return ["[研究] 核验已放行，但指明仍缺证据，补充研究一轮"];
+    }
+    return ["[研究] 开始"];
+  }
   if (phase === "verifier") {
     // 核验现在有三个触发口，其中"研究综合请求补研究"发生在研究已经放行之后——
     // 不写出来的话，时间轴上会莫名其妙地第二次"研究阶段结束"。

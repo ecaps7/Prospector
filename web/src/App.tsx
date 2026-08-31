@@ -30,7 +30,6 @@ export default function App() {
   const location = useLocation();
   const reportMatch = useMatch("/jobs/:jobId/report");
   const monitorMatch = useMatch("/jobs/:jobId");
-  const isAskHome = location.pathname === "/";
   const jobId = reportMatch?.params.jobId ?? monitorMatch?.params.jobId;
   const shownJob = jobId && job?.job_id === jobId ? job : null;
   const jobError = jobId && jobFailure?.jobId === jobId ? jobFailure.message : null;
@@ -128,12 +127,6 @@ export default function App() {
         />
       ) : null}
       <Outlet context={jobContext} />
-      {isAskHome ? null : (
-        <footer className="pagefoot">
-          <span>Prospector · 本机单用户</span>
-          {import.meta.env.DEV ? <span>{window.location.host}</span> : null}
-        </footer>
-      )}
     </ToastProvider>
   );
 }

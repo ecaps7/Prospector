@@ -19,6 +19,12 @@ class ResearchState(TypedDict):
     research_decisions_used: int
     consecutive_schema_errors: int
     decision_round_limit: int
+    # A passing Verifier's own evidence_needed is handed back to the Planner at most once
+    # per Job. finish_withheld marks that one round, in which the Planner chooses how to
+    # cover the named evidence but not whether to; it is separate from the once-per-Job
+    # marker so a malformed decision retried inside that round cannot restore finish.
+    follow_up_research_used: bool
+    finish_withheld: bool
     active_task_ids: list[str]
     last_verifier_run_id: str | None
     synthesis_run_id: str | None
@@ -57,6 +63,8 @@ def initial_research_state(*, job_id: str, brief_id: str) -> ResearchState:
         "research_decisions_used": 0,
         "consecutive_schema_errors": 0,
         "decision_round_limit": 0,
+        "follow_up_research_used": False,
+        "finish_withheld": False,
         "active_task_ids": [],
         "last_verifier_run_id": None,
         "synthesis_run_id": None,

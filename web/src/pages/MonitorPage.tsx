@@ -10,7 +10,7 @@ import { UsagePanel, type UsageMetric } from "../components/monitor/UsagePanel";
 import { useToast } from "../components/Toast";
 import { ErrorView, LoadingView } from "../components/ui/Status";
 import { fmtClock, fmtNum } from "../lib/format";
-import { apiErrorLabel, jobStatusLabel, verificationLabel } from "../lib/labels";
+import { apiErrorLabel, jobStatusLabel } from "../lib/labels";
 import { limitsForEffort, maxConcurrency } from "../state/budget";
 import {
   elapsedSeconds,
@@ -29,15 +29,6 @@ import {
 
 function statusLabel(state: JobViewState): string {
   if (state.connectionState === "reconnecting") return "重连中";
-  if (state.status === "completed") {
-    const verdict = verificationLabel(state.verificationStatus);
-    return verdict && state.verificationStatus !== "verified" ? `研究完成 · ${verdict}` : "研究完成";
-  }
-  if (state.status === "failed") return "失败";
-  if (state.status === "cancelled") return "已取消";
-  if (state.status === "cancelling") return "正在取消…";
-  if (state.status === "queued") return "排队中";
-  if (state.status === "running") return "研究中";
   return jobStatusLabel(state.status);
 }
 

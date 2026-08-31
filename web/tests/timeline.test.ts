@@ -256,3 +256,38 @@ test("plan cards follow the canonical task order instead of planner array order"
     ],
   );
 });
+
+test("补充研究那一轮说得出自己的来由，不再复用一句「开始」", () => {
+  assert.deepEqual(
+    lines([
+      event(1, "job.phase_changed", { phase: "research" }),
+      event(2, "job.phase_changed", { phase: "research", trigger: "verifier_follow_up" }),
+    ]),
+    ["[研究] 开始", "[研究] 核验已放行，但指明仍缺证据，补充研究一轮"],
+  );
+});
+
+test("翻页翻的是派发，不是决策轮——判定收尾的那一轮本来就没有计划", () => {
+  const tasks = ["task-1", "task-2", "task-3"].map((taskId) => ({
+    taskId,
+    question: taskId,
+  }));
+  const state = {
+    tasks,
+    planVersion: 2,
+    planReason: null,
+    planRounds: [
+      { round: 1, planVersion: 1, reason: "", taskIds: ["task-1", "task-2"] },
+      // 第 2 轮是被核验交回的那次 finish，不产生计划，所以轮号从 1 跳到 3。
+      { round: 3, planVersion: 2, reason: "", taskIds: ["task-3"] },
+    ],
+  } as JobViewState;
+
+  assert.deepEqual(
+    planPages(state).map((page) => [page.round, page.planVersion]),
+    [
+      [1, 1],
+      [3, 2],
+    ],
+  );
+});

@@ -3,7 +3,6 @@ import { useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { ReportAudit } from "../api/types";
 import { EvidenceDrawer } from "../components/report/EvidenceDrawer";
-import { FindingList } from "../components/report/FindingList";
 import { ReportBody } from "../components/report/ReportBody";
 import { ReportHead } from "../components/report/ReportHead";
 import { ReportPending } from "../components/report/ReportPending";
@@ -13,10 +12,8 @@ import { ErrorView, LoadingView } from "../components/ui/Status";
 import { apiErrorLabel } from "../lib/labels";
 import { useJobRoute } from "../state/jobRoute";
 import {
-  findingCount,
   parseReportDoc,
   readAudit,
-  renderReportBody,
   type Heading,
 } from "../state/reportDoc";
 import { reportGate } from "../state/reportGate";
@@ -71,10 +68,6 @@ export function ReportPage() {
     () => (report ? parseReportDoc(report.markdown) : null),
     [report],
   );
-  const healthHtml = useMemo(
-    () => (doc?.health ? renderReportBody(doc.health).html : ""),
-    [doc],
-  );
   const audit = useMemo(() => readAudit(report?.audit), [report?.audit]);
 
   const toc = useMemo<TocItem[]>(() => {
@@ -82,14 +75,11 @@ export function ReportPage() {
     const items: TocItem[] = headings
       .filter((item) => item.level === 2)
       .map((item) => ({ id: item.id, title: item.title }));
-    if (findingCount(audit)) {
-      items.push({ id: "sec-findings", title: "未通过核对", divider: true });
-      items.push({ id: "sec-src", title: "来源" });
-    } else if (doc.sources.length) {
+    if (doc.sources.length) {
       items.push({ id: "sec-src", title: "来源", divider: true });
     }
     return items;
-  }, [doc, headings, audit]);
+  }, [doc, headings]);
 
   useEffect(() => {
     const onScroll = () => {
@@ -140,34 +130,16 @@ export function ReportPage() {
 
   return (
     <section className="view">
-      <ReportHead
-        title={title}
-        verdict={audit.verdict}
-        health={audit.health}
-        jobId={job.job_id}
-      />
+      <ReportHead title={title} />
 
       <div className="report-layout">
         <ReportToc items={toc} active={active} />
         <div className="report-main">
-          {healthHtml ? (
-            <div className="report-health md" dangerouslySetInnerHTML={{ __html: healthHtml }} />
-          ) : null}
           <ReportBody
             body={doc.body}
             onHeadings={onHeadings}
             onOpenSource={openSource}
           />
-          {findingCount(audit) ? (
-            <>
-              <h2 id="sec-findings">未通过核对</h2>
-              <FindingList
-                spans={audit.spans}
-                review={audit.review}
-                readthrough={audit.readthrough}
-              />
-            </>
-          ) : null}
           {doc.sources.length ? (
             <>
               <h2 id="sec-src">来源</h2>

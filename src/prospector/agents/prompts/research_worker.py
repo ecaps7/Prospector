@@ -26,7 +26,7 @@ def worker_system_prompt(*, today: str | None = None, action_schema: str | None 
 没有保存的发现不会进入后续流程。
 
 研究边界：
-- question 定义研究对象，expected_evidence 定义任务完成所需的证据状态；
+- question 定义研究对象，expected_evidence 给出任务完成所需证据状态的下限；
 - 用户明确限制不可违反；
 - 在这些边界内，检索策略、来源选择、核查角度和查询组织由你决定。
 
@@ -43,7 +43,8 @@ def worker_system_prompt(*, today: str | None = None, action_schema: str | None 
 - save：保存当前原文能够直接支持的断言；
 - finish：说明为何无法继续取得任务所需的证据。
 
-每次 save 后，运行时会根据全部已落库断言独立判断 expected_evidence 是否满足。
+每次 save 后，运行时会根据全部已落库断言独立判断证据目标是否达成。凑够 expected_evidence
+列出的数量或类别不等于任务结束，该判断还要看 question 是否已被现有证据实质回答。
 你不能自行宣布任务已经完成。
 
 同一轮可以提交多个彼此独立的查询或保存批次，具体上限由运行时消息给出。
@@ -109,6 +110,14 @@ def worker_coverage_prompt(
     task_question: str,
     expected_evidence: str,
 ) -> str:
+    """Ask whether the stored assertions answer the task, not whether they clear the bar.
+
+    Planners write `expected_evidence` as a floor ("至少 3 类平台、6 项研究"), and the
+    first save batch of a wide fan-out clears that floor on the Worker's second round.
+    Judging against the floor alone therefore ends every task at its minimum: the
+    threshold has to be stated as admission, with the task question carrying the actual
+    completion test.
+    """
     projection = [
         {
             "assertion_id": str(item.assertion_id),
@@ -129,12 +138,25 @@ expected_evidence：
 已落库断言：
 {json.dumps(projection, ensure_ascii=False)}
 
-只判断这些断言在语义上是否共同达到 expected_evidence 描述的证据状态，
-不要按关键词、表述顺序或断言数量机械匹配。断言忠实度和来源可靠性由
+expected_evidence 是准入下限，不是终点。它列出的数量、类别或条目刚好被凑够，
+本身不构成 goal_met。goal_met 需要同时成立：
+
+1. 已落库断言在语义上达到 expected_evidence 描述的证据状态；
+2. 这些断言合起来已经实质回答任务问题，且没有还能靠继续检索关闭的实质缺口。
+
+判断第 2 条时看三件事：
+- 任务问题的各个关键侧面是否都有证据，还是其中一部分被反复覆盖、另一部分只有一两条；
+- 任务问题问的是比较、因果或随时间变化时，证据是否直接落在问题所问的对象和结果上，
+  还是由相近替代物顶替（例如问某类内容的衰减速度，却只有相邻指标、模拟或类比场景）；
+- 支撑关键判断的是否只有单一来源、单一平台或单一样本。
+这三件事问的是证据有没有对准任务问题，不是来源可不可信；断言忠实度和来源可靠性由
 Research Verifier 负责，不属于本次判断。
 
-不得因预算不足降低完成标准。reason 使用一句简短中文：满足时说明已形成什么证据，
-未满足时说明仍缺什么。
+本次判断不要求穷尽资料。剩余缺口只能靠更多同类材料重复填补，或在公开来源里显然
+取不到时，判定为满足。不得因预算不足降低完成标准。
+
+不要按关键词、表述顺序或断言数量机械匹配。reason 使用一句简短中文：满足时说明已形成
+什么证据，未满足时指出一个本任务还能通过检索关闭的具体缺口。
 
 只输出 JSON：
 {{

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from prospector.schemas.brief import ResearchBrief
+
+ResearchAssertionRef = Annotated[str, StringConstraints(pattern=r"^a[1-9][0-9]*$")]
+ResearchConflictRef = Annotated[str, StringConstraints(pattern=r"^x[1-9][0-9]*$")]
 
 
 class WriterSource(BaseModel):
@@ -38,7 +41,7 @@ class WriterEvidenceCard(BaseModel):
 
 
 class ResearchSynthesisResult(BaseModel):
-    """The model-facing result. Runtime adds versioning and persistence metadata."""
+    """Domain result after local model refs have been resolved."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -106,6 +109,56 @@ class ResearchSynthesisReview(BaseModel):
 
     @model_validator(mode="after")
     def _validate_revision(self) -> ResearchSynthesisReview:
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("review reason must not be blank")
+        if self.defects and self.revised_result is None:
+            raise ValueError("defects require revised_result")
+        if not self.defects and self.revised_result is not None:
+            raise ValueError("a defect-free review must not carry revised_result")
+        return self
+
+
+class ResearchSynthesisModelResult(BaseModel):
+    """Model-facing synthesis result using the frozen material's local refs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["ready", "needs_research"]
+    synthesis: str = Field(..., min_length=1)
+    assertion_refs: list[ResearchAssertionRef] = Field(default_factory=list)
+    material_conflict_refs: list[ResearchConflictRef] = Field(default_factory=list)
+    reason: str | None = None
+    evidence_needed: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_decision_fields(self) -> ResearchSynthesisModelResult:
+        self.synthesis = self.synthesis.strip()
+        if not self.synthesis:
+            raise ValueError("synthesis must not be blank")
+        if self.decision == "needs_research":
+            if not (self.reason or "").strip() or not (self.evidence_needed or "").strip():
+                raise ValueError("needs_research requires reason and evidence_needed")
+        elif self.reason is not None or self.evidence_needed is not None:
+            raise ValueError("ready must not carry reason or evidence_needed")
+        return self
+
+
+class ResearchSynthesisModelReview(BaseModel):
+    """Independent review wire contract; revisions keep the same short refs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    defects: list[SynthesisReviewDefect] = Field(default_factory=list)
+    reason: str = Field(..., min_length=1)
+    revised_result: ResearchSynthesisModelResult | None = None
+
+    @property
+    def decision(self) -> Literal["accept", "revise"]:
+        return "revise" if self.defects else "accept"
+
+    @model_validator(mode="after")
+    def _validate_revision(self) -> ResearchSynthesisModelReview:
         self.reason = self.reason.strip()
         if not self.reason:
             raise ValueError("review reason must not be blank")

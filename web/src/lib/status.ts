@@ -5,20 +5,24 @@ export type StatusTone = "running" | "done" | "warn" | "danger" | "dim";
  * this mapping used to live in JobsPage, JobBar and MonitorPage, and they had
  * already drifted apart on `running` and `completed`.
  *
- * 完成的任务分不分色看交付判定：`partial` / `failed` 是报告没全站住，得和干净
- * 交付区分开。改版前的旧任务没有判定字段，成色写在 `outcome` 上，所以两个都读。
+ * 任务状态只反映生命周期，不显示报告核验判定。
  */
 export function statusTone(
   status: string,
-  outcome?: string | null,
-  verification?: string | null,
+  _outcome?: string | null,
+  _verification?: string | null,
 ): StatusTone {
-  if (status === "completed") {
-    if (verification === "partial" || verification === "failed") return "warn";
-    return outcome === "partial" ? "warn" : "done";
-  }
+  if (status === "completed") return "done";
   if (status === "failed") return "danger";
   if (status === "cancelled" || status === "cancelling") return "warn";
-  if (status === "running") return "running";
+  if (status === "queued" || status === "running") return "running";
   return "dim";
+}
+
+/**
+ * 任务是否已经停下来。停下来的任务才可以从历史里删除；`cancelling` 还在收尾，
+ * 调度器手上还攥着它。判定同样只放这一处，别在页面里重新拼状态集合。
+ */
+export function isStopped(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }

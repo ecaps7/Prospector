@@ -12,7 +12,10 @@ from pydantic import ValidationError
 
 from prospector.agents.llm import get_openai_client, strong_model, thinking_extra_body
 from prospector.deterministic.excerpt_text import clip_excerpt_text, writer_excerpt_limit
+from prospector.deterministic.model_refs import ResearchModelRefs
 from prospector.schemas.report import (
+    ResearchSynthesisModelResult,
+    ResearchSynthesisModelReview,
     ResearchSynthesisResult,
     ResearchSynthesisReview,
     ResearchSynthesisRun,
@@ -50,14 +53,18 @@ def synthesis_context_payload(run: ResearchSynthesisRun) -> dict[str, str | None
     }
 
 
-def synthesis_result_payload(result: ResearchSynthesisResult) -> dict[str, Any]:
+def synthesis_result_payload(
+    result: ResearchSynthesisResult, refs: ResearchModelRefs
+) -> dict[str, Any]:
     """Serialize only the model-facing result, even when passed a persisted subclass."""
 
     return {
         "decision": result.decision,
         "synthesis": result.synthesis,
-        "assertion_ids": [str(value) for value in result.assertion_ids],
-        "material_conflict_keys": result.material_conflict_keys,
+        "assertion_refs": [refs.ref_by_assertion[value] for value in result.assertion_ids],
+        "material_conflict_refs": [
+            refs.ref_by_conflict[value] for value in result.material_conflict_keys
+        ],
         "reason": result.reason,
         "evidence_needed": result.evidence_needed,
     }
@@ -122,16 +129,19 @@ def synthesis_material_payload(snapshot: WriterSnapshot) -> dict[str, Any]:
         if caveat is not None:
             finding["source_caveat"] = caveat
         task_details[task_id]["findings"].append(finding)
-    return {
+    payload = {
         "brief": snapshot.brief.model_dump(mode="json"),
         "research_tasks": [task_details[task_id] for task_id in task_order],
         "conflicts": snapshot.conflicts,
         "minor_gaps": global_minor_gaps(snapshot),
     }
+    return cast(
+        dict[str, Any], ResearchModelRefs.from_writer_snapshot(snapshot).alias_payload(payload)
+    )
 
 
 def research_synthesis_messages(snapshot: WriterSnapshot) -> list[dict[str, str]]:
-    schema = json.dumps(ResearchSynthesisResult.model_json_schema(), ensure_ascii=False)
+    schema = json.dumps(ResearchSynthesisModelResult.model_json_schema(), ensure_ascii=False)
     material = json.dumps(synthesis_material_payload(snapshot), ensure_ascii=False)
     system = """你是研究综合者。通读 Brief 和输入中的可用研究材料，形成一份连贯的分析，说明这些材料合起来意味着什么。
 
@@ -141,7 +151,8 @@ def research_synthesis_messages(snapshot: WriterSnapshot) -> list[dict[str, str]
 
 现有材料足以实质回应 Brief 时选择 ready。只有缺失证据导致无法实质回应 Brief 时才选择 needs_research；此时仍应写出当前材料能够支持的有限分析，并用 reason 说明为什么无法实质回应 Brief，用 evidence_needed 说明还需要什么证据。
 
-assertion_ids 和 material_conflict_keys 只记录分析实际依据的材料，不要为了覆盖输入而罗列。
+assertion_refs 和 material_conflict_refs 只记录分析实际依据的材料，不要为了覆盖输入而罗列。
+Assertion 只能使用研究材料中的 aN 短 ref，冲突只能使用 xN 短 ref，不得输出或编造存储 id。
 
 最终只输出符合给定 JSON Schema 的单个 JSON 对象。"""
     user = f"""请综合下面的研究材料。
@@ -160,7 +171,8 @@ JSON Schema：
 def research_synthesis_review_messages(
     snapshot: WriterSnapshot, draft: ResearchSynthesisResult
 ) -> list[dict[str, str]]:
-    schema = json.dumps(ResearchSynthesisReview.model_json_schema(), ensure_ascii=False)
+    refs = ResearchModelRefs.from_writer_snapshot(snapshot)
+    schema = json.dumps(ResearchSynthesisModelReview.model_json_schema(), ensure_ascii=False)
     usable_task_ids = {str(card.task_id) for card in snapshot.evidence_cards}
     research_questions = [
         str(task["question"])
@@ -171,7 +183,7 @@ def research_synthesis_review_messages(
     payload = {
         "json_schema": json.loads(schema),
         "brief": snapshot.brief.model_dump(mode="json"),
-        "draft": synthesis_result_payload(draft),
+        "draft": synthesis_result_payload(draft, refs),
         "research_shape": {
             "research_questions": list(dict.fromkeys(research_questions)),
             "usable_assertion_count": len(snapshot.usable_assertion_ids),
@@ -196,7 +208,10 @@ def research_synthesis_review_messages(
 最终只输出符合给定 JSON Schema 的单个 JSON 对象。"""
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {
+            "role": "user",
+            "content": json.dumps(refs.alias_payload(payload), ensure_ascii=False),
+        },
     ]
 
 
@@ -206,11 +221,12 @@ class OpenAIResearchSynthesis:
         self.model = model or strong_model()
 
     def synthesize(self, snapshot: WriterSnapshot) -> ResearchSynthesisResultEnvelope:
+        refs = ResearchModelRefs.from_writer_snapshot(snapshot)
         draft_prompt = research_synthesis_messages(snapshot)
         conflicts = {str(item.get("conflict_key")) for item in snapshot.conflicts}
-        draft, draft_raw = self._complete_result(draft_prompt, snapshot, conflicts)
+        draft, draft_raw = self._complete_result(draft_prompt, snapshot, conflicts, refs)
         review_prompt = research_synthesis_review_messages(snapshot, draft)
-        review, review_raw = self._complete_review(review_prompt, snapshot, conflicts)
+        review, review_raw = self._complete_review(review_prompt, snapshot, conflicts, refs)
         final = (
             draft if not review.defects else cast(ResearchSynthesisResult, review.revised_result)
         )
@@ -242,17 +258,32 @@ class OpenAIResearchSynthesis:
         if set(result.material_conflict_keys) - conflicts:
             raise ValueError("Synthesis referenced unknown conflict")
 
+    @staticmethod
+    def _resolve_result(
+        result: ResearchSynthesisModelResult, refs: ResearchModelRefs
+    ) -> ResearchSynthesisResult:
+        return ResearchSynthesisResult(
+            decision=result.decision,
+            synthesis=result.synthesis,
+            assertion_ids=refs.assertions(result.assertion_refs),
+            material_conflict_keys=refs.conflicts(result.material_conflict_refs),
+            reason=result.reason,
+            evidence_needed=result.evidence_needed,
+        )
+
     def _complete_result(
         self,
         prompt: list[dict[str, str]],
         snapshot: WriterSnapshot,
         conflicts: set[str],
+        refs: ResearchModelRefs,
     ) -> tuple[ResearchSynthesisResult, str]:
         last: ResearchSynthesisOutputError | None = None
         for _ in range(SYNTHESIS_ATTEMPTS):
             raw = self._request(prompt, temperature=0.2)
             try:
-                result = ResearchSynthesisResult.model_validate_json(raw)
+                model_result = ResearchSynthesisModelResult.model_validate_json(raw)
+                result = self._resolve_result(model_result, refs)
                 self._validate_references(result, snapshot, conflicts)
             except (ValidationError, ValueError) as exc:
                 last = ResearchSynthesisOutputError(
@@ -267,12 +298,23 @@ class OpenAIResearchSynthesis:
         prompt: list[dict[str, str]],
         snapshot: WriterSnapshot,
         conflicts: set[str],
+        refs: ResearchModelRefs,
     ) -> tuple[ResearchSynthesisReview, str]:
         last: ResearchSynthesisOutputError | None = None
         for _ in range(SYNTHESIS_ATTEMPTS):
             raw = self._request(prompt, temperature=0.1)
             try:
-                review = ResearchSynthesisReview.model_validate_json(raw)
+                model_review = ResearchSynthesisModelReview.model_validate_json(raw)
+                revised = (
+                    self._resolve_result(model_review.revised_result, refs)
+                    if model_review.revised_result is not None
+                    else None
+                )
+                review = ResearchSynthesisReview(
+                    defects=model_review.defects,
+                    reason=model_review.reason,
+                    revised_result=revised,
+                )
                 if review.revised_result is not None:
                     self._validate_references(review.revised_result, snapshot, conflicts)
             except (ValidationError, ValueError) as exc:

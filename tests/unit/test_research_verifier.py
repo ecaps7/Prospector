@@ -8,16 +8,21 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from prospector.agents.prompts.planner import planner_system_prompt
-from prospector.agents.prompts.research_verifier import research_verifier_messages
+from prospector.agents.prompts.research_verifier import (
+    research_coverage_messages,
+    research_verifier_messages,
+)
 from prospector.agents.research_verifier import (
     OpenAIResearchVerifier,
     VerifierModelResult,
     VerifierOutputError,
 )
 from prospector.deterministic.budget import limits_for_effort
+from prospector.deterministic.gates import PlannerRejection, finish_rejection
+from prospector.deterministic.model_refs import ResearchModelRefs
 from prospector.flow.research_graph import (
     ResearchGraphServices,
     VerifierMajorGapError,
@@ -28,8 +33,11 @@ from prospector.runtime.timeline import ResearchTimelineRenderer
 from prospector.schemas.verifier import (
     AssertionDisposition,
     ConflictJudgement,
+    VerifierCoverageDecision,
+    VerifierCoverageDecisionRefs,
     VerifierDecision,
-    VerifierLlmDecision,
+    VerifierEvidenceReview,
+    VerifierEvidenceReviewRefs,
     conflict_key,
     effective_unusable_assertion_ids,
     materialize_conflict_resolutions,
@@ -50,12 +58,22 @@ def _verifier_snapshot() -> dict[str, object]:
         "plans": [],
         "tasks": [{"task_id": str(TASK_ID)}],
         "assertions": [
-            {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
-            {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_B)]},
+            {
+                "assertion_id": str(ASSERTION_ID),
+                "task_id": str(TASK_ID),
+                "statement": "证据 A",
+                "excerpt_ids": [str(EXCERPT_A)],
+            },
+            {
+                "assertion_id": str(ASSERTION_B),
+                "task_id": str(TASK_ID),
+                "statement": "证据 B",
+                "excerpt_ids": [str(EXCERPT_B)],
+            },
         ],
         "excerpts": [
-            {"excerpt_id": str(EXCERPT_A)},
-            {"excerpt_id": str(EXCERPT_B)},
+            {"excerpt_id": str(EXCERPT_A), "url": "https://example.com/a"},
+            {"excerpt_id": str(EXCERPT_B), "url": "https://example.com/b"},
         ],
     }
 
@@ -77,14 +95,13 @@ def _gaps(
     ]
 
 
-def _llm_decision(
+def _coverage_decision(
     release: str = "pass",
     *,
     severity: str = "minor",
     kind: str = "plan_coverage",
-    dispositions: list[dict[str, object]] | None = None,
-) -> VerifierLlmDecision:
-    return VerifierLlmDecision.model_validate(
+) -> VerifierCoverageDecision:
+    return VerifierCoverageDecision.model_validate(
         {
             "decision": release,
             "reason": (
@@ -92,8 +109,41 @@ def _llm_decision(
                 if release == "needs_research"
                 else "现有证据足以履行 Plan"
             ),
+            "answerability_checks": [
+                (
+                    {
+                        "requirement": "回答核心问题",
+                        "status": "blocked",
+                        "answer": "",
+                        "supporting_assertion_ids": [],
+                        "evidence_bridge": "",
+                        "evidence_needed": "补充能够回答核心问题的证据",
+                    }
+                    if release == "needs_research"
+                    else {
+                        "requirement": "回答核心问题",
+                        "status": "answered",
+                        "answer": "现有证据支持有边界的回答",
+                        "supporting_assertion_ids": [str(ASSERTION_ID)],
+                        "evidence_bridge": "该断言直接回答核心问题",
+                        "evidence_needed": "",
+                    }
+                )
+            ],
             "gaps": _gaps(severity=severity, kind=kind),
-            "conflicts": [],
+        }
+    )
+
+
+def _evidence_review(
+    *,
+    dispositions: list[dict[str, object]] | None = None,
+    conflicts: list[dict[str, object]] | None = None,
+) -> VerifierEvidenceReview:
+    return VerifierEvidenceReview.model_validate(
+        {
+            "source_credibility_findings": [],
+            "conflicts": conflicts or [],
             "assertion_dispositions": dispositions or [],
         }
     )
@@ -107,7 +157,8 @@ def _decision(
     dispositions: list[dict[str, object]] | None = None,
 ) -> VerifierDecision:
     return materialize_verifier_decision(
-        _llm_decision(release, severity=severity, kind=kind, dispositions=dispositions),
+        _evidence_review(dispositions=dispositions),
+        _coverage_decision(release, severity=severity, kind=kind),
         {},
     )
 
@@ -120,13 +171,20 @@ def _unusable_disposition(assertion_id: UUID = ASSERTION_ID) -> dict[str, object
     }
 
 
+def _model_payload(value: object) -> object:
+    refs = ResearchModelRefs.from_verifier_snapshot(_verifier_snapshot())
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    return refs.alias_payload(value)
+
+
 def test_decision_requires_major_gap_exactly_when_research_is_needed() -> None:
     with pytest.raises(ValidationError, match="pass must not contain major gaps"):
         _decision("pass", severity="major")
     with pytest.raises(ValidationError, match="needs_research requires"):
-        VerifierLlmDecision.model_validate(
+        VerifierCoverageDecision.model_validate(
             {
-                **_llm_decision().model_dump(mode="json"),
+                **_coverage_decision().model_dump(mode="json"),
                 "decision": "needs_research",
                 "gaps": [],
             }
@@ -134,21 +192,34 @@ def test_decision_requires_major_gap_exactly_when_research_is_needed() -> None:
 
 
 def test_major_gap_requires_evidence_needed() -> None:
-    payload = _llm_decision().model_dump(mode="json")
+    payload = _coverage_decision().model_dump(mode="json")
     payload["decision"] = "needs_research"
     payload["gaps"] = [{**_gaps(severity="major")[0], "evidence_needed": ""}]
     with pytest.raises(ValidationError, match="major gap requires evidence_needed"):
-        VerifierLlmDecision.model_validate(payload)
+        VerifierCoverageDecision.model_validate(payload)
 
 
 def test_verifier_rejects_blank_reason_and_gap_description() -> None:
-    payload = _llm_decision().model_dump(mode="json")
+    payload = _coverage_decision().model_dump(mode="json")
     with pytest.raises(ValidationError, match="reason must not be blank"):
-        VerifierLlmDecision.model_validate({**payload, "reason": "\n"})
+        VerifierCoverageDecision.model_validate({**payload, "reason": "\n"})
 
     payload["gaps"] = [{**_gaps()[0], "description": "\n"}]
     with pytest.raises(ValidationError, match="description must not be blank"):
-        VerifierLlmDecision.model_validate(payload)
+        VerifierCoverageDecision.model_validate(payload)
+
+
+def test_coverage_decision_requires_auditable_core_answers() -> None:
+    payload = _coverage_decision().model_dump(mode="json")
+    payload["answerability_checks"][0]["evidence_bridge"] = ""
+    with pytest.raises(ValidationError, match="requires an evidence_bridge"):
+        VerifierCoverageDecision.model_validate(payload)
+
+    blocked = _coverage_decision("needs_research", severity="major").model_dump(mode="json")
+    blocked["decision"] = "pass"
+    blocked["gaps"] = []
+    with pytest.raises(ValidationError, match="pass must not contain blocked"):
+        VerifierCoverageDecision.model_validate(blocked)
 
 
 def test_conflict_judgement_enforces_winner_contract() -> None:
@@ -157,16 +228,16 @@ def test_conflict_judgement_enforces_winner_contract() -> None:
         "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
         "rationale": "来源口径不同。",
     }
-    payload = _llm_decision().model_dump(mode="json")
+    payload = _evidence_review().model_dump(mode="json")
     payload["conflicts"] = [
         {**base, "decision": "present_both", "winning_assertion_ids": [str(ASSERTION_ID)]}
     ]
     with pytest.raises(ValidationError, match="must not select winners"):
-        VerifierLlmDecision.model_validate(payload)
+        VerifierEvidenceReview.model_validate(payload)
 
     payload["conflicts"] = [{**base, "decision": "adjudicated", "winning_assertion_ids": []}]
     with pytest.raises(ValidationError, match="requires winning_assertion_ids"):
-        VerifierLlmDecision.model_validate(payload)
+        VerifierEvidenceReview.model_validate(payload)
 
 
 def test_materialize_conflict_binds_assertion_excerpts() -> None:
@@ -246,25 +317,21 @@ def test_minor_credibility_gap_may_disclose_without_discarding_evidence() -> Non
 
 def test_major_credibility_gap_derives_unusable_dispositions() -> None:
     """Code supplies the mechanical consequence the model may have left out."""
-    llm_decision = _llm_decision(
-        "needs_research",
-        severity="major",
-        kind="source_credibility",
-        dispositions=[],
+    evidence_review = _evidence_review(dispositions=[])
+    decision = materialize_verifier_decision(
+        evidence_review,
+        _coverage_decision("needs_research", severity="major", kind="source_credibility"),
+        {},
     )
-    decision = materialize_verifier_decision(llm_decision, {})
 
-    assert llm_decision.assertion_dispositions == []
+    assert evidence_review.assertion_dispositions == []
     assert [item.assertion_id for item in decision.assertion_dispositions] == [ASSERTION_ID]
     assert decision.assertion_dispositions[0].status == "unusable"
 
 
 def test_major_credibility_gap_overrides_a_contradicting_restore() -> None:
     decision = materialize_verifier_decision(
-        _llm_decision(
-            "needs_research",
-            severity="major",
-            kind="source_credibility",
+        _evidence_review(
             dispositions=[
                 {
                     "assertion_id": str(ASSERTION_ID),
@@ -273,6 +340,7 @@ def test_major_credibility_gap_overrides_a_contradicting_restore() -> None:
                 }
             ],
         ),
+        _coverage_decision("needs_research", severity="major", kind="source_credibility"),
         {},
     )
 
@@ -291,11 +359,7 @@ def test_persisted_decision_still_asserts_major_credibility_invariant() -> None:
 
 
 def test_source_credibility_gap_rejects_excerpt_only_pointers() -> None:
-    payload = _llm_decision(
-        "needs_research",
-        severity="major",
-        dispositions=[_unusable_disposition()],
-    ).model_dump(mode="json")
+    payload = _coverage_decision("needs_research", severity="major").model_dump(mode="json")
     payload["gaps"] = [
         {
             **_gaps(severity="major", kind="source_credibility")[0],
@@ -303,7 +367,7 @@ def test_source_credibility_gap_rejects_excerpt_only_pointers() -> None:
         }
     ]
     with pytest.raises(ValidationError, match="related_assertion_ids"):
-        VerifierLlmDecision.model_validate(payload)
+        VerifierCoverageDecision.model_validate(payload)
 
 
 def test_pass_may_include_unusable_dispositions_without_major_gap() -> None:
@@ -317,10 +381,7 @@ def test_pass_may_include_unusable_dispositions_without_major_gap() -> None:
 
 def test_duplicate_disposition_rejected() -> None:
     with pytest.raises(ValidationError, match="duplicate assertion disposition"):
-        _llm_decision(
-            "pass",
-            dispositions=[_unusable_disposition(), _unusable_disposition()],
-        )
+        _evidence_review(dispositions=[_unusable_disposition(), _unusable_disposition()])
 
 
 def test_effective_unusable_last_write_wins() -> None:
@@ -365,6 +426,7 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
         "plans": [],
         "tasks": [],
         "planner_exit": {"trigger": "planner_finish"},
+        "effective_unusable_assertion_ids": [],
         "assertions": [],
         "excerpts": [
             {
@@ -379,37 +441,60 @@ def test_prompt_uses_source_metadata_without_tier_field_or_full_document() -> No
     }
     messages = research_verifier_messages(snapshot)
     prompt = "\n".join(message["content"] for message in messages)
-    schema = json.dumps(VerifierLlmDecision.model_json_schema(), ensure_ascii=False)
+    schema = json.dumps(VerifierEvidenceReviewRefs.model_json_schema(), ensure_ascii=False)
 
     assert all(field in prompt for field in ("url", "title", "author"))
     assert '"publisher"' not in prompt
     assert '"tier"' not in prompt
     assert "来源元数据" not in prompt or "来源" in prompt
-    assert "reason 直接说明" in prompt
+    assert "不要判断 pass 或 needs_research" in prompt
     assert "document_text" not in prompt
     assert "worker_trace" not in prompt
     assert "conflicts" in prompt
     assert "冲突" in prompt
     assert "assertion_dispositions" in prompt
-    assert "effective_unusable_assertion_ids" in prompt
-    assert "status=restored" in prompt
-    assert "minor gap" in prompt
+    assert "effective_unusable_assertion_refs" in prompt
+    assert "restored" in prompt
+    assert "decision" not in VerifierEvidenceReviewRefs.model_json_schema()["properties"]
     assert '"conflict_resolutions"' not in schema
     conflict_def = (
-        VerifierLlmDecision.model_json_schema().get("$defs", {}).get("ConflictJudgement", {})
+        VerifierEvidenceReviewRefs.model_json_schema()
+        .get("$defs", {})
+        .get("ConflictJudgementRefs", {})
     )
     conflict_props = conflict_def.get("properties", {})
-    assert "assertion_ids" in conflict_props
-    assert "winning_assertion_ids" in conflict_props
+    assert "assertion_refs" in conflict_props
+    assert "winning_assertion_refs" in conflict_props
     assert "excerpt_ids" not in conflict_props
     assert "winning_excerpt_ids" not in conflict_props
     disposition_def = (
-        VerifierLlmDecision.model_json_schema().get("$defs", {}).get("AssertionDisposition", {})
+        VerifierEvidenceReviewRefs.model_json_schema()
+        .get("$defs", {})
+        .get("AssertionDispositionRef", {})
     )
     disposition_props = disposition_def.get("properties", {})
-    assert "assertion_id" in disposition_props
+    assert "assertion_ref" in disposition_props
     assert "excerpt_id" not in disposition_props
     assert "excerpt_ids" not in disposition_props
+
+    coverage_prompt = "\n".join(
+        message["content"]
+        for message in research_coverage_messages(
+            {
+                "brief": {"question": "问题"},
+                "tasks": [],
+                "usable_assertions": [],
+                "source_credibility_findings": [],
+                "conflicts": [],
+            },
+            ResearchModelRefs.build(),
+        )
+    )
+    assert "reason 直接说明" in coverage_prompt
+    assert "minor gap" in coverage_prompt
+    assert "Excerpt" not in json.dumps(
+        VerifierCoverageDecisionRefs.model_json_schema(), ensure_ascii=False
+    )
 
 
 class _FakeCompletions:
@@ -432,9 +517,99 @@ class _FakeCompletions:
         return sum(1 for request in self.requests if request.get("stream"))
 
 
+def test_verifier_model_uses_short_refs_and_runtime_restores_storage_ids() -> None:
+    review = json.dumps(
+        {
+            "source_credibility_findings": [],
+            "conflicts": [],
+            "assertion_dispositions": [
+                {
+                    "assertion_ref": "a1",
+                    "status": "unusable",
+                    "reason": "来源不足以承担该断言的事实强度。",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    coverage = json.dumps(
+        {
+            "decision": "needs_research",
+            "reason": "核心问题仍缺少可用证据。",
+            "answerability_checks": [
+                {
+                    "requirement": "回答核心问题",
+                    "status": "blocked",
+                    "answer": "",
+                    "supporting_assertion_refs": [],
+                    "evidence_bridge": "",
+                    "evidence_needed": "补充能够回答核心问题的证据",
+                }
+            ],
+            "gaps": [
+                {
+                    "kind": "plan_coverage",
+                    "severity": "major",
+                    "related_task_refs": ["t1"],
+                    "related_assertion_refs": [],
+                    "description": "核心问题仍然受阻。",
+                    "evidence_needed": "补充能够回答核心问题的证据",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    completions = _FakeCompletions([review, coverage])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    result = OpenAIResearchVerifier(
+        client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+    ).verify(_verifier_snapshot())
+
+    prompt = result.full_prompt[1]["content"]
+    assert str(TASK_ID) not in prompt
+    assert str(ASSERTION_ID) not in prompt
+    assert str(EXCERPT_A) not in prompt
+    assert '"task_ref": "t1"' in prompt
+    assert '"assertion_ref": "a1"' in prompt
+    coverage_prompt = cast(
+        list[dict[str, str]], cast(dict[str, Any], result.raw_output)["coverage_prompt"]
+    )[1]["content"]
+    assert str(TASK_ID) not in coverage_prompt
+    assert str(ASSERTION_ID) not in coverage_prompt
+    assert '"task_ref": "t1"' in coverage_prompt
+    assert result.decision.gaps[0].related_task_ids == [TASK_ID]
+    assert result.decision.assertion_dispositions[0].assertion_id == ASSERTION_ID
+
+
+def test_verifier_rejects_an_unknown_short_ref_after_contract_retry() -> None:
+    invalid = json.dumps(
+        {
+            "source_credibility_findings": [],
+            "conflicts": [],
+            "assertion_dispositions": [
+                {
+                    "assertion_ref": "a999",
+                    "status": "unusable",
+                    "reason": "引用不存在。",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    completions = _FakeCompletions([invalid, invalid])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    with pytest.raises(VerifierOutputError, match="unknown Assertion refs: a999"):
+        OpenAIResearchVerifier(
+            client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
+        ).verify(_verifier_snapshot())
+
+
 def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
-    valid = json.dumps(_llm_decision().model_dump(mode="json"), ensure_ascii=False)
-    completions = _FakeCompletions("判断如下：" + valid, repaired=valid)
+    review = json.dumps(_model_payload(_evidence_review()), ensure_ascii=False)
+    coverage = json.dumps(_model_payload(_coverage_decision()), ensure_ascii=False)
+    completions = _FakeCompletions(["判断如下：" + review, coverage], repaired=review)
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -444,12 +619,14 @@ def test_verifier_uses_strong_thinking_and_one_structural_repair() -> None:
 
     assert result.decision.release_decision == "pass"
     assert result.decision.conflict_resolutions == []
-    first, second = completions.requests
+    first, second, third = completions.requests
     assert first["model"] == "qwen-strong" and first["stream"] is True
     assert first["extra_body"] == {"enable_thinking": True}
     assert second["model"] == "qwen-mid"
     assert second["response_format"] == {"type": "json_object"}
     assert second["extra_body"] == {"enable_thinking": False}
+    assert third["model"] == "qwen-strong" and third["stream"] is True
+    assert cast(dict[str, Any], result.raw_output)["coverage_prompt"]
 
 
 def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> None:
@@ -459,18 +636,21 @@ def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> 
     would be asking it to re-decide the evidence while looking at none of it.
     """
     snapshot = _verifier_snapshot()
+    review = json.dumps(_model_payload(_evidence_review()), ensure_ascii=False)
     illegal = json.dumps(
-        {
-            **_llm_decision().model_dump(mode="json"),
-            "gaps": _gaps(severity="major", kind="plan_coverage"),
-        },
+        _model_payload(
+            {
+                **_coverage_decision().model_dump(mode="json"),
+                "gaps": _gaps(severity="major", kind="plan_coverage"),
+            }
+        ),
         ensure_ascii=False,
     )
     legal = json.dumps(
-        _llm_decision("needs_research", severity="major").model_dump(mode="json"),
+        _model_payload(_coverage_decision("needs_research", severity="major")),
         ensure_ascii=False,
     )
-    completions = _FakeCompletions([illegal, legal])
+    completions = _FakeCompletions([review, illegal, legal])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -482,23 +662,25 @@ def test_contract_violation_goes_back_to_the_verifier_not_the_repair_model() -> 
     assert [request["model"] for request in completions.requests] == [
         "qwen-strong",
         "qwen-strong",
+        "qwen-strong",
     ]
-    retry_messages = completions.requests[1]["messages"]
-    assert retry_messages[:2] == research_verifier_messages(snapshot)
+    retry_messages = completions.requests[2]["messages"]
+    assert retry_messages[:2][0]["content"].startswith("你是 Research Verifier 的覆盖核验步骤")
     assert retry_messages[-2] == {"role": "assistant", "content": illegal}
     assert "pass must not contain major gaps" in retry_messages[-1]["content"]
-    assert "不表示" in retry_messages[-1]["content"]
-    assert cast(dict[str, Any], result.raw_output)["retried_content"] == legal
+    assert "usable Assertion 短 ref" in retry_messages[-1]["content"]
+    raw_output = cast(dict[str, Any], result.raw_output)
+    assert cast(dict[str, Any], raw_output["coverage"])["retried_content"] == legal
 
 
 def test_unknown_snapshot_reference_goes_back_to_the_verifier() -> None:
     snapshot = _verifier_snapshot()
-    unknown_task_id = uuid4()
-    illegal_payload = _llm_decision().model_dump(mode="json")
-    illegal_payload["gaps"][0]["related_task_ids"] = [str(unknown_task_id)]
+    illegal_payload = cast(dict[str, Any], _model_payload(_coverage_decision()))
+    illegal_payload["gaps"][0]["related_task_refs"] = ["t99"]
     illegal = json.dumps(illegal_payload, ensure_ascii=False)
-    legal = json.dumps(_llm_decision().model_dump(mode="json"), ensure_ascii=False)
-    completions = _FakeCompletions([illegal, legal])
+    review = json.dumps(_model_payload(_evidence_review()), ensure_ascii=False)
+    legal = json.dumps(_model_payload(_coverage_decision()), ensure_ascii=False)
+    completions = _FakeCompletions([review, illegal, legal])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -510,13 +692,13 @@ def test_unknown_snapshot_reference_goes_back_to_the_verifier() -> None:
     assert [request["model"] for request in completions.requests] == [
         "qwen-strong",
         "qwen-strong",
+        "qwen-strong",
     ]
-    assert "outside the current Job" in completions.requests[1]["messages"][-1]["content"]
+    assert "unknown Task refs: t99" in completions.requests[2]["messages"][-1]["content"]
 
 
 def test_verifier_binds_conflicts_to_excerpt_ids() -> None:
-    llm = _llm_decision().model_dump(mode="json")
-    llm["conflicts"] = [
+    conflicts = [
         {
             "disputed_point": "市场规模口径",
             "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
@@ -525,8 +707,9 @@ def test_verifier_binds_conflicts_to_excerpt_ids() -> None:
             "rationale": "口径不同，并陈。",
         }
     ]
-    content = json.dumps(llm, ensure_ascii=False)
-    completions = _FakeCompletions(content)
+    review = json.dumps(_model_payload(_evidence_review(conflicts=conflicts)), ensure_ascii=False)
+    coverage = json.dumps(_model_payload(_coverage_decision()), ensure_ascii=False)
+    completions = _FakeCompletions([review, coverage])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -549,12 +732,8 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
     conflict. It now returns to the Verifier like any other contract violation.
     """
     snapshot = _verifier_snapshot()
-    snapshot["assertions"] = [
-        {"assertion_id": str(ASSERTION_ID), "excerpt_ids": [str(EXCERPT_A)]},
-        {"assertion_id": str(ASSERTION_B), "excerpt_ids": [str(EXCERPT_A)]},
-    ]
-    illegal_payload = _llm_decision().model_dump(mode="json")
-    illegal_payload["conflicts"] = [
+    cast(list[dict[str, object]], snapshot["assertions"])[1]["excerpt_ids"] = [str(EXCERPT_A)]
+    conflicts = [
         {
             "disputed_point": "论文发表年份是 2024 还是 2025",
             "assertion_ids": [str(ASSERTION_ID), str(ASSERTION_B)],
@@ -563,12 +742,13 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
             "rationale": "两条断言的年份不一致。",
         }
     ]
-    illegal = json.dumps(illegal_payload, ensure_ascii=False)
+    illegal = json.dumps(_model_payload(_evidence_review(conflicts=conflicts)), ensure_ascii=False)
     legal = json.dumps(
-        _llm_decision(dispositions=[_unusable_disposition(ASSERTION_B)]).model_dump(mode="json"),
+        _model_payload(_evidence_review(dispositions=[_unusable_disposition(ASSERTION_B)])),
         ensure_ascii=False,
     )
-    completions = _FakeCompletions([illegal, legal])
+    coverage = json.dumps(_model_payload(_coverage_decision()), ensure_ascii=False)
+    completions = _FakeCompletions([illegal, legal, coverage])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     verifier = OpenAIResearchVerifier(
         client=cast(Any, client), model="qwen-strong", repair_model="qwen-mid"
@@ -582,11 +762,12 @@ def test_same_excerpt_conflict_goes_back_to_the_verifier_instead_of_killing_the_
     assert [request["model"] for request in completions.requests] == [
         "qwen-strong",
         "qwen-strong",
+        "qwen-strong",
     ]
     retry = completions.requests[1]["messages"][-1]["content"]
     # Named, so the model can tell which of several judgements to drop, and told where to put it.
     assert "论文发表年份是 2024 还是 2025" in retry
-    assert "assertion_dispositions" in retry
+    assert "同一 Excerpt" in retry
 
 
 def test_verifier_raises_when_structural_repair_is_still_invalid() -> None:
@@ -725,6 +906,110 @@ def test_verifier_node_passes_to_composition_pending() -> None:
     assert result["route"] == "synthesis"
     assert repository.completed is not None
     assert repository.outcomes[-1]["phase"] == "composition_pending"
+
+
+def _passing_decision_that_names_its_evidence() -> VerifierDecision:
+    """A pass whose minor gap says what it could not find -- the shape that used to end research.
+
+    One real Job closed after a single dispatch this way: the Verifier passed, then wrote
+    a minor plan_coverage gap whose evidence_needed read as a ready-made research task,
+    and that note reached nobody but the report's stated limits.
+    """
+    coverage = _coverage_decision().model_dump(mode="json")
+    coverage["gaps"][0]["evidence_needed"] = (
+        "需要在同一样本中同时记录公众自发讨论与平台排序变化的研究"
+    )
+    return materialize_verifier_decision(
+        _evidence_review(),
+        VerifierCoverageDecision.model_validate(coverage),
+        {},
+    )
+
+
+def _follow_up_state(*, trigger: str = "planner_finish", **overrides: Any) -> dict[str, Any]:
+    state = _state(trigger=trigger)
+    state.update({"research_decisions_used": 2, "decision_round_limit": 12})
+    state.update(overrides)
+    return state
+
+
+def _last_research_state(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    for message in reversed(messages):
+        payload = json.loads(str(message["content"]))
+        if payload.get("runtime_feedback") == "research_state":
+            return payload
+    raise AssertionError("no research_state feedback in the Planner thread")
+
+
+def test_a_pass_that_names_its_missing_evidence_returns_one_round_to_the_planner() -> None:
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_passing_decision_that_names_its_evidence())
+
+    result = _verifier_node(_services(repository, verifier))(cast(Any, _follow_up_state()))
+
+    assert result["route"] == "planner"
+    assert result["phase"] == "research"
+    assert result["follow_up_research_used"] is True
+    assert result["finish_withheld"] is True
+    # Research is not closed on the way back, or the Job would be composing and
+    # researching at once.
+    assert repository.outcomes == []
+
+    gap_feedback = json.loads(str(result["planner_messages"][-2]["content"]))
+    assert gap_feedback["gap_origin"] == "verifier_follow_up"
+    assert gap_feedback["follow_up_gaps"][0]["evidence_needed"]
+    assert _last_research_state(result["planner_messages"])["available_decisions"] == ["dispatch"]
+
+
+def test_the_follow_up_round_is_offered_once_per_job() -> None:
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_passing_decision_that_names_its_evidence())
+    state = _follow_up_state(follow_up_research_used=True)
+
+    result = _verifier_node(_services(repository, verifier))(cast(Any, state))
+
+    assert result["route"] == "synthesis"
+    assert result["outcome"] == "ready_for_writer"
+
+
+def test_a_gap_the_verifier_cannot_say_how_to_close_stays_a_disclosure() -> None:
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_decision())
+
+    result = _verifier_node(_services(repository, verifier))(cast(Any, _follow_up_state()))
+
+    assert result["route"] == "synthesis"
+
+
+def test_the_follow_up_round_is_not_bought_late_in_the_research_budget() -> None:
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_passing_decision_that_names_its_evidence())
+    state = _follow_up_state(research_decisions_used=5, decision_round_limit=12)
+
+    result = _verifier_node(_services(repository, verifier))(cast(Any, state))
+
+    assert result["route"] == "synthesis"
+
+
+def test_a_declined_synthesis_request_never_reopens_research() -> None:
+    """Research is already closed there; reopening it would strand a written synthesis."""
+
+    repository = _FakeRepository()
+    verifier = _FakeVerifier(_passing_decision_that_names_its_evidence())
+    state = _follow_up_state(trigger="synthesis_gap")
+
+    result = _verifier_node(_services(repository, verifier))(cast(Any, state))
+
+    assert result["route"] == "writer"
+
+
+def test_finish_is_refused_by_the_gate_not_only_by_the_runtime_state() -> None:
+    """available_decisions only advises the model, and this round exists because it had
+    already argued itself into finishing."""
+
+    assert finish_rejection(3) is None
+    assert finish_rejection(3, finish_withheld=True) is PlannerRejection.FINISH_WITHHELD
+    assert finish_rejection(0, finish_withheld=True) is PlannerRejection.EMPTY_FINISH
 
 
 def test_verifier_node_keeps_the_raw_answer_and_stops_the_job_when_output_is_rejected() -> None:
@@ -974,21 +1259,26 @@ def test_timeline_distinguishes_total_unusable_assertions_from_displayed_summari
 def test_verifier_checks_core_question_and_constraints_not_every_brief_direction() -> None:
     prompt = "\n".join(
         message["content"]
-        for message in research_verifier_messages(
+        for message in research_coverage_messages(
             {
                 "brief": {
                     "question": "q",
                     "brief_text": "b",
                     "user_constraints": {"regions": ["中国"]},
-                }
-            }
+                },
+                "tasks": [],
+                "usable_assertions": [],
+                "source_credibility_findings": [],
+                "conflicts": [],
+            },
+            ResearchModelRefs.build(),
         )
     )
 
-    assert "brief_text 中的候选方向不是强制覆盖清单" in prompt
+    assert "brief_text 中的候选方向用于理解问题空间" in prompt
     assert "brief_alignment" in prompt
     assert "user_constraints" in prompt
-    assert "不会自动成为 major gap" in prompt
+    assert "只有在因此阻断" in prompt
     assert "完全没有进入任何研究计划的方向" not in prompt
 
 
@@ -1003,9 +1293,23 @@ def test_a_compound_assertion_is_noted_not_destroyed() -> None:
     # The packaging verdict and the truth verdict must be told apart in the instructions.
     assert "granularity" in prompt
     assert "仍然可用" in prompt
-    assert "不得标为 unusable" in prompt
-    assert "task 未完全达到 expected_evidence" in prompt
-    assert "无法实质回应 Brief" in prompt
+    assert "不得仅因为句子长而标为 unusable" in prompt
+
+    coverage_prompt = "\n".join(
+        message["content"]
+        for message in research_coverage_messages(
+            {
+                "brief": {"question": "q", "brief_text": "b"},
+                "tasks": [],
+                "usable_assertions": [],
+                "source_credibility_findings": [],
+                "conflicts": [],
+            },
+            ResearchModelRefs.build(),
+        )
+    )
+    assert "task 未完全达到 expected_evidence" in coverage_prompt
+    assert "阻断\nBrief 核心回答" in coverage_prompt
 
 
 def test_the_timeline_separates_destroyed_material_from_merely_packed_material() -> None:

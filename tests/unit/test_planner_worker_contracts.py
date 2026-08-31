@@ -150,7 +150,7 @@ def test_planner_prompt_preserves_research_strategy_freedom() -> None:
     system_prompt = str(messages[0]["content"])
 
     assert "研究任务的内容、拆分方式、先后顺序和研究方法由你决定" in system_prompt
-    assert "expected_evidence 只描述" in system_prompt
+    assert "expected_evidence 描述什么样的落库事实" in system_prompt
     assert "改变、区分或限制" not in system_prompt
     assert "检验因果方向" not in system_prompt
     assert "寻找反例" not in system_prompt

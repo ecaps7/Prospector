@@ -299,6 +299,36 @@ class JobRepository:
         for job_id in job_ids:
             self.finalize_cancelled(job_id)
 
+    def delete_job(self, job_id: UUID) -> JobRuntimeStatus | None:
+        """Drop a stopped Job from the history list, keeping its evidence intact.
+
+        Returns the Job's status so the caller can refuse a Job that has not stopped:
+        the scheduler still holds a queued or running job_id, and the status is read
+        under a row lock so it cannot start between the check and the update.  Nothing
+        is erased -- the Excerpts, Document snapshots and checkpoint stay addressable
+        by id, because a Document snapshot is shared with every later Job that cited
+        the same page.
+        """
+        with self.engine.begin() as conn:
+            status = conn.execute(
+                text("SELECT status FROM app.jobs WHERE id=:job_id FOR UPDATE"),
+                {"job_id": job_id},
+            ).scalar_one_or_none()
+            if status is None:
+                return None
+            if str(status) not in {"completed", "failed", "cancelled"}:
+                return str(status)  # type: ignore[return-value]
+            conn.execute(
+                text(
+                    """
+                    UPDATE app.jobs SET deleted_at=:now
+                    WHERE id=:job_id AND deleted_at IS NULL
+                    """
+                ),
+                {"job_id": job_id, "now": datetime.now(UTC)},
+            )
+        return str(status)  # type: ignore[return-value]
+
     # Both report tables are read, newest first.  The current pipeline stores its refs on
     # report_runs_v2; app.reports is no longer written but still holds every report
     # delivered before the refactor, and those Jobs must stay downloadable.
@@ -493,6 +523,7 @@ class JobRepository:
                            j.created_at, j.updated_at
                     FROM app.jobs j
                     LEFT JOIN app.briefs b ON b.id=j.brief_id
+                    WHERE j.deleted_at IS NULL
                     ORDER BY j.created_at DESC, j.id DESC
                     """
                 )

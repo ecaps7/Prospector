@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 MarkerFamily = Literal["retrieval", "candidate", "advisory"]
 FindingKind = Literal[
@@ -15,6 +15,7 @@ FindingKind = Literal[
     "conclusion_integrity",
 ]
 MAX_WRITER_REPAIRS = 2
+AttributionConflictRef = Annotated[str, StringConstraints(pattern=r"^x[1-9][0-9]*$")]
 
 
 class ClaimMarker(BaseModel):
@@ -136,7 +137,7 @@ class AttributionBatchClaim(BaseModel):
     excerpt_refs: list[str] = Field(default_factory=list)
     assertion_refs: list[str] = Field(default_factory=list)
     premise_claim_refs: list[str] = Field(default_factory=list)
-    known_conflict_keys: list[str] = Field(default_factory=list)
+    known_conflict_refs: list[AttributionConflictRef] = Field(default_factory=list)
     reason: str | None = None
     audit_note: str | None = None
 

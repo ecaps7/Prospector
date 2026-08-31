@@ -74,6 +74,17 @@
   --ask-gutter: 20px;
   --shadow-1: 0 1px 2px color-mix(in srgb, var(--seed-fg) 6%, transparent);
   --shadow-2: 0 12px 40px color-mix(in srgb, var(--seed-fg) 14%, transparent);
+  /* 顶部悬浮栏的毛玻璃材质。模糊只会把身下的内容摊开，永远不会把它去掉——
+     所以"底下的字不干扰上面的字"这件事，是靠 tint 的不透明度扛的，不是靠模糊半径。
+     brightness 把摊开后的暗色文字往白里提一档，剩下那点残影就压到看不见了；
+     暗色主题必须反过来往黑里压，见下面的 [data-theme="dark"]。
+     栏底色比页面底色亮一档，让它在滚到顶、身下空无一物时也读得出是一块玻璃。 */
+  --glass-blur: saturate(180%) brightness(1.08) blur(30px);
+  --glass-tint: color-mix(in srgb, var(--seed-surface) 86%, transparent);
+  --glass-tint-2: color-mix(in srgb, var(--seed-surface) 84%, transparent);
+  /* 顶沿的一道高光 + 底沿外扩的柔影，是玻璃"有厚度"的全部来源 */
+  --glass-edge: inset 0 1px 0 color-mix(in srgb, var(--white) 55%, transparent),
+    0 1px 14px color-mix(in srgb, var(--seed-fg) 5%, transparent);
   --white: #ffffff;
   --backdrop: color-mix(in srgb, #000 32%, transparent);
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
@@ -93,6 +104,11 @@
   --info: #828fff;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --glass-blur: saturate(180%) brightness(0.7) blur(30px);
+  --glass-tint: color-mix(in srgb, var(--seed-surface) 84%, transparent);
+  --glass-tint-2: color-mix(in srgb, var(--seed-surface) 82%, transparent);
+  --glass-edge: inset 0 1px 0 color-mix(in srgb, var(--white) 8%, transparent),
+    0 1px 14px rgba(0, 0, 0, 0.35);
 }
 
 * {
@@ -155,10 +171,11 @@ kbd {
   top: 0;
   z-index: 50;
   height: 52px;
-  background: color-mix(in srgb, var(--seed-surface) 78%, transparent);
-  backdrop-filter: saturate(1.6) blur(18px);
-  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  background: var(--glass-tint);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--glass-edge);
 }
 .topbar-inner {
   max-width: 1180px;
@@ -280,10 +297,21 @@ kbd {
   position: sticky;
   top: 52px;
   z-index: 40;
-  background: color-mix(in srgb, var(--seed-bg) 78%, transparent);
-  backdrop-filter: saturate(1.5) blur(18px);
-  -webkit-backdrop-filter: saturate(1.5) blur(18px);
+  background: var(--glass-tint-2);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--glass-edge);
+}
+/* 不支持 backdrop-filter 的浏览器上，半透明只会让底下的内容直接穿过来糊住文字。
+   那里退回不透明底色：宁可平，也别脏。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar {
+    background: var(--surface);
+  }
+  .jobbar {
+    background: var(--bg);
+  }
 }
 .jobbar-in {
   display: flex;
@@ -1419,10 +1447,7 @@ kbd {
 .task-q {
   font-size: var(--fs-ui);
   line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 .task-meta {
   display: flex;
@@ -1669,56 +1694,6 @@ kbd {
   flex: 1;
   min-width: 280px;
 }
-.vbadge {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  flex: none;
-  font-size: var(--fs-ui);
-  font-weight: 600;
-  padding: 8px 14px;
-  border-radius: var(--r-pill);
-}
-.vbadge.ok {
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 11%, transparent);
-}
-.vbadge.warn {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 13%, transparent);
-}
-.report-note {
-  margin-top: 14px;
-  font-size: var(--fs-ui);
-  color: var(--text-2);
-  line-height: 1.6;
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
-  border-radius: var(--r-md);
-  padding: 11px 15px;
-}
-.report-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 18px;
-  margin-top: 14px;
-  font-size: var(--fs-meta);
-  color: var(--text-2);
-}
-.report-stats b {
-  color: var(--text);
-  font-weight: 600;
-  font-family: var(--font-mono);
-}
-.report-stats .warn b,
-.report-stats .warn {
-  color: var(--warn);
-}
-.report-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-}
 .ev-caveat {
   font-size: var(--fs-ui);
   line-height: 1.7;
@@ -1930,10 +1905,6 @@ kbd {
   font-weight: 600;
   background: color-mix(in srgb, var(--seed-fg) 4%, transparent);
 }
-/* 核对情况：后端确定性写好的一段，摆在正文之前，读者据此决定这份报告能信几分。 */
-.report-health {
-  margin-bottom: 26px;
-}
 .report-body h2 {
   font-size: var(--fs-h2);
   font-weight: 600;
@@ -1972,36 +1943,6 @@ kbd {
 }
 .cite:hover {
   background: color-mix(in srgb, var(--primary) 22%, transparent);
-}
-/* 没站住的地方。跨度级的引原话，整篇级的只写理由——正文里没有段落编号可指。 */
-.findings {
-  margin-top: 8px;
-}
-.finding {
-  border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
-  background: color-mix(in srgb, var(--warn) 6%, transparent);
-  border-radius: var(--r-md);
-  padding: 13px 16px;
-  margin-bottom: 12px;
-}
-.finding-kind {
-  font-size: var(--fs-meta);
-  font-weight: 600;
-  color: var(--warn);
-  margin-bottom: 8px;
-}
-.finding-text {
-  margin: 0 0 8px;
-  padding-left: 12px;
-  border-left: 2px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  font-size: var(--fs-ui);
-  line-height: 1.7;
-}
-.finding-reason {
-  font-size: var(--fs-ui);
-  color: var(--text-2);
-  line-height: 1.7;
-  margin: 0;
 }
 .sources-list {
   margin-top: 8px;
@@ -2205,25 +2146,64 @@ kbd {
 .job-item {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 17px 22px;
   border-bottom: 1px solid var(--border);
-  cursor: pointer;
   transition: 0.15s;
   width: 100%;
+}
+/* 打开任务的是行里的链接，删除按钮是它的兄弟——按钮不能嵌在 <a> 里面。
+   行的内边距因此挂在 .open 上，好让点击区域仍旧铺满整行。 */
+.job-item .open {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+  min-width: 0;
+  padding: 17px 8px 17px 22px;
+  cursor: pointer;
   text-align: left;
-  background: transparent;
-  border-left: 0;
-  border-right: 0;
-  border-top: 0;
   color: inherit;
   font: inherit;
   text-decoration: none;
 }
+/* 行里唯一的第二个动作：删除已停止的任务，或终止还在跑的。它是右侧仅剩的元素，
+   所以常驻显示——淡出会让整条行的右半边空着。 */
+.job-item .act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-right: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: 0.15s;
+}
+.job-item .act:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  color: var(--danger);
+}
+.job-item .act:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+/* 窄屏上一行的宽度全归问题标题，动作图标只留够点的余量。 */
+@media (max-width: 640px) {
+  .job-item .open {
+    padding-right: 4px;
+  }
+  .job-item .act {
+    margin-right: 8px;
+  }
+}
 .job-item:last-child {
   border-bottom: 0;
 }
-.job-item:hover {
+.job-item:has(.open:hover) {
   background: color-mix(in srgb, var(--seed-fg) 3.5%, transparent);
 }
 .job-item .st {
@@ -2252,17 +2232,6 @@ kbd {
   align-items: center;
   font-size: var(--fs-meta);
   color: var(--text-3);
-}
-.job-item .go {
-  flex: none;
-  color: var(--text-3);
-  font-size: var(--fs-ui);
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.job-item:hover .go {
-  color: var(--text);
 }
 .jobs-empty {
   padding: 36px 22px;

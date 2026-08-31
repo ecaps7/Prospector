@@ -100,6 +100,12 @@ export const api = {
 
   getJob: (jobId: string) => request<JobDetail>(`/api/jobs/${jobId}`),
 
+  /**
+   * 把任务从「任务历史」里删掉。后端只是不再列出它：证据、快照、报告对象都还在，
+   * 因为一份网页快照是跨任务共享的。没停下来的任务删不掉，得先取消。
+   */
+  deleteJob: (jobId: string) => request<void>(`/api/jobs/${jobId}`, { method: "DELETE" }),
+
   cancelJob: (jobId: string) =>
     request<JobCancelResponse>(`/api/jobs/${jobId}/cancel`, {
       method: "POST",

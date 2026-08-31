@@ -154,7 +154,7 @@ flowchart LR
 **三条循环纪律（worker 产物合同）**：
 
 1. **发现只有一个入口**：worker 输出严格 `save` 动作，只提交 `source_refs + statement`；运行时从当前 Worker 的来源注册表解析出 `doc_id、view_id、source_ids`，并注入空的内部 `topic_tags` 后调用 `save_findings` 落证。运行时验证 view 属于当前 Job、Task 与 Document version，再创建 Excerpt、Assertion 并绑定 `excerpt_ids`——断言与其证据在同一次调用中出生、原子绑定，不存在"断言引用不存在的证据"的状态。所有联网来源的 `source_ref` 都只能解析为该任务持久化的 Exa highlight。未经该入口的内容没有任何通道进入 Planner 或下游视野。
-   Worker 必须按「单个证据缺口 → 搜索/抓取 → 立即落证 → 覆盖判断」循环推进，禁止积压已经发现的可用来源后继续扩展新方向。每次 `save_findings` 成功后，运行时只使用该任务全部已落库断言与 `expected_evidence` 做独立覆盖判断；必需证据已满足时主动收工，未满足时只把明确缺口回注给下一轮研究。
+   Worker 必须按「单个证据缺口 → 搜索/抓取 → 立即落证 → 覆盖判断」循环推进，禁止积压已经发现的可用来源后继续扩展新方向。每次 `save_findings` 成功后，运行时只使用该任务全部已落库断言、`question` 与 `expected_evidence` 做独立覆盖判断；`expected_evidence` 在该判断里是准入下限，收口条件是任务问题已被实质回答，满足时主动收工，未满足时只把明确缺口回注给下一轮研究。
 2. **收工声明只汇报无法继续的原因，不汇报发现或自行认证完成**：Worker 每轮输出扁平、互斥的 `search / save / finish` JSON；`finish` 只填写 `{action, stop_reason, reason}`，用于说明无公开证据、信息增益过低或被用户范围阻断。`expected_evidence` 是否满足只由每次 save 后读取已落库 Assertion 的独立覆盖判断决定，Worker 动作无权自行声明成功。
 3. **任务摘要 = 库投影的干净上下文压缩**：worker 收工时生成一段供 Planner 判断覆盖度的综合摘要，但该调用的 prompt **从零构建**，仅含本 task 已落库的断言列表（statement + assertion_id）与收工声明，**禁止携带消息轨迹**——轨迹在上下文里时，"只按库总结"就从结构保证退化为提示词祈祷。摘要用中档模型（§3.3）。可选加固：要求摘要中事实句内联引用 `assertion_id`，运行时确定性校验 id 存在于本 task 名下。摘要是库的纯函数：若崩溃发生在"断言已落库、摘要未生成"的间隙，恢复时只补摘要、不重跑研究。摘要失真的爆炸半径由此被钉死——最坏导致 Planner 对派发的轻微误判，Verifier 与成文线只读库，任何失真进不了证据链。
 
@@ -178,7 +178,7 @@ flowchart LR
 
 **Worker 局部停止条件**（满足其一即停，只结束当前任务）：
 
-1. 当前子任务目标已满足（对照 `expected_evidence` 自评）；
+1. 当前子任务目标已满足（独立覆盖判断：过 `expected_evidence` 下限，且任务 `question` 已被实质回答）；
 2. 连续 2 轮未产生有效新 Evidence（信息增益衰减）——判定机器化：连续 2 轮 `save_findings` 未新增任何 Excerpt / Assertion 行（内容哈希去重后计），由运行时判定，不依赖 worker 自评；
 3. Task 级预算耗尽；
 4. Worker 决策轮耗尽。工具错误会回到 Worker 上下文，由 Worker 更换来源、调整检索路径或主动声明证据不可得；运行时不再根据连续失败批次数提前收工。
@@ -291,7 +291,7 @@ Brief **不是合同，也不是覆盖清单**。Scope 新增的内容表示「�
 }
 ```
 
-**ResearchTask 通过自然语言任务书完成专门化**——worker 是通用的，Planner 只填写自包含的 `question` 与 `expected_evidence`；研究对象、宽搜或深挖策略、比较方式、核验姿态、来源方向和边界直接写在任务问题中，不再要求模型把同一判断重复压入分类字段。
+**ResearchTask 通过自然语言任务书完成专门化**——worker 是通用的，Planner 只填写自包含的 `question` 与 `expected_evidence`；后者描述什么样的落库事实能够实质回答前者，而不是检索步骤或单纯数量门槛。研究对象、宽搜或深挖策略、比较方式、核验姿态、来源方向和边界直接写在任务问题中，不再要求模型把同一判断重复压入分类字段。
 
 ```json
 {
@@ -316,7 +316,7 @@ Brief **不是合同，也不是覆盖清单**。Scope 新增的内容表示「�
 三条字段级说明：
 
 - **任务不携带 plan_version**：任务与 Plan 版本是多对多关系（未执行任务被后续版本延续引用），归属由 `Plan.task_ids` 单向表达，任务上反向存版本号要么存不下要么存错。
-- **expected_evidence 同时定义证据目标与完成依据**：Worker 按目标满足、信息增益衰减、主动声明证据不可得/受范围限制或决策轮耗尽停止；每次 `save_findings` 后由独立覆盖判断检查 goal_met，Verifier 再做全局语义判断，不把数量或措辞机械当成勾选表。
+- **expected_evidence 是可观察的回答状态，不是材料计数器**：Worker 按目标满足、信息增益衰减、主动声明证据不可得/受范围限制或决策轮耗尽停止；每次 `save_findings` 后由独立覆盖判断检查 goal_met——已落库断言必须实质回答任务 `question`，且不存在可由继续检索关闭的实质缺口。数量、平台数、案例数或机制类别可以描述所需广度，但不能单独证明完成；比较、归因或关系问题还必须形成能够判断所问关系的事实与边界。Verifier 再做 Brief 级全局语义判断，不把 Worker 的局部收工状态当成放行依据。
 ### 4.3 Document（原始文档快照）
 
 Document 是某次纳入系统时那份文件的**完整原文副本**，落库后不可变。同一逻辑来源内容变化（`content_hash` 不同）→ 产生新版本，旧版本不删。这是引用有效性的底线：网页会修改、会消失，报告的引用必须能指回**纳入当时的那个快照**。
@@ -538,7 +538,7 @@ computed 型的权威链为 **Claim → ClaimComputation → Computation → inp
 | Report Verifier（§5.4） | 核对上述语义规则是否被遵守：并陈冲突缺一侧、静默择一、来源归属错误或含混调和，按验证失败打回修订；不校验固定句序或物理相邻 |
 | 质量门（§3.2 条件 3 / §7） | 机器可查：不存在"有 contradict 关系、无覆盖 resolution"的高优先级 claim |
 
-研究期冲突由 Research Verifier 输出 `conflicts`（只引用 `assertion_id`）；持久化前由代码按 `assertions.excerpt_ids` 绑定为 `ConflictResolution.excerpt_ids`，模型不得直接填写 excerpt UUID。
+研究期冲突由 Research Verifier 输出 `conflicts`（只引用冻结快照中的 `assertion_ref`，形如 `a3`）；持久化前由代码先严格还原 `assertion_id`，再按 `assertions.excerpt_ids` 绑定为 `ConflictResolution.excerpt_ids`。模型不填写任何 task / assertion / excerpt UUID。
 
 ### 4.13 AssertionDisposition（断言证据资格，版本化）
 
@@ -559,7 +559,7 @@ Research Verifier 对**单条 Assertion** 的证据资格判断：伪学术、UG
 - **点名 ≠ 废证**：`related_assertion_ids` 表达"该缺口涉及哪些断言"，`assertion_dispositions` 才表达"还能不能用"。二者的关系由 severity 决定，且由代码而非模型维护：
   - `major`：这些断言按定义不可用于成文。代码在 `materialize_verifier_decision` 中把它们全部补标为 `unusable`（`derive_credibility_dispositions`），模型漏填即被纠正，而不是整轮判断被拒。
   - `minor`：可披露、不阻断，**不要求废任何证**。"来源偏弱、值得说明、但结论仍成立"是合法判断；把它定义为非法会消灭最常见的一类可信度结论。
-- **校验分层**：`VerifierLlmDecision` 只校验模型能靠改写满足的规则（点名、去重、pass/major 一致）；"major 缺口的断言必须 unusable"作为推导后的不变量放在 `VerifierDecision` 上，此时它已由构造保证成立。
+- **校验分层**：`VerifierEvidenceReview` 只输出来源限制、冲突与断言资格，不输出放行结论；`VerifierCoverageDecision` 在 usable 投影上输出 pass / needs_research 与 gap，并校验点名、去重及 pass/major 一致。"major 可信度缺口的断言必须 unusable"作为合并后的不变量放在 `VerifierDecision` 上，此时它已由构造保证成立。
 - **消费约定**：Verifier 覆盖度与后续成文线（Report Writer / Report Verifier）默认只读 usable 投影；Replan 时把 `unusable_assertions`（id/statement/reason）注入 Planner 线程，历史 worker_projection 中的假句不得再作覆盖依据。
 
 ---
@@ -642,6 +642,8 @@ flowchart TD
 3. 任务书必须自包含——Worker 看不到其他 task 或其他轮次的上下文；
 4. 收到压缩结果后对照已形成的 Plan 合同评估覆盖度：已充分的不重复派发；新证据若暴露了更有价值的方向，通过下一决策轮或 Verifier gap 形成新 Plan 版本，不隐式扩大旧合同。
 
+Planner 的 `finish` 是提交核验，不是把 Worker 收工状态向上汇总：`goal_met`、`expected_evidence_satisfied`、`done` 与 `finish_reason` 只说明各局部 ResearchTask 的执行状态。Planner 必须重新对照 `Brief.question` 检查现有断言是否落在所问对象、关系和结果上；相邻主题、替代指标、分别成立的多个机制或无证据连接的合理解释不能代替核心回答。证据直接支持的不确定性、条件性结论或不可分离边界可以构成回答，因此该规则不要求预设方法、同平台材料或确定性结论。
+
 **回传摘要合同（断言投影）**：Planner 每轮读到的任务摘要不是对 worker 消息史的独立压缩，而是该 task **已落库 Assertion 的投影**——由 worker 收工时以干净上下文生成，输入仅为断言列表与收工声明（§3.2 纪律 3）。这保证 Planner 判断覆盖度所依据的每一句事实陈述都对应库中一条 Assertion：**Planner 与 Verifier 看的是同一份账本**，"摘要吹牛导致 Planner 提前收工、Verifier 查库发现证据薄、Replan 白烧决策轮"这条漂移通道在结构上被关闭。收工声明中的 `finish_reason` 随摘要一并回传，作为标注过的决策观察供 Planner 判断是否换角度补派。
 
 **effort scaling（提示词启发式，非程序固定表）**：
@@ -658,22 +660,24 @@ flowchart TD
 
 **决策轮计数口径**：有效的 dispatch / finish（包括被运行时拒绝的决策）各消耗一轮；无法解析的格式错误使用独立的连续错误上限，不消耗研究决策轮。计数的是编排决策，不是成功研究次数。
 
-### 5.3 Phase 3：Verifier 的四项检查
+### 5.3 Phase 3：Verifier 的两段核验
 
-1. **执行合同与 Brief 回应**：对照 Research Plan 版本历史、任务的 `question + expected_evidence` 与 Planner 的 `finish.reason`，判断已执行任务形成了哪些 **usable** Assertion / Excerpt（`unusable` 断言不得算作成绩，见 §4.13），并以 Brief 核心问题和结构化 `user_constraints` 判断这些材料是否足以进入综合。单个任务未完全履约或候选方向尚未研究，不自动构成重大缺口；只有由此导致无法实质回应 Brief 时才形成 major gap。
-2. **矛盾检测**：对语义冲突的 Assertion 簇下钻到各自的 Excerpt 原文比对，判定是"来源分歧需并陈"还是"需补搜裁决"——并陈与裁决写入版本化的 ConflictResolution（§4.12），补搜路径表现为本轮不写 resolution + 生成 gap 补搜建议，下一轮 Planner / verifier run 再裁决；
-3. **可信度**：结合 URL、标题、author、发布时间、Excerpt 原文与独立佐证，直接判断关键结论是否过度依赖不可靠来源（见 §4.3）。若断言本身不可采信，须同时写入 AssertionDisposition（`unusable`）；实质影响结论时再开 `source_credibility` 重大缺口并 Replan——**缺口负责补查，废证负责取消资格**，二者不可互相替代；
-4. **缺口**：生成结构化 gap list（建议的补查子课题说明、已尝试路径、为何不足），转化为定向补派并生成新 Plan 版本交回 Planner。补搜建议优先**换取证角度 / 来源类型**，避免对同一死指标同义重搜。
+Research Verifier 在同一个图节点和同一个 verifier run 内执行两个强模型判断，中间由确定性代码生成投影；不存在跳过第一段的成文路径，也不保留旧单段判断分支。两段共享从冻结快照一次生成的 `tN / aN / eN` 短引用命名空间，模型合同只读写短引用；代码在领域校验和持久化前严格还原 UUID，未知短引用属于输出合同错误。
+
+1. **证据资格核验**：读取冻结快照中的 Assertion、绑定 Excerpt 与来源元数据，只判断转录忠实度、来源承载能力、断言粒度和实质冲突，输出 `VerifierEvidenceReview`，不判断 pass / needs_research。不可采信的断言写入 AssertionDisposition；仍可使用但有边界的来源写入 `source_credibility_findings`；冲突只引用 assertion id，再由代码绑定 excerpt id。
+2. **usable 投影**：代码将历史有效废证与本轮 `unusable / restored` 合并，剔除不可用 Assertion，保留可用断言、来源身份、来源限制与已识别冲突。第二段不再接收 Excerpt 原文，也不得推翻第一段的忠实度判断。
+3. **Plan / Brief 覆盖核验**：第二个强模型只在 usable 投影上输出 `VerifierCoverageDecision`。它先把 `Brief.question` 的独立核心要求和会改变证据需求的 `user_constraints` 写成 `answerability_checks`；每项 answered 必须给出有边界答案、真正承载答案的 assertion id 与证据桥梁，blocked 则必须说明所缺证据。Planner finish reason、Task status 与 Worker goal_met 均不是放行依据。分别证明多个机制存在不等于完成比较，但不同方法、平台或时间口径只要具有可核对的证据桥梁，仍可共同形成答案。
+4. **缺口与出口**：major gap 表示缺失会阻断核心回答，必须说明 `evidence_needed`，但不替 Planner 规定方法、来源或任务拆分；minor gap 只影响精度、案例丰富度或适用边界。证据支持的不可识别或不确定性可以是完整回答，单纯缺少材料则不能被包装成不可识别。两段输出由代码合并为既有 `VerifierDecision`，再走 pass / Replan / 预算耗尽失败出口。
 
 Replan 消耗的是同一套 **Planner 决策轮预算**（§7），不再另设与决策轮脱钩的「最大 replan 次数」。决策轮耗尽后：若 Verifier 认为仅存在可披露的局限 → 可进入成文，报告显式声明信息局限；若仍存在不可接受的重大缺口 → 任务以**失败**结束。Report Writer、Report Verifier、最多两次修订与验证后确定性引用渲染均已接入；成文链以 `draft_rendered` 收口。逐句失败走定点句子修订；整份报告未回答核心问题或违反用户明确约束则重写完整报告。修订触顶后任一问题仍存在，产物标记为 `partial`；逐句失败项保留且不附已验证引用。决策轮上限与预算一样，只停止研究，不绕过 Research Verifier（§7）。
 
 ### 5.4 Phase 4–5：成文与逐句验证（prose-first）
 
-> 当前实现的成文入口先经过 Research Synthesis：可用证据按 ResearchTask 的研究问题组织，强模型先自由形成分析初稿，再用只含 Brief、初稿、研究任务问题与数量信息、已确认冲突和非来源类 minor gap 的独立消息上下文分别判断核心问题、关系机制、材料取舍和时间边界，并返回分析缺陷；是否采用初稿由代码根据缺陷列表计算，不让模型单独输出 `accept`。文风和结构偏好不触发改写。初稿、检查 prompt 与检查输出完整落库，但后续模型只接收最终采用的分析投影，不接收 `ResearchSynthesisRun.raw_output` 或运行元数据；来源可信度 minor gap 附着到相关 finding，不作为全局免责声明输入。Research Synthesis 不要求单独的 `falsification` 字段，不生成文章提纲，也不构成 Writer 必须复述的标准答案。其余当前报告合同以 `docs/report-pipeline-refactor.md` 为准。
+> 当前实现的成文入口先经过 Research Synthesis：可用证据按 ResearchTask 的研究问题组织，模型上下文以 `tN / aN / eN / xN` 引用 Task、Assertion、Excerpt 与冲突，输出短引用由代码严格还原为持久化 ID / key。强模型先自由形成分析初稿，再用只含 Brief、初稿、研究任务问题与数量信息、已确认冲突和非来源类 minor gap 的独立消息上下文分别判断核心问题、关系机制、材料取舍和时间边界，并返回分析缺陷；是否采用初稿由代码根据缺陷列表计算，不让模型单独输出 `accept`。文风和结构偏好不触发改写。初稿、检查 prompt 与检查输出完整落库，但后续模型只接收最终采用的分析投影，不接收 `ResearchSynthesisRun.raw_output` 或运行元数据；来源可信度 minor gap 附着到相关 finding，不作为全局免责声明输入。Research Synthesis 不要求单独的 `falsification` 字段，不生成文章提纲，也不构成 Writer 必须复述的标准答案。其余当前报告合同以 `docs/report-pipeline-refactor.md` 为准。
 
 成文流水线为：**Verified Evidence → Report Writing → Statement-level + Whole-report Verification →（有限修订环）→ Deterministic Presentation Render**。核心规则：**被验证的对象就是交付给读者的文本**——Report Writer 直接写出最终正文，Report Verifier 既逐句验证事实与推理，也检查整份报告是否回答核心问题、遵守用户明确约束；通过后文本冻结、只做确定性渲染。正文定稿与验证之间不存在任何 LLM 改写环节，"验证过的内容被后续改写引入漂移"这类问题在结构上不可发生。成文链全程**不开搜索**：它是从证据库到报告的纯加工，不产生新证据。
 
-- **Report Writer 是单一智能体**，输入为冻结的完整 Brief（含 `user_constraints`）、Plan 历史摘要、全部 usable 断言的证据卡、ConflictResolution 与 minor gap。证据卡**按收集它的 Task 分组**（研究问题 + 该问题下的断言），并包含 Assertion、所绑定的 Excerpt ID、Document 来源元数据与**确定性裁剪后的 Excerpt 原文**；Excerpt 原文按 id 去重后集中为一份 library，证据卡只持 id 指向它。**Document 全文仍不进入任何 Prospector LLM 上下文（D12）**——进入 Writer 的是引用会解析到的那段 Excerpt，不是整页。早期方案只给 Assertion 一句话摘要、不给原文，理由是上下文经济；实测的代价是 Writer 只剩下把断言逐条转写成正文这一条路——一条断言一句话，报告退化为按时间排序的事实清单，数字的口径、事实的前因后果、来源自己的限定措辞全部丢失。上下文经济改由去重 library 加逐条裁剪上限（`WRITER_EXCERPT_CHAR_LIMIT`）承担，而不是靠不给原文。分组同理：平铺的断言流只留下日历这一条可用结构，Writer 因此按时间顺序组织报告；按研究问题分组才让研究本身的结构可见。Writer 必须回答 Brief 核心问题并遵守其中非空的用户明确约束，其余内容取舍、章节、段落、叙述顺序、详略和表达由它自行决定；`brief_text` 的候选方向不是强制覆盖清单。初稿提示词除此之外只交代事实与来源不得失真的边界、`source_caveat` 要求以及结构化输出协议。同段 statements 渲染为自然段，每句带稳定编号（`statement_id`）与自我声明——
+- **Report Writer 是单一智能体**，输入为冻结的完整 Brief（含 `user_constraints`）、Plan 历史摘要、全部 usable 断言的证据卡、ConflictResolution 与 minor gap。证据卡**按收集它的 Task 分组**（研究问题 + 该问题下的断言），并包含 Assertion、所绑定的 Excerpt、Document 来源元数据与**确定性裁剪后的 Excerpt 原文**；进入 Synthesis、Writer 和 Whole-report Review 的快照先把 Task / Assertion / Excerpt / 冲突转换为 `tN / aN / eN / xN` 局部引用，数据库 UUID 与完整冲突哈希只保留在领域对象、校验和持久化层。Excerpt 原文按 id 去重后集中为一份 library，证据卡只持局部 ref 指向它。**Document 全文仍不进入任何 Prospector LLM 上下文（D12）**——进入 Writer 的是引用会解析到的那段 Excerpt，不是整页。早期方案只给 Assertion 一句话摘要、不给原文，理由是上下文经济；实测的代价是 Writer 只剩下把断言逐条转写成正文这一条路——一条断言一句话，报告退化为按时间排序的事实清单，数字的口径、事实的前因后果、来源自己的限定措辞全部丢失。上下文经济改由去重 library 加逐条裁剪上限（`WRITER_EXCERPT_CHAR_LIMIT`）承担，而不是靠不给原文。分组同理：平铺的断言流只留下日历这一条可用结构，Writer 因此按时间顺序组织报告；按研究问题分组才让研究本身的结构可见。Writer 必须回答 Brief 核心问题并遵守其中非空的用户明确约束，其余内容取舍、章节、段落、叙述顺序、详略和表达由它自行决定；`brief_text` 的候选方向不是强制覆盖清单。初稿提示词除此之外只交代事实与来源不得失真的边界、`source_caveat` 要求以及结构化输出协议。同段 statements 渲染为自然段，每句带稳定编号（`statement_id`）与自我声明——
   - **性质标注**：`kind` 是核验路径，不是写作模板，Writer 不得为分开事实与判断而拆分自然完整的句子。`evidence`（整句直接转述事实，注明依据的断言/片段）、`derived`（包括分析、概括、比较、解释或判断，可直接绑定 Excerpt、绑定前文句子或同时绑定两者）、`computed`（计算结论，注明 Computation，M2）、或 `elaboration` / `limitation`（不挂引用，只承担转折、预告、收束或材料边界说明）；
   - **无引用 kind 不承载事实**：具体数字、年份、机构、人物、地点或事件必须进入 `evidence`；在已有事实之上形成的机制解释或判断必须进入 `derived`。自然语言可以充分展开，但其事实来源和推理前提不能隐去；
   - **推理链必须落到证据**：Writer 校验 derived 句至少持有 Excerpt 或 premise 之一，premise 只能指向此前已输出的 statement，且结论依赖的所有关键前文事实都必须显式列出；物理上位于同段不能代替 ClaimPremise。Report Verifier 再检查直接 Excerpt 与前提链是否真正支撑该判断。声明的前提未通过时，下游判断直接进入句级修订；链条层数不构成失败，只在确实影响整篇可读性时记录质量提醒；

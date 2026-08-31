@@ -124,6 +124,7 @@ _REJECTION_LABELS = {
     "over_concurrency": "派发任务超过并发上限",
     "schema_error": "输出格式不合法",
     "empty_finish": "尚无证据，不能结束研究",
+    "finish_withheld": "本轮用于补齐核验指明的证据，不能结束研究",
 }
 
 _GAP_KIND_LABELS = {
@@ -387,6 +388,8 @@ class ResearchTimelineRenderer:
     def _render_phase(self, payload: dict[str, Any]) -> list[str]:
         phase = str(payload.get("phase") or "")
         if phase == "research":
+            if str(payload.get("trigger") or "") == "verifier_follow_up":
+                return ["[研究] 核验已放行，但指明仍缺证据，补充研究一轮"]
             return ["[研究] 开始"]
         if phase == "verifier":
             plan_version = payload.get("plan_version")

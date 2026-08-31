@@ -36,8 +36,9 @@ styles/app.css   全站唯一样式表
 - 报告正文是后端交付的一份 Markdown（`GET /api/jobs/{id}/report?format=md`）：`[^N]` 角标已经
   插好，末尾带「来源」节，编号由 `deterministic/citation_render.py` 算定。前端只显示，不重算
   编号——角标和来源靠「网址 + 快照版本」认回同一条，那正是后端编号时用的钥匙。
-- `format=json` 是审计文档，不是正文：核对情况、没找到出处的跨度、每条出处的存档原文。
-  判定 `verified` / `partial` / `failed` 也在里面，同样只展示。
+- `format=json` 是审计文档，不是正文：其中有核对情况、没找到出处的跨度、每条出处的存档原文和
+  判定 `verified` / `partial` / `failed`。报告页不展示这些审计摘要或明细；只在读者点开正文角标时，
+  用其中的存档原文补充该来源。
 - 正文由 marked 渲染。报告的字句来自抓回来的网页，所以 `renderReportBody` 把原始 HTML 一律
   丢掉、链接只放行 http/https/mailto——改那个函数时别把这两道口子改松了。
 - 任务状态到颜色的映射只有 `lib/status.ts` 一处。不要在页面里手写 `status === "completed" ? …` 的 if 链——这类映射散开过一次，三份实现对 `running` 和 `completed` 已经给出不同结果。

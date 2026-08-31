@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from prospector.agents.llm import get_openai_client, strong_model, thinking_extra_body
 from prospector.agents.research_synthesis import synthesis_context_payload
 from prospector.deterministic.markdown_report import parse_markdown
+from prospector.deterministic.model_refs import ResearchModelRefs
 from prospector.schemas.claims import AttributionRun, ReportReviewRun, ReviewFinding
 from prospector.schemas.report import ResearchSynthesisRun, WriterSnapshot
 
@@ -191,9 +192,13 @@ key_block_ids 只标识实际承载主要认识和推理的位置，不评价观
             "minor_gaps": snapshot.minor_gaps,
             "output_schema": _ReviewOutput.model_json_schema(),
         }
+        refs = ResearchModelRefs.from_writer_snapshot(snapshot)
         prompt = [
             {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {
+                "role": "user",
+                "content": json.dumps(refs.alias_payload(payload), ensure_ascii=False),
+            },
         ]
         known_blocks = {block.block_id for block in blocks}
         last: ReportReviewOutputError | None = None

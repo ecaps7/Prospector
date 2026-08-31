@@ -192,6 +192,8 @@ class EvidenceRefs:
         self.excerpt_by_ref: dict[str, UUID] = {}
         self.ref_by_excerpt: dict[UUID, str] = {}
         self.excerpt_refs_by_assertion: dict[UUID, list[str]] = {}
+        self.conflict_by_ref: dict[str, str] = {}
+        self.ref_by_conflict: dict[str, str] = {}
         for position, card in enumerate(snapshot.evidence_cards, start=1):
             ref = f"a{position}"
             self.assertion_by_ref[ref] = card.assertion_id
@@ -205,6 +207,13 @@ class EvidenceRefs:
                 self.ref_by_excerpt.setdefault(excerpt.excerpt_id, excerpt_ref)
                 refs.append(excerpt_ref)
             self.excerpt_refs_by_assertion[card.assertion_id] = refs
+        for index, item in enumerate(snapshot.conflicts, start=1):
+            key = str(item.get("conflict_key") or "")
+            if not key:
+                continue
+            ref = f"x{index}"
+            self.conflict_by_ref[ref] = key
+            self.ref_by_conflict[key] = ref
 
     def assertions(self, refs: Sequence[str]) -> list[UUID]:
         return [self.assertion_by_ref[ref] for ref in refs if ref in self.assertion_by_ref]
@@ -215,6 +224,12 @@ class EvidenceRefs:
     def unknown(self, refs: Sequence[str], *, excerpts: bool = False) -> list[str]:
         known = self.excerpt_by_ref if excerpts else self.assertion_by_ref
         return [ref for ref in refs if ref not in known]
+
+    def conflicts(self, refs: Sequence[str]) -> list[str]:
+        unknown = [ref for ref in refs if ref not in self.conflict_by_ref]
+        if unknown:
+            raise ValueError(f"unknown Conflict refs: {', '.join(dict.fromkeys(unknown))}")
+        return [self.conflict_by_ref[ref] for ref in refs]
 
 
 def assertion_catalog(snapshot: WriterSnapshot) -> list[dict[str, Any]]:
@@ -532,13 +547,37 @@ def verification_messages(
 ) -> list[dict[str, str]]:
     blocks = _batch_blocks(plan, spec)
     candidates = _batch_candidates(plan, spec)
+    refs = EvidenceRefs(snapshot)
+    known_conflicts = []
+    for item in snapshot.conflicts:
+        key = str(item.get("conflict_key") or "")
+        if not key:
+            continue
+        known_conflicts.append(
+            {
+                "conflict_ref": refs.ref_by_conflict[key],
+                "disputed_point": item.get("disputed_point"),
+                "excerpt_refs": [
+                    refs.ref_by_excerpt[UUID(str(value))]
+                    for value in item.get("excerpt_ids") or []
+                    if UUID(str(value)) in refs.ref_by_excerpt
+                ],
+                "decision": item.get("decision"),
+                "winning_excerpt_refs": [
+                    refs.ref_by_excerpt[UUID(str(value))]
+                    for value in item.get("winning_excerpt_ids") or []
+                    if UUID(str(value)) in refs.ref_by_excerpt
+                ],
+                "rationale": item.get("rationale"),
+            }
+        )
     system = """你负责冻结这一批报告正文的后置归因。
 
 代码已经给出本批需要检查的候选位置，以及你刚选中的 Assertion 和对应 Excerpt。对每个候选位置，提取其中最小的、可以从研究材料中独立核对的具体陈述，并核对主体、动作、数字、时间、范围、口径和来源归属。
 
 只核对具体事实锚点，不评价相邻的解释、意义判断或文章写法。分析内容使用 analysis，并记录它实际依赖的本轮 Claim、已完成批次中的 Claim、Assertion 或材料冲突；不要求 Excerpt 原文表达相同观点。专名只表示附近可能有具体事实，不自动使整个分析判断接受出处核对；requires_evidence=true 的候选必须由 verified 或 failed 的事实 Claim 覆盖。
 
-材料用短编号引用：assertion_refs 写 Assertion 的 ref（形如 a17），excerpt_refs 写 Excerpt 的 ref（形如 a17e2，前缀就是它所属的 Assertion）。只使用 sources 里出现过的 ref，不要写完整 id。
+材料用短编号引用：assertion_refs 写 Assertion 的 ref（形如 a17），excerpt_refs 写 Excerpt 的 ref（形如 a17e2，前缀就是它所属的 Assertion），known_conflict_refs 写材料冲突的 ref（形如 x1）。只使用输入中出现过的 ref，不要写完整 id 或 conflict key。
 
 verified 必须绑定足以支持该陈述的给定 Assertion 和对应 Excerpt，并且**只绑定真正承载这句话的那几条**。把所有沾边的材料都列上不等于更严谨：它会让读者无法判断这句话到底出自哪里。一条陈述通常一到两条就够，超过三条说明这个 span 划得太宽，应该拆成更小的具体陈述。failed 必须说明正文写了什么、材料实际支持什么以及差异在哪里。每个 candidate_ref 都必须由至少一个覆盖相应标记的 Claim 引用。
 
@@ -554,7 +593,7 @@ claim_ref 是本批 span 的短编号。premise_claim_refs 可以引用本批其
                     "blocks": _block_payload(blocks, snapshot),
                     "candidates": candidates,
                     "sources": list(sources),
-                    "known_conflicts": snapshot.conflicts,
+                    "known_conflicts": known_conflicts,
                     "report_index": report_index(plan, spec),
                     "output_schema": AttributionBatchVerification.model_json_schema(),
                 },
@@ -662,7 +701,6 @@ def _accept_claims(
         card.assertion_id: {excerpt.excerpt_id for excerpt in card.excerpts}
         for card in snapshot.evidence_cards
     }
-    allowed_conflicts = {str(item["conflict_key"]) for item in snapshot.conflicts}
     claims: list[tuple[AcceptedClaim, ClaimSpan]] = []
     audit_notes = list(output.audit_notes)
     seen_refs: set[str] = set()
@@ -709,7 +747,7 @@ def _accept_claims(
                     item.excerpt_refs,
                     item.assertion_refs,
                     item.premise_claim_refs,
-                    item.known_conflict_keys,
+                    item.known_conflict_refs,
                 )
             ):
                 raise _SkippedClaim("claim references must be unique")
@@ -730,8 +768,7 @@ def _accept_claims(
                 raise _SkippedClaim("attribution used unavailable evidence")
             excerpt_ids = refs.excerpts(item.excerpt_refs)
             assertion_ids = refs.assertions(item.assertion_refs)
-            if set(item.known_conflict_keys) - allowed_conflicts:
-                raise _SkippedClaim("attribution used an unknown conflict")
+            known_conflict_keys = refs.conflicts(item.known_conflict_refs)
             if item.status == "verified":
                 if not excerpt_ids or not assertion_ids:
                     raise _SkippedClaim("verified claim requires Assertion and Excerpt evidence")
@@ -760,7 +797,7 @@ def _accept_claims(
                     excerpt_ids=excerpt_ids,
                     assertion_ids=assertion_ids,
                     premise_claim_refs=list(item.premise_claim_refs),
-                    known_conflict_keys=list(item.known_conflict_keys),
+                    known_conflict_keys=known_conflict_keys,
                     reason=item.reason,
                     audit_note=item.audit_note,
                 ),

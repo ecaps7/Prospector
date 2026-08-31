@@ -75,6 +75,9 @@ POST /api/jobs                       # 冻结 Brief 并启动研究
 POST /api/jobs/{id}/cancel           # queued 立即取消；running 请求协作式停止
   body: { requested_via: "web_monitor" | "cli" }
 
+DELETE /api/jobs/{id}                # 把已停止的 Job 移出任务历史；证据不删
+  resp: 204；未停止返回 409 job_not_deletable
+
 GET  /api/jobs                       # job list
 GET  /api/jobs/{id}                  # job status 快照
 GET  /api/jobs/{id}/events           # SSE；支持 Last-Event-ID 从 PG 事件表回放
@@ -88,8 +91,10 @@ GET  /api/healthz                    # serve 启动自检 + CLI 连接探测
 
 - **HITL 完全在客户端**：服务端没有"等待确认中"的 job 状态。`/api/scope` 与 `/api/scope/revise` 是进程内直接调用 `run_scope` / `write_research_brief` 的纯函数式端点；c/e/i/q 循环全部发生在 CLI 本地，确认完才 `POST /api/jobs`。服务端因此不需要 interrupt/resume 的 HTTP 化——job 一旦存在就必然在跑或已停。
 - **SSE 事件即 PG 事件表的行**：`id` 为事件表自增 ID，`data` 为结构化 JSON（事件类型 + 载荷）。渲染语义留给客户端（现有 `ResearchTimelineRenderer` 的逻辑移植到 CLI 侧复用）。job 停止后服务端发终结事件 `job.stopped`（含 outcome / phase / report refs）并关流，CLI 以此判断退出。
-- **取消同样持久化**：queued Job 直接进入 `cancelled`；running Job 先进入 `cancelling`，事件记录 `requested_via`，在当前模型或工具调用结束后的安全边界停止；未完成 Task 一并进入 `cancelled`（`stop_reason=job_cancelled`），随后写入唯一 `job.stopped`，服务重启不会恢复。
-- **中断不是终态**：异常逃出研究图时不写 `job.stopped`——行保持 `running`（合同错误保留图内已落的 `failed`），事件流停在原地，由服务重启恢复或 `prospector-local job resume` 从 checkpoint 续跑；恢复成功后的收尾照常写入唯一 `job.stopped`。`job resume` 对已写 stopped 的 Job（完成/取消/预算耗尽的终态失败）直接拒绝。
+- **取消同样持久化**：queued Job 直接进入 `cancelled`；调度器手上确实在跑的 running Job 先进入 `cancelling`，事件记录 `requested_via`，在当前模型或工具调用结束后的安全边界停止；未完成 Task 一并进入 `cancelled`（`stop_reason=job_cancelled`），随后写入唯一 `job.stopped`，服务重启不会恢复。
+- **删除只是不再列出**：`DELETE /api/jobs/{id}` 给已停止的 Job 写上 `deleted_at`，`GET /api/jobs` 不再列它；行、事件、Excerpt、Document 快照和报告对象一概保留，按 id 仍取得到（已经打开的报告页不会突然失效）。不做硬删是因为 `app.documents` 在工作区内按 `url + content_hash` 去重，行上却挂着首次抓到这份快照的那个 Job 的 `job_id ON DELETE CASCADE`——真删会连带拿走后来任务的 Excerpt 仍在引用的快照，把证据链捅穿。没停下来的 Job 拒绝删除（`job_not_deletable`），调度器还攥着它，得先取消。
+- **取消搁浅的行当场收尾**：`cancelling` 靠执行该 Job 的 worker 在安全边界兑现，可搁浅的行没有 worker——当初跑它的进程已经死了，行还留在 `running`。调度器用 `_held`（排队中 + 正在跑的）区分这两者：取消一个自己没攥着的 Job，直接 `finalize_cancelled`，返回 `cancelled`。否则那行既停不掉也从任务历史里删不掉。同理，`finalize_pending_cancellations()` 在 `start()` 里无条件跑，不挂在 `recover_on_start` 下面——扫的是没人再去兑现的请求，与这个进程恢不恢复执行无关。
+- **中断不是终态**：异常逃出研究图时不写 `job.stopped`——行保持 `running`（合同错误保留图内已落的 `failed`），事件流停在原地。服务重启不自动恢复；只能由 `prospector-local job resume` 从 checkpoint 续跑。恢复成功后的收尾照常写入唯一 `job.stopped`。`job resume` 对已写 stopped 的 Job（完成/取消/预算耗尽的终态失败）直接拒绝。
 - **报告下载走服务端代理**：CLI 不直连 MinIO；下载结果落地 `~/.prospector/reports/<job_id>/`。服务端产物是权威源，本地目录只是缓存。
 - **错误契约**：LLM 未配置、Verifier 重大缺口等既有异常映射为结构化错误体 `{ error_code, message }`。请求校验失败额外带稳定的 `details: [{ path, reason }]`（字段路径 + 原因），供表单定位；`path` 为空表示请求级错误。CLI 按 `error_code` 决定退出码，不解析 message 文本。
 

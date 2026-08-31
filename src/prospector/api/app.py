@@ -338,6 +338,26 @@ def create_app(
             return JobCancelResponse(job_id=job_id, status="cancelled")
         raise ApiError(503, "service_unavailable", "Cancellation state is invalid")
 
+    @router.delete(
+        "/jobs/{job_id}",
+        status_code=204,
+        responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+        description=(
+            "Remove a stopped Job from the Jobs list. The Job's evidence is not "
+            "erased: its Excerpts, Document snapshots and report objects stay "
+            "addressable by id, because a Document snapshot is shared with every "
+            "later Job that cited the same page. A Job that has not stopped must be "
+            "cancelled first."
+        ),
+    )
+    async def delete_job(job_id: UUID, request: Request) -> Response:
+        status = await run_in_threadpool(runtime(request).repository.delete_job, job_id)
+        if status is None:
+            raise ApiError(404, "job_not_found", "Job not found")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ApiError(409, "job_not_deletable", "Job has not stopped yet")
+        return Response(status_code=204)
+
     @router.get(
         "/jobs/{job_id}",
         response_model=JobDetail,

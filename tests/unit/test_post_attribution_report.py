@@ -21,10 +21,12 @@ from prospector.agents.report_attribution import (
     plan_incremental_attribution,
     prepare_attribution_plan,
     run_attribution,
+    verification_messages,
 )
 from prospector.agents.report_review import OpenAIReportReview, attribution_summary
 from prospector.agents.research_synthesis import (
     OpenAIResearchSynthesis,
+    ResearchSynthesisOutputError,
     research_synthesis_review_messages,
     synthesis_material_payload,
 )
@@ -173,7 +175,8 @@ def test_synthesis_review_context_excludes_the_full_research_material() -> None:
         "minor_gaps",
     }
     assert payload["brief"]["question"] == snapshot.brief.question
-    assert payload["conflicts"] == snapshot.conflicts
+    assert payload["conflicts"] == [{"conflict_ref": "x1", "disputed_point": "统计口径不同"}]
+    assert payload["draft"]["material_conflict_refs"] == ["x1"]
     assert payload["minor_gaps"] == []
     assert payload["research_shape"] == {
         "research_questions": ["出货量变化由什么推动？"],
@@ -187,6 +190,16 @@ def test_synthesis_review_context_excludes_the_full_research_material() -> None:
 
 def test_writer_receives_only_the_adopted_synthesis_not_its_audit_record() -> None:
     snapshot = _snapshot("出货量下降 12%。", "同口径数据显示出货量下降 12%。")
+    conflict_key = "sha256:" + "c" * 64
+    excerpt_id = snapshot.evidence_cards[0].excerpts[0].excerpt_id
+    snapshot.conflicts = [
+        {
+            "conflict_key": conflict_key,
+            "disputed_point": "统计口径不同",
+            "excerpt_ids": [str(excerpt_id)],
+            "winning_excerpt_ids": [],
+        }
+    ]
     synthesis = ResearchSynthesisRun(
         synthesis_run_id=uuid4(),
         job_id=snapshot.job_id,
@@ -213,7 +226,11 @@ def test_writer_receives_only_the_adopted_synthesis_not_its_audit_record() -> No
     serialized = messages[1]["content"]
     assert "AUDIT_" not in serialized
     assert str(synthesis.synthesis_run_id) not in serialized
-    assert str(next(iter(snapshot.usable_assertion_ids))) in serialized
+    assert str(next(iter(snapshot.usable_assertion_ids))) not in serialized
+    assert str(excerpt_id) not in serialized
+    assert conflict_key not in serialized
+    assert '"assertion_ref": "a1"' in serialized
+    assert '"conflict_ref": "x1"' in serialized
 
 
 def test_source_credibility_gaps_are_attached_to_the_affected_finding() -> None:
@@ -241,8 +258,20 @@ def test_source_credibility_gaps_are_attached_to_the_affected_finding() -> None:
     assert synthesis_payload["research_tasks"][0]["findings"][0]["source_caveat"] == (
         "该数字来自厂商案例，只能作为趋势信号。"
     )
-    assert writer_payload["minor_gaps"] == [snapshot.minor_gaps[1]]
-    assert synthesis_payload["minor_gaps"] == [snapshot.minor_gaps[1]]
+    assert writer_payload["minor_gaps"] == [
+        {
+            "kind": "coverage",
+            "description": "没有同口径地区数据。",
+            "related_assertion_refs": [],
+        }
+    ]
+    assert synthesis_payload["minor_gaps"] == [
+        {
+            "kind": "coverage",
+            "description": "没有同口径地区数据。",
+            "related_assertion_refs": [],
+        }
+    ]
 
 
 def test_writer_prompt_keeps_research_process_out_of_the_report_narrative() -> None:
@@ -258,7 +287,8 @@ def test_writer_prompt_keeps_research_process_out_of_the_report_narrative() -> N
     system = report_writer_messages(snapshot, synthesis)[0]["content"]
 
     assert "不要把“材料”“证据”“本报告”作为叙述主体" in system
-    assert "不要单设证据边界" in system
+    assert "不要把它们从正文抽出来集中安置" in system
+    assert "证据边界" not in system
     assert "不要为了展示覆盖面" in system
 
 
@@ -597,7 +627,7 @@ def _model_claim(**kwargs: object) -> dict[str, object]:
         "excerpt_refs": [],
         "assertion_refs": [],
         "premise_claim_refs": [],
-        "known_conflict_keys": [],
+        "known_conflict_refs": [],
         "reason": None,
         "audit_note": None,
     }
@@ -1143,6 +1173,48 @@ def test_a_claim_written_in_refs_is_stored_against_real_ids() -> None:
         snapshot.evidence_cards[0].excerpts[0].excerpt_id
     ]
     assert run.claim_premises[0].direct_assertion_ids == [snapshot.evidence_cards[0].assertion_id]
+
+
+def test_attribution_uses_short_conflict_refs_and_restores_the_conflict_key() -> None:
+    snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
+    conflict_key = "sha256:" + "a" * 64
+    excerpt_id = snapshot.evidence_cards[0].excerpts[0].excerpt_id
+    snapshot.conflicts = [
+        {
+            "conflict_key": conflict_key,
+            "disputed_point": "统计口径不同",
+            "excerpt_ids": [str(excerpt_id)],
+            "winning_excerpt_ids": [],
+        }
+    ]
+    markdown = "出货量下降 12%。"
+    blocks = parse_markdown(markdown)
+    plan = prepare_attribution_plan(markdown, snapshot)
+    sources = expand_selected_sources(snapshot, [snapshot.evidence_cards[0].assertion_id])
+    prompt = verification_messages(plan, plan.batches[0], snapshot, sources)[1]["content"]
+
+    assert conflict_key not in prompt
+    assert str(excerpt_id) not in prompt
+    assert '"conflict_ref": "x1"' in prompt
+    assert '"excerpt_refs": ["a1e1"]' in prompt
+
+    output = AttributionBatchVerification.model_validate(
+        {
+            "claims": [
+                _model_claim(
+                    claim_ref="c1",
+                    start_offset=0,
+                    end_offset=len(blocks[0].text) - 1,
+                    status="analysis",
+                    candidate_refs=["k1"],
+                    known_conflict_refs=["x1"],
+                )
+            ]
+        }
+    )
+    run = build_attribution_run(uuid4(), 1, output, blocks, snapshot, None, None, "{}")
+
+    assert run.claim_premises[0].known_conflict_keys == [conflict_key]
 
 
 def test_an_unknown_catalog_ref_is_dropped_rather_than_ending_the_job() -> None:
@@ -1772,6 +1844,16 @@ class _QueuedCompletions:
 
 def test_whole_report_review_sees_only_the_adopted_synthesis() -> None:
     snapshot = _snapshot("出货量下降 12%。", "同口径数据显示出货量下降 12%。")
+    conflict_key = "sha256:" + "d" * 64
+    excerpt_id = snapshot.evidence_cards[0].excerpts[0].excerpt_id
+    snapshot.conflicts = [
+        {
+            "conflict_key": conflict_key,
+            "disputed_point": "统计口径不同",
+            "excerpt_ids": [str(excerpt_id)],
+            "winning_excerpt_ids": [],
+        }
+    ]
     synthesis = ResearchSynthesisRun(
         synthesis_run_id=uuid4(),
         job_id=snapshot.job_id,
@@ -1808,24 +1890,28 @@ def test_whole_report_review_sees_only_the_adopted_synthesis() -> None:
         "evidence_needed": None,
     }
     assert "AUDIT_MATERIAL_MUST_NOT_REACH_REVIEW" not in result.full_prompt[1]["content"]
+    assert str(snapshot.evidence_cards[0].assertion_id) not in result.full_prompt[1]["content"]
+    assert str(excerpt_id) not in result.full_prompt[1]["content"]
+    assert conflict_key not in result.full_prompt[1]["content"]
+    assert '"conflict_ref": "x1"' in result.full_prompt[1]["content"]
     assert "主要叙述对象" in result.full_prompt[0]["content"]
     assert "brief_response" in result.full_prompt[0]["content"]
 
 
 def test_synthesis_runs_an_independent_review_and_uses_its_revision() -> None:
     snapshot = _snapshot("出货量下降。", "同口径数据显示出货量下降 12%。")
-    assertion_id = str(snapshot.evidence_cards[0].assertion_id)
+    assertion_id = snapshot.evidence_cards[0].assertion_id
     draft = {
         "decision": "ready",
         "synthesis": "材料一称出货量下降。",
-        "assertion_ids": [assertion_id],
-        "material_conflict_keys": [],
+        "assertion_refs": ["a1"],
+        "material_conflict_refs": [],
     }
     revised = {
         "decision": "ready",
         "synthesis": "同口径数据共同显示出货量下降，变化并非仅来自来源表述差异。",
-        "assertion_ids": [assertion_id],
-        "material_conflict_keys": [],
+        "assertion_refs": ["a1"],
+        "material_conflict_refs": [],
     }
     review = {
         "defects": [
@@ -1847,10 +1933,61 @@ def test_synthesis_runs_an_independent_review_and_uses_its_revision() -> None:
     )
 
     assert result.result.synthesis == revised["synthesis"]
+    assert result.result.assertion_ids == [assertion_id]
+    serialized_prompt = result.full_prompt[1]["content"]
+    assert str(assertion_id) not in serialized_prompt
+    assert '"assertion_ref": "a1"' in serialized_prompt
     assert len(completions.calls) == 2
     assert result.raw_output["draft"]
     assert result.raw_output["review"]
     assert result.raw_output["review_prompt"]
+
+
+def test_synthesis_rejects_an_unknown_short_ref() -> None:
+    snapshot = _snapshot("出货量下降。", "同口径数据显示出货量下降 12%。")
+    invalid = json.dumps(
+        {
+            "decision": "ready",
+            "synthesis": "材料显示出货量下降。",
+            "assertion_refs": ["a999"],
+            "material_conflict_refs": [],
+        },
+        ensure_ascii=False,
+    )
+    completions = _QueuedCompletions([invalid, invalid])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    with pytest.raises(ResearchSynthesisOutputError, match="unknown Assertion refs: a999"):
+        OpenAIResearchSynthesis(client=cast(Any, client), model="qwen-test").synthesize(snapshot)
+
+
+def test_synthesis_uses_short_conflict_refs_and_restores_the_conflict_key() -> None:
+    snapshot = _snapshot("出货量下降。", "同口径数据显示出货量下降 12%。")
+    conflict_key = "sha256:" + "b" * 64
+    snapshot.conflicts = [{"conflict_key": conflict_key, "disputed_point": "统计口径不同"}]
+    draft = json.dumps(
+        {
+            "decision": "ready",
+            "synthesis": "不同统计口径需要并陈。",
+            "assertion_refs": ["a1"],
+            "material_conflict_refs": ["x1"],
+        },
+        ensure_ascii=False,
+    )
+    review = json.dumps({"defects": [], "reason": "初稿正确处理了材料冲突。"}, ensure_ascii=False)
+    completions = _QueuedCompletions([draft, review])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    result = OpenAIResearchSynthesis(client=cast(Any, client), model="qwen-test").synthesize(
+        snapshot
+    )
+
+    assert result.result.material_conflict_keys == [conflict_key]
+    assert conflict_key not in result.full_prompt[1]["content"]
+    assert '"conflict_ref": "x1"' in result.full_prompt[1]["content"]
+    review_prompt = cast(list[dict[str, str]], result.raw_output["review_prompt"])[1]["content"]
+    assert conflict_key not in review_prompt
+    assert '"conflict_ref": "x1"' in review_prompt
 
 
 def test_attribution_selection_prompt_omits_excerpt_text() -> None:

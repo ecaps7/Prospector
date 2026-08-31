@@ -108,6 +108,7 @@ const ERROR: Record<string, string> = {
   report_not_ready: "报告尚未就绪",
   job_not_found: "找不到这个任务",
   job_not_cancellable: "这个任务已经停了，无法再取消",
+  job_not_deletable: "这个任务还在进行中，先取消它才能删除",
   llm_not_configured: "模型服务还没配置好，请检查 .env 里的模型密钥",
   not_found: "找不到这个地址",
   excerpt_not_found: "找不到这段摘录",
@@ -141,23 +142,15 @@ export const verificationLabel = (value: string | null | undefined): string =>
   pick(VERIFICATION, value);
 
 /**
- * One phrase covering both the job's status and, once done, how it ended.
- *
- * 判定优先看 `verification_status`：改版后 `outcome` 恒为 `report_rendered`，
- * 成色只在判定里。旧任务没有判定字段，退回按 `outcome` 读——那时候成色就写在
- * `outcome` 上。
+ * One reader-facing phrase for a job's lifecycle status.
  */
 export function jobStatusLabel(
   status: string,
-  outcome?: string | null,
-  verification?: string | null,
+  _outcome?: string | null,
+  _verification?: string | null,
 ): string {
-  if (status !== "completed") return pick(STATUS, status);
-  if (verification === "verified") return "已完成";
-  if (verification) return `已完成 · ${verificationLabel(verification)}`;
-  if (outcome === "partial") return "部分完成";
-  if (outcome === "draft_rendered") return "已完成 · 未逐句核对";
-  return "已完成";
+  if (status === "queued" || status === "cancelling") return "研究中";
+  return pick(STATUS, status);
 }
 
 /**

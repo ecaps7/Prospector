@@ -13,6 +13,7 @@ from prospector.agents.research_synthesis import (
 )
 from prospector.deterministic.excerpt_text import clip_excerpt_text, writer_excerpt_limit
 from prospector.deterministic.markdown_report import parse_markdown
+from prospector.deterministic.model_refs import ResearchModelRefs
 from prospector.schemas.claims import (
     AttributionRun,
     ReportReviewRun,
@@ -48,13 +49,14 @@ def material_payload(snapshot: WriterSnapshot) -> dict[str, Any]:
         if caveat is not None:
             finding["source_caveat"] = caveat
         findings.append(finding)
-    return {
+    payload = {
         "brief": snapshot.brief.model_dump(mode="json"),
         "research_synthesis": None,
         "findings": findings,
         "conflicts": snapshot.conflicts,
         "minor_gaps": global_minor_gaps(snapshot),
     }
+    return ResearchModelRefs.from_writer_snapshot(snapshot).alias_payload(payload)
 
 
 def report_writer_messages(
@@ -70,11 +72,11 @@ def report_writer_messages(
 
 深度来自解释关系、机制和转折，不来自使用更多 finding。不要为了展示覆盖面而依次展开 ResearchTask、厂商、产品或案例；只使用服务于核心回答的内容，也不要在开头、阶段总结和结论中反复表达同一套判断。
 
-`source_caveat` 只约束它所在的 finding：使用该 finding 时，把来源性质和适用范围写进相关表述。除非 Brief 本身询问研究可靠性，不要单设证据边界、材料口径或研究说明章节。
+`source_caveat`、`conflicts` 和 `minor_gaps` 与 finding 一样按需选取，不必逐条交代。但用到其中一条时，它属于它所改变的那个判断：来源性质和适用范围写进使用该 finding 的表述，争议和缺口写在讨论该问题的地方。不要把它们从正文抽出来集中安置，也不要在文末统一交代研究本身。
 
-不得加入材料未支持的具体事实，不得改变数字、时间、主体、范围、口径或来源归属，也不得隐藏会实质改变认识的冲突。材料不足以支持确定判断时，如实说明证据边界。遵守用户明确限制。
+不得加入材料未支持的具体事实，不得改变数字、时间、主体、范围、口径或来源归属，也不得隐藏会实质改变认识的冲突。材料不足以支持确定判断时，把判断写到它实际成立的条件和范围为止。遵守用户明确限制。
 
-research_synthesis.decision 为 needs_research 时，按照当前能够支持的有限分析完成报告，并清楚说明相关证据边界，不要因此把整篇报告写成模糊的保守表述。
+research_synthesis.decision 为 needs_research 时，按照当前能够支持的有限分析完成报告，在相关判断处写明它成立的条件，不要因此把整篇报告写成模糊的保守表述。
 
 只输出完整的 GitHub Flavored Markdown，不要输出 JSON、写作说明、自我检查清单或自行生成的引用脚注，也不要用代码围栏包裹整篇报告。"""
     return [

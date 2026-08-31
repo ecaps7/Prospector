@@ -62,8 +62,10 @@ from prospector.agents.usage import collect_usage
 from prospector.deterministic.budget import inject_task_budget, limits_for_effort
 from prospector.deterministic.citation_render import render_final_report
 from prospector.deterministic.gates import (
+    PlannerRejection,
     dispatch_rejection,
     finish_rejection,
+    follow_up_research_gaps,
 )
 from prospector.deterministic.markdown_report import parse_markdown
 from prospector.flow.cancellation import JobCancelledError
@@ -73,7 +75,7 @@ from prospector.schemas.brief import EffortLevel
 from prospector.schemas.claims import MAX_WRITER_REPAIRS, final_report_status
 from prospector.schemas.decisions import PlannerDecision
 from prospector.schemas.report import ResearchSynthesisRun
-from prospector.schemas.verifier import VerifierDecision
+from prospector.schemas.verifier import VerifierDecision, VerifierGap
 from prospector.store.object_store import ObjectStore, workspace_key
 from prospector.store.repositories import ResearchRepository
 from prospector.tools.save_findings import SaveFindingsTool
@@ -160,8 +162,12 @@ def _research_state_message(
     used = int(state.get("research_decisions_used", 0))
     limit = int(state["decision_round_limit"])
     limits = limits_for_effort(effort)
+    # finish is withheld for the single round that answers a passing Verifier's named
+    # evidence: the Planner had just argued the material was sufficient, so offering it
+    # the same choice again would only invite the same answer.
+    finish_allowed = excerpt_count > 0 and not bool(state.get("finish_withheld", False))
     available_decisions = ["dispatch"]
-    if excerpt_count > 0:
+    if finish_allowed:
         available_decisions.append("finish")
     return {
         "available_decisions": available_decisions,
@@ -172,7 +178,7 @@ def _research_state_message(
         "worker_tools": ["web_search", "web_fetch", "save_findings"],
         "max_parallel_tool_calls": MAX_PARALLEL_TOOL_CALLS_PER_ROUND,
         "search_auto_fetch_top_n": AUTO_FETCH_TOP_N,
-        "finish_allowed": excerpt_count > 0,
+        "finish_allowed": finish_allowed,
     }
 
 
@@ -200,6 +206,8 @@ def _initialize_node(services: ResearchGraphServices):
             "research_decisions_used": 0,
             "consecutive_schema_errors": 0,
             "decision_round_limit": limits.decision_round_limit,
+            "follow_up_research_used": False,
+            "finish_withheld": False,
             "active_task_ids": [],
             "outcome": None,
             "error_code": None,
@@ -407,6 +415,7 @@ def _planner_node(services: ResearchGraphServices):
                 result = {
                     "plan_version": plan.version,
                     "active_task_ids": [str(task_id) for task_id in plan.task_ids],
+                    "finish_withheld": False,
                     "last_verifier_run_id": None,
                     "report_id": None,
                     "report_markdown_ref": None,
@@ -415,9 +424,16 @@ def _planner_node(services: ResearchGraphServices):
                 }
 
         else:
-            rejection = finish_rejection(services.repository.count_excerpts(job_id))
+            rejection = finish_rejection(
+                services.repository.count_excerpts(job_id),
+                finish_withheld=bool(state.get("finish_withheld", False)),
+            )
             if rejection is not None:
-                feedback = "finish 被拒绝：当前 Job 尚无任何 Excerpt，不能空手宣布完成。"
+                feedback = (
+                    "finish 被拒绝：本轮用于补齐核验放行时指明的证据需求，只能 dispatch。"
+                    if rejection is PlannerRejection.FINISH_WITHHELD
+                    else "finish 被拒绝：当前 Job 尚无任何 Excerpt，不能空手宣布完成。"
+                )
                 services.repository.complete_decision(
                     job_id,
                     decision_round,
@@ -631,6 +647,57 @@ def _major_gap_summary(decision: VerifierDecision) -> str:
     return "；".join(gap.description for gap in decision.gaps if gap.severity == "major")
 
 
+def _return_for_follow_up(
+    services: ResearchGraphServices,
+    state: ResearchState,
+    *,
+    job_id: UUID,
+    plan_version: int,
+    run_id: UUID,
+    decision: VerifierDecision,
+    follow_up: list[VerifierGap],
+) -> dict[str, Any]:
+    """Hand a passing Verifier's own evidence_needed back to the Planner, exactly once."""
+    services.repository.record_phase_changed(
+        job_id,
+        "research",
+        plan_version=plan_version,
+        trigger="verifier_follow_up",
+    )
+    messages = append_runtime_feedback(
+        state["planner_messages"],
+        feedback_type="verifier_gap",
+        payload={
+            "verifier_run_id": str(run_id),
+            "gap_origin": "verifier_follow_up",
+            "follow_up_gaps": [gap.model_dump(mode="json") for gap in follow_up],
+            "unusable_assertions": services.repository.list_unusable_assertion_details(
+                job_id, decision.assertion_dispositions
+            ),
+        },
+    )
+    next_state: dict[str, Any] = {
+        "phase": "research",
+        "outcome": None,
+        "error_code": None,
+        "last_verifier_run_id": str(run_id),
+        "follow_up_research_used": True,
+        "finish_withheld": True,
+        "verifier_trigger": None,
+        "route": "planner",
+    }
+    messages = append_runtime_feedback(
+        messages,
+        feedback_type="research_state",
+        payload=_research_state_message(
+            {**state, **next_state},
+            excerpt_count=services.repository.count_excerpts(job_id),
+            effort=services.repository.get_job_effort(job_id),
+        ),
+    )
+    return {**next_state, "planner_messages": messages}
+
+
 def _verifier_node(services: ResearchGraphServices):
     def verifier(state: ResearchState) -> dict[str, Any]:
         job_id = UUID(state["job_id"])
@@ -731,6 +798,29 @@ def _verifier_node(services: ResearchGraphServices):
             decision = stored["decision"]
 
         if decision.release_decision == "pass":
+            # A pass that still names the evidence it wanted goes back to the Planner
+            # once, rather than only into the report's stated limits. The Planner decides
+            # how to cover that evidence; the withheld finish decides that it tries.
+            follow_up = (
+                follow_up_research_gaps(
+                    decision.gaps,
+                    research_decisions_used=int(state["research_decisions_used"]),
+                    decision_round_limit=int(state["decision_round_limit"]),
+                    already_used=bool(state.get("follow_up_research_used", False)),
+                )
+                if trigger == "planner_finish"
+                else []
+            )
+            if follow_up:
+                return _return_for_follow_up(
+                    services,
+                    state,
+                    job_id=job_id,
+                    plan_version=plan_version,
+                    run_id=run_id,
+                    decision=decision,
+                    follow_up=follow_up,
+                )
             services.repository.set_research_outcome(
                 job_id,
                 outcome="ready_for_writer",

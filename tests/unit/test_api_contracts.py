@@ -59,6 +59,8 @@ class FakeRepository:
         ]
         self.ready_report = False
         self.excerpts: list[dict[str, Any]] = []
+        self.job_status = "completed"
+        self.deleted: list[UUID] = []
 
     def health_check(self) -> None:
         pass
@@ -84,6 +86,12 @@ class FakeRepository:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return []
+
+    def delete_job(self, job_id: UUID) -> str | None:
+        if job_id != self.job_id:
+            return None
+        self.deleted.append(job_id)
+        return self.job_status
 
     def get_job(self, job_id: UUID) -> dict[str, Any] | None:
         return None
@@ -434,6 +442,28 @@ def test_cancel_endpoint_returns_structured_terminal_status() -> None:
 
         missing_source = client.post(f"/api/jobs/{repository.job_id}/cancel")
         assert missing_source.status_code == 422
+
+
+def test_delete_removes_a_stopped_job_from_the_list_without_a_body() -> None:
+    repository = FakeRepository()
+    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
+        response = client.delete(f"/api/jobs/{repository.job_id}")
+        assert response.status_code == 204
+        assert response.content == b""
+        assert repository.deleted == [repository.job_id]
+
+        missing = client.delete(f"/api/jobs/{uuid4()}")
+        assert missing.status_code == 404
+        assert missing.json()["error_code"] == "job_not_found"
+
+
+def test_delete_refuses_a_job_the_scheduler_still_holds() -> None:
+    repository = FakeRepository()
+    repository.job_status = "running"
+    with TestClient(create_app(_services(repository), validate_startup=False)) as client:
+        response = client.delete(f"/api/jobs/{repository.job_id}")
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "job_not_deletable"
 
 
 def test_unprefixed_routes_are_not_kept_as_aliases() -> None:
