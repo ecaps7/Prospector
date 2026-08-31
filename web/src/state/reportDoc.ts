@@ -200,7 +200,3 @@ export function readAudit(raw: Partial<ReportAudit> | null | undefined): AuditVi
     claimEvidence: raw.claim_evidence ?? [],
   };
 }
-
-export function findingCount(audit: AuditView): number {
-  return audit.spans.length + audit.review.length + audit.readthrough.length;
-}

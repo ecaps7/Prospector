@@ -324,11 +324,6 @@ def apply_block_replacements(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class MarkerHit:
-    marker: ClaimMarker
-
-
 def _clause_around(text: str, at: int) -> str:
     left = max(text.rfind(stop, 0, at) for stop in "。！？；;\n") + 1
     right = [text.find(stop, at) for stop in "。！？；;\n"]

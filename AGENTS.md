@@ -17,10 +17,9 @@ uv run --env-file .env pytest tests/integration -q -m "integration and not live"
 
 uv run pytest tests/unit/test_foo.py -q          # 单文件
 uv run pytest tests/unit/test_foo.py::test_bar -q
-uv run --env-file .env python eval/run_report_verifier.py
 ```
 
-服务端口是 **7620**（`prospector serve` / CLI 默认），不是 `PROSPECTOR_API_URL` 占位里的 8000。前端：`cd web && npm ci && npm run dev`（Vite 把 `/api` 代理到 7620）。改完 UI 后 `npm run build`，产物在 `web/dist/`，由 `prospector serve` 托管。
+服务端口是 **7620**（`prospector serve` / CLI 默认）。前端：`cd web && npm ci && npm run dev`（Vite 把 `/api` 代理到 7620）。改完 UI 后 `npm run build`，产物在 `web/dist/`，由 `prospector serve` 托管。
 
 `@pytest.mark.live` 需要真实 LLM/Exa，密钥未配置时跳过；不要为了让 live 变绿去改断言口径。
 
@@ -71,6 +70,5 @@ api / runtime / cli
 - Python 3.13，`src/` layout；行宽 100；Ruff (`E,F,I,UP,B,SIM`) + basedpyright `standard`。
 - 新合同先改 `schemas/`，再改 store / agents / flow。测试钉合同，不钉模型措辞。
 - 日志默认禁止密钥、连接串和研究正文。OTel exporter 失败不得阻断 checkpoint。
-- 不要改 `examples/` 里已落盘的运行产物，除非任务就是更新示例。
 
 前端约定见 `web/AGENTS.md`。

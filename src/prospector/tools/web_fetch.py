@@ -157,18 +157,3 @@ class WebFetchTool:
             "view_kind": view.view_kind,
             "items": [value.model_dump() for value in view.items],
         }
-
-
-WEB_FETCH_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "web_fetch",
-        "description": "Snapshot one URL and return a persisted task-focused source view.",
-        "parameters": {
-            "type": "object",
-            "properties": {"url": {"type": "string"}},
-            "required": ["url"],
-            "additionalProperties": False,
-        },
-    },
-}

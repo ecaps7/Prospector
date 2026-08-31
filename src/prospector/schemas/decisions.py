@@ -26,11 +26,3 @@ class PlannerDecision(BaseModel):
         elif self.tasks is not None:
             raise ValueError("finish must not include tasks")
         return self
-
-
-class DecisionLog(BaseModel):
-    decision_round: int = Field(..., ge=1)
-    full_prompt: list[dict[str, object]]
-    decision: PlannerDecision | None = None
-    raw_output: object | None = None
-    feedback: str | None = None

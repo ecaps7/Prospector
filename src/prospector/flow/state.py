@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Literal, TypedDict
 
 
@@ -46,11 +45,6 @@ class ResearchState(TypedDict):
         "render",
         "end",
     ]
-
-
-def research_state_roundtrip(state: ResearchState) -> ResearchState:
-    """Assert that checkpoint state contains only JSON-serializable values."""
-    return ResearchState(**json.loads(json.dumps(state, ensure_ascii=False)))
 
 
 def initial_research_state(*, job_id: str, brief_id: str) -> ResearchState:

@@ -311,10 +311,6 @@ export function fold(state: JobViewState, event: ServerEvent): JobViewState {
   return next;
 }
 
-export function totalTokens(state: JobViewState): number {
-  return state.usage.reduce((sum, item) => sum + item.input_tokens + item.output_tokens, 0);
-}
-
 export function totalInputTokens(state: JobViewState): number {
   return state.usage.reduce((sum, item) => sum + item.input_tokens, 0);
 }

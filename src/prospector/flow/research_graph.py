@@ -1,5 +1,3 @@
-# pyright: basic
-# ruff: noqa: E731, F821, F841
 """Checkpointed Planner decision loop with parallel, ledger-backed Research Workers."""
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ from prospector.agents.report_review import (
 )
 from prospector.agents.report_writer import (
     OpenAIReportWriter,
+    ReportWriterModel,
     ReportWriterOutputError,
 )
 from prospector.agents.research_synthesis import (
@@ -89,19 +88,6 @@ tracer = trace.get_tracer("prospector.research_graph")
 # research budget; this cap is what keeps that retry loop terminating.
 MAX_CONSECUTIVE_SCHEMA_ERRORS = 3
 
-# Names used only by unreachable legacy structured-report recovery functions. They make
-# old interrupted checkpoints fail rather than silently entering the new report path.
-ReportDraft: Any = object
-ReportVerifierFindings: Any = object
-StatementDecision: Any = object
-ReportVerifierOutputError: Any = ValueError
-can_revise_again: Any = lambda _revision: False
-dirty_statement_ids: Any = lambda _draft: set()
-skip_stage_one_after_requirement_rewrite: Any = lambda _findings: False
-decisions_from_statement_checks: Any = lambda _checks: []
-render_verified_report: Any = lambda *args, **kwargs: None
-measure_report_structure: Any = lambda _draft: None
-
 
 @dataclass(slots=True)
 class ResearchGraphServices:
@@ -109,14 +95,11 @@ class ResearchGraphServices:
     planner: PlannerModel
     worker: ResearchWorker
     verifier: VerifierModel
-    writer: Any | None = None
+    writer: ReportWriterModel | None = None
     synthesis: ResearchSynthesisModel | None = None
     attribution: ClaimAttributionModel | None = None
     readthrough: ReadthroughModel | None = None
     review: ReportReviewModel | None = None
-    # Legacy report nodes below are unreachable after the v2 graph replaces them. Keeping
-    # this slot only makes interrupted pre-migration checkpoints fail diagnostically.
-    report_verifier: Any | None = None
     object_store: ObjectStore | None = None
     cancel_requested: Callable[[UUID], bool] = lambda _job_id: False
 
@@ -934,7 +917,7 @@ def _synthesis_node(services: ResearchGraphServices):
             services.repository.record_phase_changed(job_id, "synthesizing")
             try:
                 result = services.synthesis.synthesize(snapshot)
-            except ResearchSynthesisOutputError as exc:
+            except ResearchSynthesisOutputError:
                 services.repository.set_research_outcome(
                     job_id, outcome="failed", error_code="synthesis_contract_error", phase="failed"
                 )

@@ -74,10 +74,6 @@ def bind_job_id(job_id: str | None) -> None:
     _job_id_var.set(job_id)
 
 
-def get_job_id() -> str | None:
-    return _job_id_var.get()
-
-
 def _colors_enabled() -> bool:
     if os.environ.get("NO_COLOR", ""):
         return False

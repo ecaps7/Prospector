@@ -33,16 +33,6 @@ class EventType(StrEnum):
     GAP_ARTIFACT_WRITTEN = "gap_artifact.written"
 
 
-class ResearchEvent(BaseModel):
-    id: int | None = None
-    job_id: UUID
-    event_type: EventType
-    payload: dict[str, Any]
-    task_id: UUID | None = None
-    decision_round: int | None = None
-    created_at: datetime | None = None
-
-
 class _EventPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 

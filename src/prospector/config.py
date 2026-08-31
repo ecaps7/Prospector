@@ -27,8 +27,6 @@ class Settings(BaseSettings):
     s3_bucket: str = Field(..., alias="S3_BUCKET")
     prospector_api_token: str = Field(default="dev-token-change-me", alias="PROSPECTOR_API_TOKEN")
 
-    # Placeholders — not required for M0 runtime paths
-    prospector_api_url: str = Field(default="http://localhost:8000", alias="PROSPECTOR_API_URL")
     prospector_llm_base_url: str = Field(default="", alias="PROSPECTOR_LLM_BASE_URL")
     prospector_llm_api_key: str = Field(default="", alias="PROSPECTOR_LLM_API_KEY")
     prospector_llm_model_strong: str = Field(
@@ -40,8 +38,6 @@ class Settings(BaseSettings):
         alias="PROSPECTOR_LLM_MODEL_MID",
     )
     exa_api_key: str = Field(default="", alias="EXA_API_KEY")
-    pageindex_root: str = Field(default="", alias="PAGEINDEX_ROOT")
-    step_b_sleep_seconds: float = Field(default=0.0, alias="PROSPECTOR_STEP_B_SLEEP_SECONDS")
 
     workspace_id: UUID = DEFAULT_WORKSPACE_ID
     user_id: UUID = DEFAULT_USER_ID

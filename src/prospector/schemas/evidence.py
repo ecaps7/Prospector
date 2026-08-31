@@ -45,16 +45,6 @@ class DocumentView(BaseModel):
     created_at: datetime
 
 
-class Excerpt(BaseModel):
-    excerpt_id: UUID
-    doc_id: UUID
-    doc_version: int = Field(..., ge=1)
-    text: str = Field(..., min_length=1)
-    locator: dict[str, Any]
-    excerpt_hash: str
-    extracted_by: dict[str, str]
-
-
 class Assertion(BaseModel):
     assertion_id: UUID
     statement: str = Field(..., min_length=1)

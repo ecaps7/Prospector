@@ -17,10 +17,6 @@ Prospector 的全部设计围绕一个约束：报告里的每句事实陈述都
 3. **引用编号由代码生成。** 模型只声明"这句话依据哪几条片段"，角标数字、来源清单、排序全部由渲染代码计算，模型不接触编号。
 4. **核对不过就标出来。** 不通过的句子最多返工两轮；仍不通过就保留原文、不带引用角标，整份报告标记为 `partial`。与其硬凑一个干净结论，不如如实标出哪些句子没通过核对。
 
-## 示例
-
-[examples/](examples/) 下有两次完整运行的原始产物（报告、时间线、状态、JSON），未经人工编辑；同目录的审计脚本只用标准库，可自行验证产物的引用一致性。运行细节、对照数据和已知局限见 [examples/README.md](examples/README.md)。
-
 ## 快速开始
 
 需要 Docker 和 [uv](https://docs.astral.sh/uv/)。
@@ -71,12 +67,6 @@ cd web && npm ci && npm run build
 ```bash
 uv run --env-file .env prospector job status <job-id>
 uv run --env-file .env prospector report export <job-id> --format json --output report.json
-```
-
-一条命令收齐全部产物并自动验算：
-
-```bash
-python3 examples/collect_run.py <job-id> examples/<目录名>/
 ```
 
 ## 架构
@@ -160,14 +150,6 @@ uv run --env-file .env pytest tests/integration -q -m "integration and not live"
 uv run ruff check . && uv run ruff format --check . && uv run basedpyright
 uv run pytest tests/unit -q && uv run --env-file .env pytest tests/integration -q -m "integration and not live"
 ```
-
-另有一个不依赖历史任务的人工标注案例，用于检查逐句核对能否识别"有依据的事实""错误数字""推断过头"三类情况：
-
-```bash
-uv run --env-file .env python eval/run_report_verifier.py
-```
-
-判定标准见 [eval/README.md](eval/README.md)。
 
 ## 项目结构
 

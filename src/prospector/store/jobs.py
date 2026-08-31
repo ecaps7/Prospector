@@ -1,21 +1,14 @@
-"""Minimal app.jobs helpers for M0 start / resume demos."""
+"""Create the initial job row for the single-process local entrypoint."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from prospector.config import Settings, get_settings
-
-
-class JobStatus(StrEnum):
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 def _engine(settings: Settings | None = None) -> Engine:
@@ -47,43 +40,9 @@ def create_job(
                 "id": jid,
                 "workspace_id": cfg.workspace_id,
                 "user_id": cfg.user_id,
-                "status": JobStatus.RUNNING.value,
+                "status": "running",
                 "created_at": now,
                 "updated_at": now,
             },
         )
     return jid
-
-
-def update_job_status(
-    job_id: UUID,
-    status: JobStatus,
-    *,
-    settings: Settings | None = None,
-) -> None:
-    eng = _engine(settings)
-    with eng.begin() as conn:
-        conn.execute(
-            text(
-                """
-                UPDATE app.jobs
-                SET status = :status, updated_at = :updated_at
-                WHERE id = :id
-                """
-            ),
-            {
-                "id": job_id,
-                "status": status.value,
-                "updated_at": datetime.now(UTC),
-            },
-        )
-
-
-def get_job_status(job_id: UUID, *, settings: Settings | None = None) -> str | None:
-    eng = _engine(settings)
-    with eng.connect() as conn:
-        row = conn.execute(
-            text("SELECT status FROM app.jobs WHERE id = :id"),
-            {"id": job_id},
-        ).fetchone()
-    return None if row is None else str(row[0])

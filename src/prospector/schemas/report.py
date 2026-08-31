@@ -241,18 +241,3 @@ class ReportRevisionPatch(BaseModel):
 
     replacements: list[BlockReplacement] = Field(default_factory=list)
     audit_note: str | None = None
-
-
-class ReportRevision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    report_id: UUID
-    job_id: UUID
-    revision: int = Field(..., ge=1)
-    synthesis_run_id: UUID
-    full_prompt: list[dict[str, str]] = Field(default_factory=list)
-    raw_output: Any | None = None
-    markdown: str = Field(..., min_length=1)
-    markdown_hash: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
-    parsed_blocks: list[MarkdownBlock] = Field(default_factory=list)
-    status: Literal["prompted", "generated", "attributed", "reviewed", "rendered", "failed"]
