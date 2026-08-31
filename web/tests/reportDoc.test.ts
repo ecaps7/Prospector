@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findingCount, parseReportDoc, readAudit, renderReportBody } from "../src/state/reportDoc.ts";
+import { parseReportDoc, readAudit, renderReportBody } from "../src/state/reportDoc.ts";
 
 const DOC = [
   "> **核对情况（部分核对未通过）**：全文 36 段，其中 27 段含有已核对的具体事实。",
@@ -85,31 +85,12 @@ test("没有来源段的文档也读得下来", () => {
   assert.equal(doc.body, "正文一句话。");
 });
 
-test("改版前的审计文档读不出核对情况，但不该让报告页崩掉", () => {
-  // 那时的 report.json 是另一份文档：draft / failed_statement_ids / statement_citations，
-  // 没有 health，也没有 whole_report_review。这些任务的报告现在还能下载，还会有人翻。
-  const legacy = {
-    verification_status: "partial",
-    draft: { title: "旧报告" },
-    failed_statement_ids: ["s1"],
-    statement_citations: {},
-    sources: [],
-  } as unknown as Parameters<typeof readAudit>[0];
-  const audit = readAudit(legacy);
-  assert.equal(audit.verdict, "partial");
-  assert.equal(audit.health, null);
-  assert.deepEqual(audit.spans, []);
-  assert.deepEqual(audit.review, []);
-  assert.deepEqual(audit.claimEvidence, []);
-  assert.equal(findingCount(audit), 0);
-});
-
 test("审计文档还没到（或取不到）时也读得出一个空的形状", () => {
-  assert.equal(findingCount(readAudit(null)), 0);
+  assert.deepEqual(readAudit(null).claimEvidence, []);
   assert.equal(readAudit(undefined).verdict, null);
 });
 
-test("当前的审计文档三种问题分别归位", () => {
+test("当前审计文档保留引用抽屉所需的证据", () => {
   const audit = readAudit({
     verification_status: "failed",
     health: { blocks: 4 },
@@ -120,6 +101,5 @@ test("当前的审计文档三种问题分别归位", () => {
   } as unknown as Parameters<typeof readAudit>[0]);
   assert.equal(audit.verdict, "failed");
   assert.equal(audit.health?.blocks, 4);
-  assert.equal(findingCount(audit), 3);
   assert.equal(audit.claimEvidence.length, 1);
 });

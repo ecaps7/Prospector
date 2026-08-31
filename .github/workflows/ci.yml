@@ -7,14 +7,6 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    env:
-      DATABASE_URL: postgresql://prospector:prospector@localhost:5432/prospector
-      S3_ENDPOINT: http://localhost:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: prospector
-      PROSPECTOR_API_TOKEN: ci-token
-
     steps:
       - uses: actions/checkout@v4
 
@@ -36,15 +28,25 @@ jobs:
         run: uv run basedpyright
 
       - name: Unit tests
-        run: uv run pytest tests/unit -q -m "not live"
-
-      - name: Start integration services
-        run: docker compose up -d --wait postgres minio minio-init
-
-      - name: Migrate + checkpointer setup
-        run: |
-          uv run alembic upgrade head
-          uv run prospector-local setup
+        run: uv run pytest tests/unit -q
 
       - name: Integration tests
-        run: uv run pytest tests/integration -q -m "integration and not live"
+        run: uv run pytest tests/integration -q
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

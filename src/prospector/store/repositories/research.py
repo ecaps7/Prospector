@@ -1265,6 +1265,7 @@ class ResearchRepository:
         *,
         trigger: VerifierTrigger,
         decision_round: int,
+        research_decisions_used: int,
         decision_round_limit: int,
         synthesis_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1396,8 +1397,9 @@ class ResearchRepository:
                 "trigger": trigger,
                 "finish_reason": planner_finish_reason,
                 "decision_round": decision_round,
+                "research_decisions_used": research_decisions_used,
                 "decision_round_limit": decision_round_limit,
-                "decision_rounds_remaining": max(0, decision_round_limit - decision_round),
+                "decision_rounds_remaining": max(0, decision_round_limit - research_decisions_used),
             },
             "assertions": assertions,
             "excerpts": excerpts,

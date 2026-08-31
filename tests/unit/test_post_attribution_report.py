@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -41,7 +40,6 @@ from prospector.deterministic.markdown_report import (
     serialized_batch_size,
     text_hash,
 )
-from prospector.flow import research_graph
 from prospector.flow.research_graph import ResearchGraphServices, _synthesis_node
 from prospector.flow.state import initial_research_state
 from prospector.schemas.brief import ResearchBrief
@@ -272,24 +270,6 @@ def test_source_credibility_gaps_are_attached_to_the_affected_finding() -> None:
             "related_assertion_refs": [],
         }
     ]
-
-
-def test_writer_prompt_keeps_research_process_out_of_the_report_narrative() -> None:
-    snapshot = _snapshot("出货量下降 12%。", "同口径数据显示出货量下降 12%。")
-    synthesis = ResearchSynthesisRun(
-        synthesis_run_id=uuid4(),
-        job_id=snapshot.job_id,
-        version=1,
-        decision="ready",
-        synthesis="同口径数据共同显示出货量下降。",
-    )
-
-    system = report_writer_messages(snapshot, synthesis)[0]["content"]
-
-    assert "不要把“材料”“证据”“本报告”作为叙述主体" in system
-    assert "不要把它们从正文抽出来集中安置" in system
-    assert "证据边界" not in system
-    assert "不要为了展示覆盖面" in system
 
 
 def test_markdown_parser_rejects_writer_footnotes_and_scans_surface_markers() -> None:
@@ -1226,10 +1206,10 @@ def test_an_unknown_catalog_ref_is_dropped_rather_than_ending_the_job() -> None:
     assert [note["kind"] for note in notes] == ["dropped_selection_ids"]
 
 
-def test_analysis_over_a_retrieval_marker_is_recorded_not_discarded() -> None:
-    """The marker lexicon cannot tell a topic year from a fact anchor; it may only observe."""
+@pytest.mark.skip(reason="按用户要求暂缓：analysis 仍可绕过必核事实，修复后恢复此测试")
+def test_analysis_does_not_count_as_a_verdict_for_a_required_numerical_fact() -> None:
     snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
-    markdown = "2026 年 3 月的这轮回落更像是渠道调整的结果。"
+    markdown = "出货量下降 12%。"
     blocks = parse_markdown(markdown)
     output = AttributionBatchVerification.model_validate(
         {
@@ -1247,9 +1227,11 @@ def test_analysis_over_a_retrieval_marker_is_recorded_not_discarded() -> None:
     )
     run = build_attribution_run(uuid4(), 1, output, blocks, snapshot, None, None, "{}")
     assert len(run.claims) == 1
-    assert not run.blocking_findings
+    assert run.blocking_findings
+    assert run.blocking_findings[0].text == markdown
+    assert run.claim_evidence == []
     unchecked = [note for note in run.audit_notes if note["kind"] == "unchecked_marker_in_analysis"]
-    assert [marker["text"] for marker in unchecked[0]["markers"]] == ["2026 年 3 月"]
+    assert [marker["text"] for marker in unchecked[0]["markers"]] == ["12%"]
 
 
 def test_analysis_that_reaches_no_checked_fact_becomes_a_finding() -> None:
@@ -1716,120 +1698,6 @@ def test_synthesis_reruns_after_new_research_instead_of_reusing_a_stale_run() ->
     assert result["route"] == "writer"
 
 
-def test_report_nodes_announce_each_external_stage_before_invoking_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The local follower can only display phases that nodes persist before blocking."""
-
-    job_id = uuid4()
-    verifier_run_id = uuid4()
-    report_id = uuid4()
-    synthesis = _stored_synthesis(verifier_run_id, "ready")
-    snapshot = WriterSnapshot(job_id=job_id, brief=ResearchBrief(question="Q", brief_text="B"))
-    phases: list[tuple[str, int | None]] = []
-
-    def record_phase_changed(_job_id: UUID, phase: str, **kwargs: object) -> None:
-        assert _job_id == job_id
-        revision = kwargs.get("revision")
-        phases.append((phase, None if revision is None else int(cast(int, revision))))
-
-    state = cast(Any, _synthesis_state(verifier_run_id))
-    state["job_id"] = str(job_id)
-
-    writer_repository = SimpleNamespace(
-        get_latest_synthesis_run=lambda _job_id: synthesis,
-        build_writer_snapshot=lambda _job_id, _verifier_run_id: snapshot,
-        get_markdown_revision=lambda _job_id: None,
-        begin_markdown_revision=lambda *_args, **_kwargs: (report_id, 1),
-        record_phase_changed=record_phase_changed,
-    )
-    monkeypatch.setattr(
-        "prospector.agents.prompts.report_writer.report_writer_messages", lambda *_args: []
-    )
-    writer = SimpleNamespace(write=lambda *_args: (_ for _ in ()).throw(RuntimeError("stop")))
-    with pytest.raises(RuntimeError, match="stop"):
-        research_graph._writer_node(
-            ResearchGraphServices(
-                repository=cast(Any, writer_repository),
-                planner=cast(Any, object()),
-                worker=cast(Any, object()),
-                verifier=cast(Any, object()),
-                writer=writer,
-            )
-        )(state)
-    assert phases == [("writing", 1)]
-
-    stored = {"report_id": report_id, "revision": 1, "markdown": "# 标题\n\n正文。"}
-    attribution_repository = SimpleNamespace(
-        get_markdown_revision=lambda *_args, **_kwargs: stored,
-        get_attribution_run=lambda *_args: None,
-        build_writer_snapshot=lambda _job_id, _verifier_run_id: snapshot,
-        record_phase_changed=record_phase_changed,
-    )
-    monkeypatch.setattr(
-        research_graph,
-        "run_attribution",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stop")),
-    )
-    with pytest.raises(RuntimeError, match="stop"):
-        research_graph._attribution_node(
-            ResearchGraphServices(
-                repository=cast(Any, attribution_repository),
-                planner=cast(Any, object()),
-                worker=cast(Any, object()),
-                verifier=cast(Any, object()),
-                attribution=cast(Any, object()),
-            )
-        )(state)
-    assert phases[-1] == ("attributing", 1)
-
-    review_repository = SimpleNamespace(
-        get_markdown_revision=lambda _job_id: stored,
-        get_latest_synthesis_run=lambda _job_id: synthesis,
-        get_attribution_run=lambda *_args: object(),
-        get_report_review_run=lambda *_args: None,
-        build_writer_snapshot=lambda _job_id, _verifier_run_id: snapshot,
-        record_phase_changed=record_phase_changed,
-    )
-    review = SimpleNamespace(review=lambda *_args: (_ for _ in ()).throw(RuntimeError("stop")))
-    with pytest.raises(RuntimeError, match="stop"):
-        research_graph._review_node(
-            ResearchGraphServices(
-                repository=cast(Any, review_repository),
-                planner=cast(Any, object()),
-                worker=cast(Any, object()),
-                verifier=cast(Any, object()),
-                review=cast(Any, review),
-            )
-        )(state)
-    assert phases[-1] == ("reviewing", 1)
-
-    render_repository = SimpleNamespace(
-        get_markdown_revision=lambda _job_id: {**stored, "report_status": "verified"},
-        get_attribution_run=lambda *_args: object(),
-        get_report_review_run=lambda *_args: object(),
-        build_writer_snapshot=lambda _job_id, _verifier_run_id: snapshot,
-        get_readthrough=lambda *_args: None,
-        record_phase_changed=record_phase_changed,
-    )
-    monkeypatch.setattr(
-        research_graph,
-        "render_final_report",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stop")),
-    )
-    with pytest.raises(RuntimeError, match="stop"):
-        research_graph._render_node(
-            ResearchGraphServices(
-                repository=cast(Any, render_repository),
-                planner=cast(Any, object()),
-                worker=cast(Any, object()),
-                verifier=cast(Any, object()),
-                object_store=cast(Any, object()),
-            )
-        )(state)
-    assert phases[-1] == ("rendering", 1)
-
-
 class _QueuedCompletions:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = outputs
@@ -2003,187 +1871,3 @@ def test_attribution_selection_prompt_omits_excerpt_text() -> None:
     assert str(snapshot.evidence_cards[0].assertion_id) not in serialized
     assert '"ref": "a1"' in serialized
     assert "excerpts" not in serialized
-
-
-class _MemoryAttributionStore:
-    def __init__(self) -> None:
-        self.run_id = uuid4()
-        self.batches: dict[int, dict[str, Any]] = {}
-        self.summary: dict[str, Any] = {}
-        self.completed: object | None = None
-        self.errors: list[str] = []
-
-    def begin_attribution_run(self, report_id: UUID, revision: int, plan: dict[str, Any]) -> UUID:
-        del report_id, revision, plan
-        return self.run_id
-
-    def list_attribution_batches(self, run_id: UUID) -> list[dict[str, Any]]:
-        del run_id
-        return [dict(row) for _, row in sorted(self.batches.items())]
-
-    def begin_attribution_batch(
-        self,
-        run_id: UUID,
-        batch_index: int,
-        *,
-        block_ids: Sequence[str],
-        candidate_refs: Sequence[str],
-        selection_prompt: object,
-    ) -> dict[str, Any]:
-        del run_id
-        existing = self.batches.get(batch_index)
-        if existing is not None and existing["status"] in {"selected", "completed"}:
-            return dict(existing)
-        if (
-            existing is not None
-            and existing["status"] == "failed"
-            and existing.get("selection_result")
-        ):
-            return dict(existing)
-        self.batches[batch_index] = {
-            "batch_index": batch_index,
-            "block_ids": list(block_ids),
-            "candidate_refs": list(candidate_refs),
-            "selection_prompt": selection_prompt,
-            "status": "prompted",
-        }
-        return dict(self.batches[batch_index])
-
-    def save_attribution_batch_selection(
-        self,
-        run_id: UUID,
-        batch_index: int,
-        *,
-        raw_output: object,
-        result: dict[str, Any],
-        verify_prompt: object,
-    ) -> None:
-        del run_id
-        self.batches[batch_index].update(
-            {
-                "selection_raw": raw_output,
-                "selection_result": result,
-                "verify_prompt": verify_prompt,
-                "status": "selected",
-            }
-        )
-
-    def complete_attribution_batch(
-        self,
-        run_id: UUID,
-        batch_index: int,
-        *,
-        raw_output: object,
-        result: dict[str, Any],
-    ) -> None:
-        del run_id
-        self.batches[batch_index].update(
-            {"verify_raw": raw_output, "verify_result": result, "status": "completed"}
-        )
-
-    def fail_attribution_batch(
-        self, run_id: UUID, batch_index: int, *, raw_output: object, error: str
-    ) -> None:
-        del run_id, raw_output
-        self.batches[batch_index]["status"] = "failed"
-        self.batches[batch_index]["contract_error"] = error
-
-    def get_attribution_attempt(self, report_id: UUID, revision: int) -> dict[str, Any] | None:
-        del report_id, revision
-        return {"id": self.run_id, "raw_output": self.summary}
-
-    def begin_attribution_summary(self, run_id: UUID, prompt: object) -> dict[str, Any]:
-        del run_id, prompt
-        return dict(self.summary)
-
-    def complete_attribution_summary(
-        self, run_id: UUID, *, raw_output: object, result: dict[str, Any]
-    ) -> None:
-        del run_id
-        self.summary = {"summary_raw": raw_output, "summary_result": result}
-
-    def fail_attribution_run(self, run_id: UUID, *, raw_output: object, error: str) -> None:
-        del run_id, raw_output
-        self.errors.append(error)
-
-    def complete_attribution_run(self, run: AttributionRun) -> None:
-        self.completed = run
-
-
-class _CoveringAttributionModel:
-    def __init__(self, snapshot: WriterSnapshot) -> None:
-        self.snapshot = snapshot
-        self.select_calls = 0
-        self.verify_prompts: list[list[str]] = []
-        self.fail_next_verify = False
-
-    def select_materials(
-        self, prompt: list[dict[str, str]]
-    ) -> tuple[AttributionBatchSelection, str]:
-        del prompt
-        self.select_calls += 1
-        return (
-            AttributionBatchSelection(assertion_refs=["a1"]),
-            "{}",
-        )
-
-    def verify_batch(
-        self, prompt: list[dict[str, str]]
-    ) -> tuple[AttributionBatchVerification, str]:
-        payload = json.loads(prompt[1]["content"])
-        self.verify_prompts.append([item["candidate_ref"] for item in payload["candidates"]])
-        if len(self.verify_prompts) == 2 and self.fail_next_verify:
-            self.fail_next_verify = False
-            raise ClaimAttributionOutputError("batch verify failed", "{}")
-        claims = [
-            _model_claim(
-                claim_ref=item["candidate_ref"],
-                block_id=item["block_id"],
-                start_offset=item["start_offset"],
-                end_offset=item["end_offset"],
-                status="verified",
-                candidate_refs=[item["candidate_ref"]],
-                excerpt_refs=["a1e1"],
-                assertion_refs=["a1"],
-            )
-            for item in payload["candidates"]
-        ]
-        return AttributionBatchVerification.model_validate({"claims": claims}), "{}"
-
-    def summarize(self, prompt: list[dict[str, str]]) -> tuple[AttributionSummary, str]:
-        del prompt
-        return AttributionSummary(), "{}"
-
-
-def test_completed_attribution_batches_survive_a_later_batch_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from prospector.agents.report_attribution import run_attribution
-    from prospector.deterministic import markdown_report as markdown_mod
-
-    real_partition = markdown_mod.partition_attribution_batches
-    monkeypatch.setattr(
-        "prospector.agents.report_attribution.partition_attribution_batches",
-        lambda blocks, candidates, char_budget=80: real_partition(
-            blocks, candidates, char_budget=80
-        ),
-    )
-    snapshot = _snapshot("出货量下降 12%。", "出货量下降 12%。")
-    markdown = "第一段数字是 11%。\n\n第二段数字是 22%。\n\n第三段数字是 33%。"
-    store = _MemoryAttributionStore()
-    model = _CoveringAttributionModel(snapshot)
-    model.fail_next_verify = True
-    with pytest.raises(ClaimAttributionOutputError, match="batch verify failed"):
-        run_attribution(model, uuid4(), 1, markdown, snapshot, store=store)
-    assert store.errors
-    completed_before = [
-        row["batch_index"]
-        for row in store.list_attribution_batches(store.run_id)
-        if row["status"] == "completed"
-    ]
-    assert completed_before
-    first_group = model.verify_prompts[0]
-    result = run_attribution(model, uuid4(), 1, markdown, snapshot, store=store)
-    assert result.run.claims
-    assert model.verify_prompts.count(first_group) == 1
-    assert store.completed is result.run

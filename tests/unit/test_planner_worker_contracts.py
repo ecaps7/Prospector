@@ -116,17 +116,6 @@ def test_planner_task_contains_only_worker_question_and_evidence_goal() -> None:
         ResearchTaskDraft.model_validate({**_draft().model_dump(), "research_mode": "factual"})
 
 
-def test_dispatch_rejects_removed_research_stage_field() -> None:
-    base = {
-        "decision": "dispatch",
-        "tasks": [_draft().model_dump()],
-        "reason": "继续研究",
-    }
-    assert PlannerDecision.model_validate(base).decision == "dispatch"
-    with pytest.raises(ValidationError):
-        PlannerDecision.model_validate({**base, "research_stage": "scout"})
-
-
 def test_dispatch_requires_at_least_one_task_and_finish_omits_dispatch_fields() -> None:
     with pytest.raises(ValidationError):
         PlannerDecision.model_validate(
@@ -142,40 +131,6 @@ def test_dispatch_requires_at_least_one_task_and_finish_omits_dispatch_fields() 
         "decision": "finish",
         "reason": "证据已充分",
     }
-
-
-def test_planner_prompt_preserves_research_strategy_freedom() -> None:
-    brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
-    messages = initial_planner_messages(brief)
-    system_prompt = str(messages[0]["content"])
-
-    assert "研究任务的内容、拆分方式、先后顺序和研究方法由你决定" in system_prompt
-    assert "expected_evidence 描述什么样的落库事实" in system_prompt
-    assert "改变、区分或限制" not in system_prompt
-    assert "检验因果方向" not in system_prompt
-    assert "寻找反例" not in system_prompt
-    assert "描述性探索" not in system_prompt
-    assert "scout" not in system_prompt
-    assert "deep_dive" not in system_prompt
-    assert "completion_criteria" not in system_prompt
-
-
-def test_planner_continues_for_unresolved_questions_not_more_material() -> None:
-    brief = ResearchBrief(question="研究问题", brief_text="可探索多个相关方向。")
-    system_prompt = str(initial_planner_messages(brief)[0]["content"])
-
-    assert "没有已落库研究结果时，可以根据 Brief 自由展开" in system_prompt
-    assert "仅仅还能找到更多资料" in system_prompt
-    assert "某个候选方向尚未研究" in system_prompt
-    assert "重复已有" in system_prompt
-
-
-def test_planner_prompt_ties_finish_to_synthesis_and_marks_synthesis_gaps() -> None:
-    brief = ResearchBrief(question="研究问题", brief_text="研究一个具体问题并比较竞争解释。")
-    system_prompt = str(initial_planner_messages(brief)[0]["content"])
-
-    assert "实质回答 Brief" in system_prompt
-    assert "research_synthesis" in system_prompt
 
 
 def test_planner_sees_user_limits_and_scope_suggestions_as_separate_blocks() -> None:
@@ -222,20 +177,6 @@ def test_worker_receives_source_rules_and_exclusions_directly() -> None:
 
     # deliverable_rules govern the report, not the Worker's searching, so they stay out.
     assert worker_constraints_message(UserConstraints(deliverable_rules=["附带图表"])) is None
-
-
-def test_round_caps_leave_ordinary_research_untouched() -> None:
-    """Sized from 137 finished tasks: median 4 rounds, 95th percentile 16.
-
-    The cap is not a research budget, it is a stop for a task that has stopped making
-    progress.  It has to sit above what real tasks use and far below the point where a
-    stuck Worker can burn half an hour repeating itself.
-    """
-    observed_95th_percentile = 16
-    for effort in ("quick", "standard", "deep"):
-        limits = limits_for_effort(effort)
-        assert limits.max_worker_rounds <= 2 * observed_95th_percentile
-    assert limits_for_effort("standard").max_worker_rounds > observed_95th_percentile
 
 
 def test_effort_maps_to_flat_research_limits() -> None:

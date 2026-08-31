@@ -63,11 +63,12 @@ reportMissingImports = true
 reportUnusedImport = true
 
 [tool.pytest.ini_options]
+addopts = "--strict-markers"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "integration: requires docker compose (postgres + minio)",
-    "live: requires real LLM / external API credentials; skipped when unset",
+    "integration: creates disposable PostgreSQL and MinIO services with Docker Compose",
+    "live: paid external-service checks; require --live and configured credentials",
 ]
 asyncio_mode = "auto"
 

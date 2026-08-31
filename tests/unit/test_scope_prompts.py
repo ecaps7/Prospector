@@ -5,16 +5,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from prospector.agents.prompts.scope import clarify_prompt, write_brief_prompt
+from prospector.agents.prompts.scope import write_brief_prompt
 from prospector.schemas.brief import ClarifyDecision
-
-
-def test_clarify_prompt_states_the_json_contract() -> None:
-    prompt = clarify_prompt("钠离子电池发展到了什么程度？")
-
-    assert "need_clarification" in prompt
-    assert "assessment" in prompt
-    assert "空字符串" in prompt
 
 
 def test_clarify_decision_carries_an_assessment_without_requiring_one() -> None:

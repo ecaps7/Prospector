@@ -1,46 +1,31 @@
 # web/AGENTS.md
 
-React 19 + Vite SPA：提问、任务监控、报告、任务列表。API 类型与错误码跟 `src/prospector/api` 对齐，不要在前端发明第二套任务状态机。
+本文件补充[根目录约定](../AGENTS.md)。前端使用 React + TypeScript + Vite；
+展示边界见 [design §6](../docs/design.md#6-对外交付与展示边界)，启动方式见 [usage](../docs/usage.md)。
 
-## Commands
+## 代码边界
+
+以下路径相对于 `web/src/`：
+
+- `api/` 集中处理 REST/SSE 与类型，和后端 `src/prospector/api/` 对齐；不要另定义 Job 状态或把报告核验失败当成任务执行失败。
+- `state/` 保存事件处理和展示计算的纯函数；页面负责取数、订阅与编排，组件按职责和复用范围拆分。
+- 正文使用后端 Markdown，不重算引用编号；审计 JSON 只为引用抽屉补充证据，不作为另一份正文或直接展示审计明细。
+- 报告按不可信内容处理：禁止渲染原始 HTML，链接仅允许 http/https/mailto，不得放宽这些限制。
+- 状态颜色集中在 `lib/status.ts`，样式集中在 `styles/app.css`；沿用现有组件和样式，不额外引入状态管理库、UI 库或样式体系。
+
+## 检查
+
+修改前端后，在 `web/` 运行：
 
 ```bash
-npm ci
-npm run dev      # 开发；/api 代理到 http://127.0.0.1:7620
-npm run build    # tsc -b && vite build → dist/，供 prospector serve 托管
-npm run lint     # oxlint src
+npx playwright install chromium  # 首次或 Playwright 升级后
+npm run lint
+npm test
+npm run build
 ```
 
-改 UI 后跑 `npm run build`。`dist/` 是服务端静态资源，不要手改打包文件。
+`npm test` 包含纯函数/SSE 测试和 Chromium 交互测试；API 响应受测试控制，不需要真实后端。
+浏览器测试使用 4173 端口，不复用已有开发服务。
 
-## Layout
-
-```
-api/         REST / SSE 客户端与响应类型
-state/       事件折叠、时间线投影、预算换算（纯函数，无 DOM）
-lib/         无状态工具：status.ts（状态→色彩）、format.ts（数字/时钟/日期）
-components/
-  ui/        跨页原语：StatusDot、Tag、Chip、Meter、Spinner、AutoGrowTextarea…
-  ask|monitor|report|jobs/   单页私有组件
-  *.tsx      框架级组件：TopBar、JobBar、Toast、Segmented
-pages/       只做编排：取数、订阅、状态机、把数据喂给组件
-styles/app.css   全站唯一样式表
-```
-
-- 组件放哪由复用范围决定：两个以上页面用到才升到 `ui/`，否则留在页面自己的目录。
-- 页面文件里出现大段 JSX 就该往下拆。`pages/` 剩下的行数应当是编排逻辑，不是标记。
-
-## Boundaries
-
-- 认证头与 REST/SSE 契约以现有 `src/api/client.ts`、`src/api/sse.ts` 为准。
-- 报告正文是后端交付的一份 Markdown（`GET /api/jobs/{id}/report?format=md`）：`[^N]` 角标已经
-  插好，末尾带「来源」节，编号由 `deterministic/citation_render.py` 算定。前端只显示，不重算
-  编号——角标和来源靠「网址 + 快照版本」认回同一条，那正是后端编号时用的钥匙。
-- `format=json` 是审计文档，不是正文：其中有核对情况、没找到出处的跨度、每条出处的存档原文和
-  判定 `verified` / `partial` / `failed`。报告页不展示这些审计摘要或明细；只在读者点开正文角标时，
-  用其中的存档原文补充该来源。
-- 正文由 marked 渲染。报告的字句来自抓回来的网页，所以 `renderReportBody` 把原始 HTML 一律
-  丢掉、链接只放行 http/https/mailto——改那个函数时别把这两道口子改松了。
-- 任务状态到颜色的映射只有 `lib/status.ts` 一处。不要在页面里手写 `status === "completed" ? …` 的 if 链——这类映射散开过一次，三份实现对 `running` 和 `completed` 已经给出不同结果。
-- 样式是 `app.css` 里的全局语义类，组件只负责挂 className。抽组件时保持渲染出的 DOM 与 className 不变，改动才可以用「页面长得完全一样」来验证。
-- 不要引入状态管理库、UI 组件库或第二套样式方案（CSS Modules / Tailwind / CSS-in-JS），除非现有页面明显撑不住。
+涉及交互或样式时还需检查实际页面；纯重构应保持行为和外观不变。
+`dist/` 是构建产物，由 `prospector serve` 托管，不要手动修改。

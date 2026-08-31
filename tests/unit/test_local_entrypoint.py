@@ -71,7 +71,7 @@ def test_a_finished_local_run_closes_the_job_row(monkeypatch: pytest.MonkeyPatch
     """
     calls: list[tuple[str, UUID, Any]] = []
     stopped: list[bool] = []
-    result = {"outcome": "draft_rendered", "phase": "draft_rendered"}
+    result = {"outcome": "report_rendered", "phase": "report_rendered"}
     _patch_graph(monkeypatch, calls, stopped, result=result)
     job_id = uuid4()
 

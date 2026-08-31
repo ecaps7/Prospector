@@ -16,6 +16,8 @@ htmlcov/
 .worktrees/
 web/node_modules/
 web/*.local
+web/test-results/
+web/playwright-report/
 .claude
 
 # Local debugging artifacts (DB dumps, one-off scripts).

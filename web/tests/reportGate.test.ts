@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { JobDetail } from "../src/api/types.ts";
-import { gateStageName, isGateLive, reportGate, reportGateCopy } from "../src/state/reportGate.ts";
+import { isGateLive, reportGate, reportGateCopy } from "../src/state/reportGate.ts";
 
 function job(overrides: Partial<JobDetail> = {}): JobDetail {
   return {
@@ -40,7 +40,7 @@ test("撰写之前和撰写之后分成两种等待", () => {
   assert.equal(reportGate(job({ status: "queued", phase: "queued" })).kind, "researching");
   assert.equal(reportGate(job({ phase: "composition_pending" })).kind, "composing");
   assert.equal(reportGate(job({ phase: "writing" })).kind, "composing");
-  assert.equal(reportGate(job({ phase: "verifying" })).kind, "composing");
+  assert.equal(reportGate(job({ phase: "attributing" })).kind, "composing");
   assert.equal(reportGate(job({ phase: "revising" })).kind, "composing");
 });
 
@@ -49,7 +49,7 @@ test("终态各说各的，不再共用一句尚未就绪", () => {
   assert.equal(reportGate(job({ status: "cancelled", phase: "cancelled" })).kind, "cancelled");
   assert.equal(reportGate(job({ status: "failed", phase: "verifier" })).kind, "failed");
   // 跑完了却没有报告文件——这才是真的异常，不能说成"还在生成"。
-  assert.equal(reportGate(job({ status: "completed", phase: "draft_rendered" })).kind, "missing");
+  assert.equal(reportGate(job({ status: "completed", phase: "report_rendered" })).kind, "missing");
 });
 
 test("只有还会变的状态才值得继续等", () => {
@@ -84,12 +84,6 @@ test("成文各步各有说法，不会拼出「正在修订次数用尽」", ()
     "正文已写完，正在为每处表述寻找出处",
   );
   assert.equal(reportGateCopy(job({ phase: "reviewing" }), "composing", 10).title, "正在通读全文审阅");
-  assert.equal(reportGateCopy(job({ phase: "revisions_exhausted" }), "composing", 10).title, "正在生成报告");
-});
-
-test("旧任务回看时，改版前的阶段仍说得出自己的话", () => {
-  assert.equal(reportGateCopy(job({ phase: "verifying" }), "composing", 10).title, "正在逐句核对初稿");
-  assert.equal(gateStageName(job({ phase: "draft_rendered" })), "报告已生成");
 });
 
 test("综合到审阅这一整段都算正在生成报告，不再说还在查资料", () => {

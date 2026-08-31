@@ -48,8 +48,8 @@ class FakeRepository:
                 "decision_round": None,
                 "payload": {
                     "status": "completed",
-                    "phase": "draft_rendered",
-                    "outcome": "draft_rendered",
+                    "phase": "report_rendered",
+                    "outcome": "report_rendered",
                     "error_code": None,
                     "report_markdown_ref": "s3://reports/workspace/report.md",
                     "report_json_ref": None,
@@ -183,8 +183,8 @@ def test_encoded_job_stopped_matches_published_event_schema() -> None:
             "event_type": "job.stopped",
             "payload": {
                 "status": "completed",
-                "phase": "draft_rendered",
-                "outcome": "draft_rendered",
+                "phase": "report_rendered",
+                "outcome": "report_rendered",
                 "error_code": None,
                 "report_markdown_ref": "s3://reports/workspace/report.md",
                 "report_json_ref": None,

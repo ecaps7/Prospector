@@ -13,7 +13,7 @@ from prospector.cli.client import ProspectorClient
 from prospector.schemas.brief import ResearchBrief, ScopeOutcome
 
 
-def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> None:
+def test_confirmed_brief_is_submitted_and_delivered_report_is_saved(monkeypatch, tmp_path: Path):
     job_id = uuid4()
     brief_id = uuid4()
     now = datetime.now(UTC)
@@ -63,8 +63,8 @@ def test_root_console_runs_http_sse_report_flow(monkeypatch, tmp_path: Path) -> 
                             "event_type": "job.stopped",
                             "payload": {
                                 "status": "completed",
-                                "phase": "draft_rendered",
-                                "outcome": "draft_rendered",
+                                "phase": "report_rendered",
+                                "outcome": "report_rendered",
                                 "error_code": None,
                                 "report_markdown_ref": "s3://reports/report.md",
                                 "report_json_ref": None,

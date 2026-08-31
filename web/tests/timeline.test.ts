@@ -112,7 +112,7 @@ test("a completed job keeps status, phase and outcome apart", () => {
     lines([
       event(1, "job.stopped", {
         status: "completed",
-        phase: "draft_rendered",
+        phase: "report_rendered",
         outcome: "verified",
       }),
     ]),

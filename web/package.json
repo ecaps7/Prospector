@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint src",
-    "test": "node --experimental-strip-types --import ./tests/register-hooks.mjs --test tests/*.test.ts",
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "node --experimental-strip-types --import ./tests/register-hooks.mjs --test tests/*.test.ts",
+    "test:browser": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -17,6 +19,7 @@
     "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

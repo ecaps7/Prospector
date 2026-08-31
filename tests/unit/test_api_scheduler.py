@@ -99,7 +99,7 @@ async def test_scheduler_reports_first_running_then_fifo_queued() -> None:
         if len(run_order) == 1:
             first_started.set()
             assert release_first.wait(timeout=2)
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()
@@ -136,7 +136,7 @@ async def test_scheduler_leaves_an_interrupted_job_recoverable() -> None:
         if not interrupted:
             interrupted.append(job_id)
             raise RuntimeError("transient execution error")
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()
@@ -189,7 +189,7 @@ async def test_startup_recovery_normalizes_extra_running_jobs_to_fifo_queue() ->
         if job_id == first_id:
             first_started.set()
             assert release_first.wait(timeout=2)
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job, recover_on_start=True)  # type: ignore[arg-type]
     await scheduler.start()
@@ -214,7 +214,7 @@ async def test_scheduler_does_not_recover_jobs_on_start_by_default() -> None:
 
     def run_job(job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
         executed.append(job_id)
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()
@@ -236,7 +236,7 @@ async def test_scheduler_cancels_running_job_instead_of_completing_it() -> None:
     def run_job(_job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
         started.set()
         assert release.wait(timeout=2)
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()
@@ -283,7 +283,7 @@ async def test_pending_cancellations_are_swept_even_when_recovery_is_off() -> No
     repository = FakeJobRepository()
 
     def run_job(_job_id: UUID, _brief_id: UUID) -> dict[str, Any]:
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     assert scheduler.recover_on_start is False
@@ -308,7 +308,7 @@ async def test_one_finalization_failure_does_not_kill_later_jobs() -> None:
         if len(run_order) == 1:
             first_started.set()
             assert release_first.wait(timeout=2)
-        return {"phase": "draft_rendered", "outcome": "draft_rendered"}
+        return {"phase": "report_rendered", "outcome": "report_rendered"}
 
     scheduler = JobScheduler(repository, run_job)  # type: ignore[arg-type]
     await scheduler.start()

@@ -1366,8 +1366,12 @@ def run_attribution(
         # in the pipeline: five batches took 2589s in sequence and 627s at their slowest.
         # Each batch still makes its two calls in order; only the batches overlap.
         results: list[tuple[list[tuple[AcceptedClaim, ClaimSpan]], list[dict[str, Any]], object]]
-        if len(plan.batches) == 1:
-            results = [_run_one_batch(model, plan, plan.batches[0], snapshot, store, run_id)]
+        if len(plan.batches) <= 1:
+            # No changed blocks means no batch calls, not a completed attribution run:
+            # prior failures, carried results and persistence still need processing below.
+            results = [
+                _run_one_batch(model, plan, spec, snapshot, store, run_id) for spec in plan.batches
+            ]
         else:
             with ThreadPoolExecutor(max_workers=len(plan.batches)) as pool:
                 futures = [

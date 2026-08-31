@@ -109,8 +109,8 @@ def test_job_view_folds_task_progress_usage_and_terminal_state() -> None:
             "job.stopped",
             {
                 "status": "completed",
-                "phase": "draft_rendered",
-                "outcome": "draft_rendered",
+                "phase": "report_rendered",
+                "outcome": "report_rendered",
                 "error_code": None,
             },
         )

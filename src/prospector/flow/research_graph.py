@@ -686,6 +686,7 @@ def _verifier_node(services: ResearchGraphServices):
         job_id = UUID(state["job_id"])
         plan_version = int(state["plan_version"])
         decision_round = int(state["decision_round"])
+        research_decisions_used = int(state["research_decisions_used"])
         trigger = state.get("verifier_trigger")
         if trigger not in {"planner_finish", "budget_exhausted", "synthesis_gap"}:
             raise RuntimeError("Verifier entered without a valid trigger")
@@ -715,6 +716,7 @@ def _verifier_node(services: ResearchGraphServices):
                 job_id,
                 trigger=trigger,
                 decision_round=decision_round,
+                research_decisions_used=research_decisions_used,
                 decision_round_limit=int(state["decision_round_limit"]),
                 synthesis_request=synthesis_request,
             )
@@ -763,7 +765,7 @@ def _verifier_node(services: ResearchGraphServices):
                 raw_output=model_result.raw_output,
                 evaluated_plan_version=plan_version,
                 decision_round=decision_round,
-                research_decisions_used=int(state["research_decisions_used"]),
+                research_decisions_used=research_decisions_used,
             )
             major_gap_count = sum(gap.severity == "major" for gap in decision.gaps)
             log.debug(
@@ -787,7 +789,7 @@ def _verifier_node(services: ResearchGraphServices):
             follow_up = (
                 follow_up_research_gaps(
                     decision.gaps,
-                    research_decisions_used=int(state["research_decisions_used"]),
+                    research_decisions_used=research_decisions_used,
                     decision_round_limit=int(state["decision_round_limit"]),
                     already_used=bool(state.get("follow_up_research_used", False)),
                 )
@@ -822,7 +824,7 @@ def _verifier_node(services: ResearchGraphServices):
                 "route": "writer" if trigger == "synthesis_gap" else "synthesis",
             }
 
-        rounds_remaining = int(state["decision_round_limit"]) - decision_round
+        rounds_remaining = int(state["decision_round_limit"]) - research_decisions_used
         if rounds_remaining <= 0:
             services.repository.set_research_outcome(
                 job_id,

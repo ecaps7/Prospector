@@ -83,8 +83,8 @@ def test_attach_plain_refreshes_tasks_and_downloads_report(
             event_type="job.stopped",
             payload={
                 "status": "completed",
-                "phase": "draft_rendered",
-                "outcome": "draft_rendered",
+                "phase": "report_rendered",
+                "outcome": "report_rendered",
                 "error_code": None,
             },
             task_id=None,

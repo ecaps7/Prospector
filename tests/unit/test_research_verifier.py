@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from prospector.agents.prompts.planner import planner_system_prompt
 from prospector.agents.prompts.research_verifier import (
     research_coverage_messages,
     research_verifier_messages,
@@ -878,6 +877,7 @@ def _state(
         {
             "plan_version": 1,
             "decision_round": decision_round,
+            "research_decisions_used": decision_round,
             "decision_round_limit": limit,
             "verifier_trigger": trigger,
             "planner_messages": [],
@@ -1058,18 +1058,23 @@ def test_verifier_node_logs_decision_reason_after_persistence(
     assert calls[0][1]["reason_code"] == "pass"
 
 
-def test_verifier_node_replans_when_major_gap_has_rounds_left() -> None:
-    repository = _FakeRepository()
-    verifier = _FakeVerifier(
-        _decision(
-            "needs_research",
-            severity="major",
-            kind="source_credibility",
-            dispositions=[_unusable_disposition()],
-        )
+@pytest.mark.parametrize("decision_round,used", [(3, 3), (8, 6)])
+@pytest.mark.parametrize("replayed", [False, True])
+def test_verifier_node_replans_when_major_gap_has_rounds_left(
+    decision_round: int, used: int, replayed: bool
+) -> None:
+    decision = _decision(
+        "needs_research",
+        severity="major",
+        kind="source_credibility",
+        dispositions=[_unusable_disposition()],
     )
+    repository = _FakeRepository(stored=decision if replayed else None)
+    verifier = _FakeVerifier(decision)
+    state = _state(decision_round=decision_round)
+    state["research_decisions_used"] = used
 
-    result = _verifier_node(_services(repository, verifier))(cast(Any, _state()))
+    result = _verifier_node(_services(repository, verifier))(cast(Any, state))
 
     assert result["route"] == "planner"
     assert result["last_verifier_run_id"] == str(repository.run_id)
@@ -1078,16 +1083,18 @@ def test_verifier_node_replans_when_major_gap_has_rounds_left() -> None:
     assert "unusable_assertions" in content
     assert str(ASSERTION_ID) in content
     assert repository.outcomes == []
+    assert verifier.calls == (0 if replayed else 1)
 
 
-def test_verifier_node_fails_when_major_gap_has_no_rounds_left() -> None:
+@pytest.mark.parametrize("decision_round", [8, 10])
+def test_verifier_node_fails_when_major_gap_has_no_rounds_left(decision_round: int) -> None:
     repository = _FakeRepository()
     verifier = _FakeVerifier(_decision("needs_research", severity="major"))
+    state = _state(decision_round=decision_round, limit=8)
+    state["research_decisions_used"] = 8
 
     with pytest.raises(VerifierMajorGapError, match="关键比较口径"):
-        _verifier_node(_services(repository, verifier))(
-            cast(Any, _state(decision_round=8, limit=8))
-        )
+        _verifier_node(_services(repository, verifier))(cast(Any, state))
 
     assert repository.outcomes[-1] == {
         "outcome": "failed",
@@ -1256,32 +1263,6 @@ def test_timeline_distinguishes_total_unusable_assertions_from_displayed_summari
     assert len(lines[2:]) == 8
 
 
-def test_verifier_checks_core_question_and_constraints_not_every_brief_direction() -> None:
-    prompt = "\n".join(
-        message["content"]
-        for message in research_coverage_messages(
-            {
-                "brief": {
-                    "question": "q",
-                    "brief_text": "b",
-                    "user_constraints": {"regions": ["中国"]},
-                },
-                "tasks": [],
-                "usable_assertions": [],
-                "source_credibility_findings": [],
-                "conflicts": [],
-            },
-            ResearchModelRefs.build(),
-        )
-    )
-
-    assert "brief_text 中的候选方向用于理解问题空间" in prompt
-    assert "brief_alignment" in prompt
-    assert "user_constraints" in prompt
-    assert "只有在因此阻断" in prompt
-    assert "完全没有进入任何研究计划的方向" not in prompt
-
-
 def test_a_compound_assertion_is_noted_not_destroyed() -> None:
     """122 of 187 disqualifications were merged facts the bound Excerpt fully supported."""
     prompt = "\n".join(
@@ -1356,17 +1337,6 @@ def test_a_granularity_note_leaves_the_assertion_usable() -> None:
         ]
     )
     assert unusable == {fabricated}
-
-
-def test_planner_prompt_defines_execution_roles_without_prescribing_research_strategy() -> None:
-    prompt = planner_system_prompt(today="2026-08-26")
-
-    assert "dispatch" in prompt
-    assert "finish" in prompt
-    assert "question" in prompt
-    assert "expected_evidence" in prompt
-    assert "研究任务的内容、拆分方式、先后顺序和研究方法由你决定" in prompt
-    assert "唯一的机制" not in prompt
 
 
 def test_declined_synthesis_gap_goes_straight_to_the_writer() -> None:

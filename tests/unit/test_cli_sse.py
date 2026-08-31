@@ -66,8 +66,8 @@ def test_follow_events_reconnects_with_last_complete_event_id() -> None:
                 "job.stopped",
                 {
                     "status": "completed",
-                    "phase": "draft_rendered",
-                    "outcome": "draft_rendered",
+                    "phase": "report_rendered",
+                    "outcome": "report_rendered",
                     "error_code": None,
                 },
             )
